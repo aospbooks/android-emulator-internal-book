@@ -1,0 +1,66 @@
+/* PDF export styles for mkdocs-exporter (Paged.js) */
+
+@page {
+  size: A4;
+  margin: 1.8cm 1.5cm;
+}
+
+/* Keep mermaid diagrams on one page — never split across pages */
+.mermaid,
+div.mermaid {
+  break-inside: avoid;
+  page-break-inside: avoid;
+  margin: 1em 0;
+}
+
+/* Scale large mermaid SVGs to fit within page bounds */
+.mermaid svg,
+div.mermaid svg {
+  max-width: 100% !important;
+  max-height: 24cm !important; /* A4 height (29.7cm) minus margins (3.6cm) minus buffer */
+  width: auto !important;
+  height: auto !important;
+  object-fit: contain;
+}
+
+/* Keep code blocks on one page when possible */
+pre,
+.highlight {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Keep tables on one page when possible */
+table {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Keep admonitions intact */
+.admonition,
+details {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Force page break before each chapter heading */
+h1 {
+  break-before: page;
+  page-break-before: always;
+}
+
+/* Avoid orphan headings at bottom of page */
+h2, h3, h4 {
+  break-after: avoid;
+  page-break-after: avoid;
+}
+
+/* Hide site navigation and zoom overlay in PDF */
+.md-sidebar,
+.md-header,
+.md-footer,
+.md-tabs,
+#mermaid-zoom-overlay,
+.mermaid-zoom-toolbar {
+  display: none !important;
+}

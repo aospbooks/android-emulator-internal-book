@@ -1,0 +1,180 @@
+/* Zoom overlay — covers entire viewport */
+#mermaid-zoom-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.88);
+  z-index: 99999;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* Toolbar */
+.mermaid-zoom-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 18px;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 8px;
+  margin: 16px 0;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+  user-select: none;
+  z-index: 100000;
+}
+
+.mermaid-zoom-toolbar button {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mermaid-zoom-toolbar button:hover {
+  background: #e0e0e0;
+}
+
+#mzm-level {
+  min-width: 48px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+/* Scroll container — fills available space; produces scrollbars when the
+   wrapper grows past the viewport (i.e. when zoom * SVG size exceeds box). */
+#mzm-box {
+  flex: 1;
+  width: 100%;
+  overflow: auto;
+}
+
+/* Wrapper — at least viewport-sized so flex centering keeps small SVGs in
+   the middle; grows beyond viewport when SVG style.width/height exceeds it. */
+#mzm-wrap {
+  min-width: 100%;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+/* SVG — sized via JS-set style.width/height (vector re-render at every step).
+   flex-shrink:0 prevents the flex container from squashing it back to fit. */
+#mzm-wrap svg {
+  background: white;
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+/* Fix black node labels: Material theme CSS bleeds into mermaid's
+   <foreignObject> HTML content inside SVGs. Reset backgrounds so
+   node labels are visible against the themed rect fills. */
+.mermaid svg foreignObject > * {
+  background: transparent !important;
+  background-color: transparent !important;
+  color-scheme: light !important;
+}
+
+.mermaid svg .nodeLabel,
+.mermaid svg .edgeLabel,
+.mermaid svg .label {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* Center mermaid diagrams horizontally on the page. The rendered <svg> sits
+   inside <div class="mermaid">; default block-level layout left-aligns it,
+   even when narrower than the content column. text-align:center on the
+   container plus display:block + margin auto on the SVG handles both the
+   inline-SVG and inline-block cases mermaid emits. */
+div.mermaid {
+  text-align: center;
+}
+
+div.mermaid > svg {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Clickable hint on diagrams */
+div.mermaid[data-zoomable] {
+  cursor: pointer;
+  transition: outline 0.15s;
+}
+
+div.mermaid[data-zoomable]:hover {
+  outline: 2px solid #4CAF50;
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* Dark-mode overrides for the zoom overlay. Material's slate scheme sets
+   data-md-color-scheme="slate" on <body>; we drive everything off Material's
+   own CSS variables so the toolbar and SVG canvas track the page theme. */
+[data-md-color-scheme="slate"] #mzm-wrap svg {
+  background: var(--md-default-bg-color);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.8);
+}
+
+[data-md-color-scheme="slate"] .mermaid-zoom-toolbar {
+  background: var(--md-default-bg-color);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+}
+
+[data-md-color-scheme="slate"] .mermaid-zoom-toolbar button {
+  background: var(--md-default-bg-color);
+  border-color: var(--md-default-fg-color--lighter);
+  color: var(--md-default-fg-color);
+}
+
+[data-md-color-scheme="slate"] .mermaid-zoom-toolbar button:hover {
+  background: var(--md-default-fg-color--lightest);
+}
+
+[data-md-color-scheme="slate"] #mzm-level {
+  color: var(--md-default-fg-color);
+}
+
+/* In dark mode the SVG background becomes dark, so don't force the
+   foreignObject content to render as light — let Material's mermaid label
+   colors keep their natural contrast against the dark canvas. */
+[data-md-color-scheme="slate"] .mermaid svg foreignObject > * {
+  color-scheme: dark !important;
+}
+
+/* Header / top bar dark-mode adaptation. Material keeps the primary color
+   (green) in the header for both schemes by design; this override switches
+   the header to the page background under slate so the search input area
+   stops looking out of place against the dark content. */
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+[data-md-color-scheme="slate"] .md-search__form {
+  background-color: var(--md-default-fg-color--lightest);
+}
+
+[data-md-color-scheme="slate"] .md-search__form:hover {
+  background-color: var(--md-default-fg-color--lighter);
+}

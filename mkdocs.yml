@@ -1,0 +1,129 @@
+site_name: "Android Emulator Internals"
+site_description: "A Developer's Guide to the Android Emulator"
+site_url: "https://aospbooks.github.io/android-emulator-internal-book/"
+docs_dir: "docs"
+site_dir: "site"
+
+theme:
+  name: material
+  custom_dir: overrides
+  favicon: favicon.png
+  logo: favicon.png
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - scheme: default
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+markdown_extensions:
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path:
+        - .
+      check_paths: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+plugins:
+  - search
+  - pdf-generate:
+      enabled: !ENV [MKDOCS_PDF, false]
+      concurrency: 8
+      output: android-emulator-internals.pdf
+      timeout: 30000
+      stylesheets:
+        - docs/stylesheets/pdf.css
+  - epub-generate:
+      enabled: !ENV [MKDOCS_EPUB, false]
+      output: android-emulator-internals.epub
+      timeout: 30000
+      stylesheets:
+        - docs/stylesheets/epub.css
+
+extra_javascript:
+  - javascripts/mermaid-zoom.js?v=6
+
+extra_css:
+  - stylesheets/mermaid-zoom.css?v=8
+
+nav:
+  - Introduction: index.md
+  - Frontmatter: 00-frontmatter.md
+  - "Part I: Getting Started":
+    - "1. Introduction": 01-introduction.md
+    - "2. Source Code & Build System": 02-source-and-build.md
+    - "3. Running the Emulator": 03-running-the-emulator.md
+  - "Part II: QEMU & Virtualization":
+    - "4. The QEMU Fork": 04-qemu-fork.md
+    - "5. CPU Acceleration": 05-cpu-acceleration.md
+    - "6. Virtual Hardware & virtio": 06-virtual-hardware.md
+  - "Part III: Core Emulation":
+    - "7. android-emu Architecture": 07-android-emu-architecture.md
+    - "8. Console & gRPC Control Plane": 08-console-and-grpc.md
+    - "9. Snapshots & Quickboot": 09-snapshots-and-quickboot.md
+    - "10. Sensors, Battery & Location": 10-sensors-battery-location.md
+  - "Part IV: Graphics":
+    - "11. Graphics Architecture": 11-graphics-architecture.md
+    - "12. Guest GPU Drivers": 12-guest-gpu-drivers.md
+    - "13. Host Rendering": 13-host-rendering.md
+    - "14. gfxstream Protocol": 14-gfxstream-protocol.md
+  - "Part V: Media & Display":
+    - "15. Audio": 15-audio.md
+    - "16. Camera": 16-camera.md
+    - "17. Display & Multi-Display": 17-display.md
+  - "Part VI: Connectivity":
+    - "18. Networking": 18-networking.md
+    - "19. Bluetooth": 19-bluetooth.md
+    - "20. ADB Integration": 20-adb-integration.md
+    - "21. Modem & Telephony": 21-modem-telephony.md
+  - "Part VII: UI & Streaming":
+    - "22. The Qt UI": 22-qt-ui.md
+    - "23. WebRTC & the Embedded Emulator": 23-webrtc-streaming.md
+  - "Part VIII: Guest Integration":
+    - "24. System Images & the Goldfish HAL": 24-system-images-hal.md
+    - "25. Guest Boot": 25-guest-boot.md
+  - "Part IX: Cuttlefish":
+    - "26. Cuttlefish & crosvm": 26-cuttlefish.md
+  - "Part X: Infrastructure":
+    - "27. Testing": 27-testing.md
+    - "28. Debugging, Tracing & Crash Reporting": 28-debugging-tracing.md
+  - Appendices:
+    - "A. Key Files Reference": A-appendix-key-files.md
+    - "B. Glossary": B-appendix-glossary.md

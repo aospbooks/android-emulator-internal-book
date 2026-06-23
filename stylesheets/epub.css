@@ -1,0 +1,79 @@
+/* stylesheets/epub.css — EPUB-specific styles */
+
+/* Base typography */
+body {
+  font-family: serif;
+  line-height: 1.6;
+  color: #1b1b1b;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: sans-serif;
+  color: #1b5e20;
+}
+
+/* Mermaid SVGs */
+.mermaid-svg {
+  text-align: center;
+  margin: 1em 0;
+}
+.mermaid-svg img {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  max-height: 85vh;
+  width: auto;
+  height: auto;
+}
+
+/* Tables */
+table {
+  border-collapse: collapse;
+  border: 1px solid #616161;
+  width: 100%;
+  margin: 1em 0;
+}
+th, td {
+  border: 1px solid #9e9e9e;
+  padding: 6px 10px;
+}
+th {
+  background-color: #e8f5e9;
+  font-weight: 600;
+  border-bottom: 2px solid #616161;
+}
+tr:nth-child(even) td {
+  background-color: #fafafa;
+}
+
+/* Code blocks */
+pre, .highlight pre {
+  background-color: #f5f5f5;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+code {
+  background-color: #f5f5f5;
+  font-family: monospace;
+}
+:not(pre) > code {
+  background-color: #eeeeee;
+  border: 1px solid #e0e0e0;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* Admonitions */
+.admonition, details {
+  border-left: 4px solid #4CAF50;
+  padding: 0.5em 1em;
+  margin: 1em 0;
+  background-color: #f5f5f5;
+}
+.admonition-title, summary {
+  font-weight: 600;
+  color: #1b5e20;
+}

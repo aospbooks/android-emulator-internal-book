@@ -1,0 +1,12 @@
+site/
+docs/
+.git/
+.github/
+.claude/
+CLAUDE.md
+README.md
+Dockerfile
+docker-compose.yml
+.gitignore
+.gitattributes
+.dockerignore

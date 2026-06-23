@@ -1,0 +1,33 @@
+# Build output
+/site/
+/docs/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Mermaid SVG cache (pdf-generate plugin)
+.mermaid-cache/
+
+# Mermaid PNG renders (./serve.sh png — visual review only)
+.mermaid-png/
+
+# Claude Code runtime state
+.claude/scheduled_tasks.lock
+
+# Superpowers session artifacts (specs + plans; not part of book content)
+.superpowers/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

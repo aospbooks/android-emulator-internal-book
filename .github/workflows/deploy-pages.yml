@@ -1,0 +1,76 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - '**.png'
+      - 'mkdocs.yml'
+      - 'docs/**'
+      - 'stylesheets/**'
+      - 'javascripts/**'
+      - 'overrides/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MkDocs and local plugins
+        run: |
+          pip install mkdocs-material pymdown-extensions
+          pip install ./mkdocs-mermaid-renderer
+          pip install ./mkdocs-pdf-generate ./mkdocs-epub-generate
+
+      - name: Create docs symlinks
+        run: |
+          mkdir -p docs
+          for f in [0-9]*.md [A-Z]-*.md index.md favicon.png; do
+            ln -sf "../$f" "docs/$f"
+          done
+          ln -sfn ../javascripts docs/javascripts
+          ln -sfn ../stylesheets docs/stylesheets
+          echo "Linked $(ls docs/ | wc -l) entries"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build site
+        run: mkdocs build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

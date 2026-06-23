@@ -1,0 +1,48 @@
+name: Build Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - '**.png'
+      - 'mkdocs.yml'
+      - '.github/workflows/build-test.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MkDocs
+        run: pip install mkdocs-material pymdown-extensions
+
+      - name: Create docs symlinks
+        run: |
+          mkdir -p docs
+          for f in [0-9]*.md [A-Z]-*.md index.md favicon.png; do
+            ln -sf "../$f" "docs/$f"
+          done
+          ln -sfn ../javascripts docs/javascripts
+          ln -sfn ../stylesheets docs/stylesheets
+          echo "Linked $(ls docs/ | wc -l) entries"
+
+      - name: Build site
+        run: mkdocs build 2>&1 | tail -20
+
+      - name: Verify output
+        run: |
+          echo "Pages: $(find site -name '*.html' | wc -l)"
+          echo "Size: $(du -sh site/ | cut -f1)"

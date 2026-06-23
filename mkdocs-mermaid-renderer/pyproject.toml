@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mkdocs-mermaid-renderer"
+version = "0.1.0"
+description = "Shared Mermaid SVG renderer with Playwright and caching"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = [
+    "playwright>=1.40",
+]
+
+[tool.setuptools.packages.find]
+include = ["mkdocs_mermaid_renderer*"]

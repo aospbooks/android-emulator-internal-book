@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mkdocs-pdf-generate"
+version = "0.1.0"
+description = "Fast PDF export for MkDocs with pre-rendered Mermaid diagrams"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = [
+    "mkdocs>=1.5",
+    "mkdocs-mermaid-renderer",
+    "playwright>=1.40",
+    "pypdf>=4.0",
+]
+
+[project.entry-points."mkdocs.plugins"]
+pdf-generate = "mkdocs_pdf_generate.plugin:PdfGeneratePlugin"
+
+[tool.setuptools.packages.find]
+include = ["mkdocs_pdf_generate*"]

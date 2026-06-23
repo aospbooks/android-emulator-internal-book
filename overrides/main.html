@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block libs %}
+<script>
+// Force mermaid shadow roots to be "open" so zoom can access SVGs.
+// Must run before Material's bundle which uses attachShadow({mode:"closed"}).
+;(function () {
+  var orig = Element.prototype.attachShadow
+  Element.prototype.attachShadow = function (init) {
+    if (this.classList && this.classList.contains('mermaid')) {
+      init = Object.assign({}, init, { mode: 'open' })
+    }
+    return orig.call(this, init)
+  }
+})()
+</script>
+{{ super() }}
+{% endblock %}
