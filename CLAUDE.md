@@ -13,11 +13,11 @@ docker compose up -d serve         # http://localhost:8001
 ## Privacy & Path Rules (READ FIRST)
 
 1. **Never expose a local absolute path or personal information in committed
-   content.** No `/home/<user>/...`, no machine names, no usernames, no email
+   content.** No home-directory paths, no machine names, no usernames, no email
    addresses anywhere in chapters, config, diagrams, or commit messages. Source
    references must be **repo-relative paths within the emulator tree**, e.g.
-   `external/qemu/android/android-emu/android/console.cpp`, never
-   `/home/.../emu-main-dev/external/qemu/...`.
+   `external/qemu/android/android-emu/android/console.cpp` — never an absolute
+   path that includes the local checkout's directories.
 2. The emulator source lives outside this repo. When citing it, strip everything
    up to **and including** the superproject root directory so the path starts at
    a top-level project dir (`external/`, `hardware/`, `tools/`, `device/`,
