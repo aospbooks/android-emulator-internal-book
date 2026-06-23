@@ -242,7 +242,7 @@ The event router branches three ways:
 
 1. Key and text events go to `skin_keyboard_process_event`, which applies the charmap and emits guest keycodes (`ui.c:297`, `:303`, `:316`).
 2. Generic events (lid switch, etc.) go to `skin_generic_event_process_event` (`ui.c:310`).
-3. Mouse, wheel, rotary, and pointer-tracking events go to `skin_window_process_event`; touch events go to `skin_window_process_touch_event`; pen events to `skin_window_process_pen_event` (`ui.c:319` to `:378`).
+3. Mouse, wheel, rotary, and pointer-tracking events go to `skin_window_process_event`; touch events go to `skin_window_process_touch_event`; pen events to `skin_window_process_pen_event` (`ui.c:319` to `:391`).
 
 ### 22.5.1 The window callbacks
 
@@ -395,7 +395,7 @@ The wrapper `emulator_window_opengles_show_window` (`emulator-window.c:196`) for
 
 ### 22.7.2 The streamed/shared-memory path
 
-When there is no host GL sub-window, for example a headless host or the gRPC-driven `fishtank` shell, frames arrive as images. `EmulatorQtWindow::initializeStreamer` wires up a `SharedMemoryRenderer` (for MMAP transport) or decodes streamed PNG/raw frames, then emits `frameReady(QImage)` which is connected to `slot_updateGuestScreen` (`emulator-qt-window.cpp:1789`). That slot updates `mGuestScreenPixmap`, and the next `paintEvent` blits it (Section 22.3.3). Multi-display secondary windows use `MultiDisplayWidget`, a `GLWidget` subclass that paints a guest texture per extra display (`multi-display-widget.h:23`).
+When there is no host GL sub-window, for example a headless host or the gRPC-driven `fishtank` shell, frames arrive as images. `EmulatorQtWindow::initializeStreamer` constructs a `SharedStreamEmulator`, the gRPC stream manager that listens for new frames; for MMAP transport it pairs it with a `SharedMemoryRenderer`, and otherwise its frame callback decodes the streamed PNG/raw frames. Either way the window emits `frameReady(QImage)`, which is connected to `slot_updateGuestScreen` (`emulator-qt-window.cpp:1789`). That slot updates `mGuestScreenPixmap`, and the next `paintEvent` blits it (Section 22.3.3). Multi-display secondary windows use `MultiDisplayWidget`, a `GLWidget` subclass that paints a guest texture per extra display (`multi-display-widget.h:23`).
 
 Two rendering paths for guest frames
 
@@ -418,7 +418,7 @@ flowchart TD
 
 ## 22.8 The Extended Window and the Agents
 
-"Extended controls" is a tabbed panel, one tab per emulated subsystem. The pane order is fixed by the `ExtendedWindowPane` enum, which must match the tab order baked into `extended.ui` (`external/qemu/android/emu/host-common/include/host-common/qt_ui_defs.h:36`): `PANE_IDX_LOCATION`, `PANE_IDX_BATTERY`, `PANE_IDX_CELLULAR`, and so on.
+"Extended controls" is a tabbed panel, one tab per emulated subsystem. The pane order is fixed by the `ExtendedWindowPane` enum, which must match the tab order baked into `extended.ui` (`external/qemu/android/emu/host-common/include/host-common/qt_ui_defs.h:36`): `PANE_IDX_LOCATION`, `PANE_IDX_MULTIDISPLAY`, `PANE_IDX_CELLULAR`, `PANE_IDX_BATTERY`, and so on.
 
 ### 22.8.1 One agent per subsystem
 

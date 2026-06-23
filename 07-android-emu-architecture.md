@@ -10,13 +10,13 @@ This chapter explains how that decoupling is engineered. We start with the layer
 
 The "android-emu core" is not one library. It is a stack of three, each with a clearly bounded job, and confusing them is the most common source of disorientation when first reading the tree.
 
-The lowest layer is `aemu/base`, which lives in `hardware/google/aemu/base/`. It is a freestanding C++ utility library — threads, locks, file paths, streams, sockets, string formatting — with, in its own words, "no knowledge of the emulator whatsoever." Its CMake target is `aemu-base`, defined in `hardware/google/aemu/base/CMakeLists.txt`, and its headers are exposed under the `aemu/base/` include prefix (for example `aemu/base/async/Looper.h`). This library is shared with the gfxstream graphics project, which is why it lives under `hardware/google/aemu/` rather than inside the QEMU fork.
+The lowest layer is `aemu/base`, which lives in `hardware/google/aemu/base/`. It is a freestanding C++ utility library — threads, locks, file paths, streams, sockets, string formatting — that its README describes as "an utility library for common functions used in the Android Emulator." Its CMake target is `aemu-base`, defined in `hardware/google/aemu/base/CMakeLists.txt`, and its headers are exposed under the `aemu/base/` include prefix (for example `aemu/base/async/Looper.h`). This library is shared with the gfxstream graphics project, which is why it lives under `hardware/google/aemu/` rather than inside the QEMU fork.
 
-The next layer is `android-emu-base`. Its build rule is in `external/qemu/android/android-emu-base/CMakeLists.txt`, and its opening comment repeats the same discipline: "This is a very generic library, and should have no knowledge of the emulator whatsoever." It compiles the legacy `android::base` sources (under `android/base/` and `android/utils/`) plus a couple of `aemu/base/system/` files, and links `aemu-base.headers` publicly. In practice `android-emu-base` is the older, emulator-grown utility code, and `aemu/base` is the newer, project-shared utility code; both expose the `android::base` C++ namespace, and over time functionality has migrated from the former toward the latter.
+The next layer is `android-emu-base`. Its build rule is in `external/qemu/android/android-emu-base/CMakeLists.txt`, and its opening comment repeats the same discipline: "This is a very generic library, and should have no knowledge of the emulator whatsoever." It compiles the legacy `android::base` sources (under `android/base/` and `android/utils/`) plus a couple of `aemu/base/system/` files, and links the `android-emu-base-headers` interface target (privately), which in turn re-exports `aemu-base.headers`. In practice `android-emu-base` is the older, emulator-grown utility code, and `aemu/base` is the newer, project-shared utility code; both expose the `android::base` C++ namespace, and over time functionality has migrated from the former toward the latter.
 
 On top of those sits `android-emu` itself, in `external/qemu/android/android-emu/`. Its CMake fragment is `external/qemu/android/android-emu/android-emu.cmake`, and that file's dependency lists show it building on `android-emu-base`, `android-emu-base-headers`, and `qemu-host-common-headers`. This is the layer that knows what an Android Virtual Device is — sensors, battery, telephony, snapshots, ADB, the gRPC services — but still does not know what QEMU is.
 
-Sitting beside `android-emu` (not under it) is `hardware/google/aemu/host-common/`. This is the contract surface: it defines the C structs and abstract C++ classes — `VmLock`, `vm_operations.h`, `AndroidPipe`, `DeviceContextRunner`, the `*_agent.h` interfaces — that `android-emu` calls and that the VMM glue implements. Its CMake target produces `qemu-host-common-headers`.
+Sitting beside `android-emu` (not under it) is `hardware/google/aemu/host-common/`. This is the contract surface: it defines the C structs and abstract C++ classes — `VmLock`, `vm_operations.h`, `AndroidPipe`, `DeviceContextRunner`, the `*_agent.h` interfaces — that `android-emu` calls and that the VMM glue implements. Its CMake target produces the interface library `aemu-host-common.headers`; the `qemu-host-common-headers` target that `android-emu` actually links is the qemu-side re-export of it, defined in `external/qemu/android/emu/host-common/CMakeLists.txt`.
 
 The foundation libraries and their dependency direction
 
@@ -184,11 +184,11 @@ How VmLock decouples android-emu from the QEMU iothread mutex
 ```mermaid
 flowchart LR
     subgraph CORE["android-emu (no QEMU headers)"]
-        AGENT["battery agent impl call"]
         SC["RecursiveScopedVmLockIfInstance"]
         IF["android::VmLock interface"]
     end
     subgraph GLUE["android-qemu2-glue"]
+        AGENT["battery agent impl call"]
         IMPL["qemu2::VmLock"]
     end
     subgraph QEMUSIDE["QEMU"]
@@ -289,7 +289,7 @@ Individual agent structs are useless until something gathers them into one table
     X(QAndroidSensorsAgent, sensors)            \
     X(QAndroidVmOperations, vm)                 \
     X(QAndroidGlobalVarsAgent, settings)        \
-    /* ... ~24 entries total ... */
+    /* ... 25 entries total ... */
 ```
 
 The same macro, expanded with different "X" definitions, generates the struct of pointers, the factory getter declarations, and the factory setters — so adding an agent means editing one list rather than four parallel ones. `AndroidConsoleAgents` itself is built by expanding the list into `const type* name;` fields:
@@ -354,12 +354,13 @@ flowchart TB
     STRUCT["AndroidConsoleAgents struct fields"]
     GETTER["AndroidConsoleFactory getters"]
     SETTER["injectConsoleAgents setters"]
+    ALIST["ANDROID_AGENTS_LIST (glue-side parallel list)"]
     GLUE["QemuAndroidConsoleAgentFactory overrides"]
 
     LIST -->|"ANDROID_CONSOLE_DEFINE_POINTER"| STRUCT
     LIST -->|"ANDROID_DEFINE_CONSOLE_GETTER"| GETTER
     LIST -->|"ANDROID_CONSOLE_AGENT_SETTER"| SETTER
-    LIST -->|"ANDROID_DEFINE_CONSOLE_GETTER_IMPL"| GLUE
+    ALIST -->|"ANDROID_DEFINE_CONSOLE_GETTER_IMPL"| GLUE
 ```
 
 ### 7.7.2 A parallel pattern: the graphics agents
@@ -448,14 +449,14 @@ Startup ordering of the core interfaces
 sequenceDiagram
     participant Main as main.cpp
     participant Setup as qemu_android_emulation_early_setup
-    participant Loop as Looper / ThreadLooper
+    participant TLoop as Looper / ThreadLooper
     participant Lock as VmLock
     participant Pipe as AndroidPipe / sync
 
     Main->>Main: process_early_setup
     Main->>Main: injectQemuConsoleAgents
     Main->>Setup: qemu_android_emulation_early_setup
-    Setup->>Loop: qemu_looper_setForThread
+    Setup->>TLoop: qemu_looper_setForThread
     Setup->>Lock: VmLock::set(new qemu2::VmLock)
     Setup->>Pipe: qemu_android_pipe_init(vmLock)
     Setup->>Pipe: androidSnapshot_initialize(vm agent)

@@ -19,11 +19,12 @@ flowchart TB
     ENUM --> HVF["HVF<br/>macOS Hypervisor.framework"]
     ENUM --> WHPX["WHPX<br/>Windows Hypervisor Platform"]
     ENUM --> AEHD["AEHD<br/>Windows, Google driver"]
-    ENUM --> TCG["TCG<br/>software fallback, all hosts"]
+    ENUM --> NONE["CPU_ACCELERATOR_NONE<br/>no hardware accelerator"]
     KVM --> HW["Hardware virtualization (VT-x / AMD-V / EL2)"]
     HVF --> HW
     WHPX --> HW
     AEHD --> HW
+    NONE --> TCG["TCG software path<br/>QEMU binary translation, all hosts"]
     TCG --> SW["Binary translation, no hardware needed"]
 ```
 
@@ -87,7 +88,7 @@ flowchart TB
 
 **Color buffer** — A host-side handle for a rendered image (a texture or framebuffer) in gfxstream, implemented by the `ColorBuffer` class in `hardware/google/gfxstream/host/color_buffer.cpp`. Each color buffer is backed by either a GL texture (`color_buffer_gl.h`) or a Vulkan image (`color_buffer_vk.h`); the guest refers to color buffers by integer id, and the host composes and posts them to the display. The guest-side gralloc handle ultimately names one of these color buffers.
 
-**crosvm** — The Chrome OS Virtual Machine Monitor, a Rust VMM. It is the hypervisor monitor used by Cuttlefish rather than by the QEMU-based Android Emulator; Cuttlefish selects and launches it through `host/libs/vm_manager/crosvm_manager.h` and the `crosvm_binary()` accessor in `device/google/cuttlefish/host/libs/config/cuttlefish_config.cpp`. Unlike the emulator's forked QEMU, crosvm exposes only virtio devices.
+**crosvm** — The Chrome OS Virtual Machine Monitor, a Rust VMM. It is the hypervisor monitor used by Cuttlefish rather than by the QEMU-based Android Emulator; Cuttlefish selects and launches it through `device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.h` and the `crosvm_binary()` accessor in `device/google/cuttlefish/host/libs/config/cuttlefish_config.cpp`. Unlike the emulator's forked QEMU, crosvm exposes only virtio devices.
 
 **Cuttlefish** — Google's configurable virtual Android device, rooted at `device/google/cuttlefish`, designed to run in data centers and CI on top of crosvm. Its `device/google/cuttlefish/README.md` and the host commands under `device/google/cuttlefish/host/commands` (such as `run_cvd` and `assemble_cvd`) build and launch a device that, unlike the Android Emulator, has no built-in UI and is driven over the network. It shares gfxstream, RootCanal, and netsim with the emulator but uses a different VMM and virtual board.
 
@@ -121,7 +122,7 @@ flowchart TB
 
 **Snapshot** — A complete saved copy of a running VM's state — RAM, device registers, and graphics state — that can be reloaded later. The snapshot subsystem lives at `external/qemu/android/android-emu/android/snapshot`, with `Snapshotter.cpp` orchestrating save/load and helpers like `RamLoader`, `Decompressor`, and `TextureSaver` handling the pieces. Quickboot is the most common consumer of snapshots.
 
-**TCG** — Tiny Code Generator, QEMU's binary-translation engine, documented in `external/qemu/tcg/README` ("Tiny Code Generator - Fabrice Bellard") with the execution loop in `external/qemu/accel/tcg`. TCG translates guest instructions into host instructions in software and is the `CpuAccelerator` fallback when no hardware accelerator (KVM, HVF, WHPX, AEHD) is available; it is correct everywhere but far slower than hardware virtualization.
+**TCG** — Tiny Code Generator, QEMU's binary-translation engine, documented in `external/qemu/tcg/README` ("Tiny Code Generator - Fabrice Bellard") with the execution loop in `external/qemu/accel/tcg`. TCG translates guest instructions into host instructions in software and is QEMU's software execution path, used when no hardware accelerator (KVM, HVF, WHPX, AEHD) is available; in `CpuAccelerator` terms this corresponds to `CPU_ACCELERATOR_NONE`. It is correct everywhere but far slower than hardware virtualization.
 
 **vsock** — Virtio sockets, a socket address family that carries datagram and stream traffic between guest and host over virtio, implemented in `external/qemu/hw/virtio/virtio-vsock.c` (with the vhost variant in `vhost-vsock.c`). It is the general-purpose guest-host channel on virtio-based boards and is used heavily by Cuttlefish, where host config under `device/google/cuttlefish/host/libs/config` wires up vsock ports.
 

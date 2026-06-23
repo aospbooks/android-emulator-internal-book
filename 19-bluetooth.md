@@ -213,7 +213,7 @@ flowchart LR
     CHR --> PST["PacketStreamerTransport"]
     PST -->|"gRPC StreamPackets"| ND["netsimd<br/>PacketStreamerService"]
     ND --> WC["wireless handle_request"]
-    WC --> FAC["bluetooth_facade<br/>HandleBtRequest"]
+    WC --> FAC["netsim HCI facade<br/>handle_bt_request"]
     FAC --> RC["Rootcanal HciDevice"]
 ```
 
@@ -379,8 +379,8 @@ flowchart TB
         STM["SimTestModel"]
         HD["HciDevice + DualModeController"]
     end
-    GS -->|"cxx FFI"| WIR
-    WIR -->|"handle_bt_request"| FAC
+    GS -->|"wireless::handle_request"| WIR
+    WIR -->|"cxx FFI<br/>handle_bt_request"| FAC
     FAC --> STM
     STM --> HD
     WIR -.-> DROP
@@ -390,7 +390,7 @@ flowchart TB
 
 ## 19.7 RSSI, Counters, and Radio Stats
 
-Because netsim subclasses the phy layer, it can compute signal strength and packet statistics that plain Rootcanal does not. `SimPhyLayer` overrides `ComputeRssi` and `Send` to call into netsim's ranging code and to bump per-chip tx/rx counters. The RSSI computation is exposed back to Rust as an FFI helper, `GetRssi(sender, receiver, link_kind, tx_power)` (`tools/netsim/rust/daemon/src/ffi.rs`), backed by netsim's `ranging` module. There is no real path loss model; RSSI is a synthetic function of the configured device positions.
+Because netsim subclasses the phy layer, it can compute signal strength and packet statistics that plain Rootcanal does not. `SimPhyLayer` overrides `ComputeRssi` and `Send` to call into netsim's ranging code and to bump per-chip tx/rx counters. The RSSI computation lives in Rust's `ranging` module and is exposed to the C++ phy layer as the FFI helper `GetRssi(sender, receiver, link_kind, tx_power)` (`tools/netsim/rust/daemon/src/ffi.rs`), which `SimComputeRssi` calls. RSSI is derived from the configured device positions via a simple log-distance path-loss formula (`distance_to_rssi` in `ranging.rs`, `tx_power - 20*log10(distance)`), not a measured or environmental channel model.
 
 The per-controller counters feed the radio stats the daemon reports. The Rust `get_stats` builds two `NetsimRadioStats` records per controller — one `BLUETOOTH_LOW_ENERGY` and one `BLUETOOTH_CLASSIC` — copying the tx/rx counts out of the chip model and attaching any invalid packets that Rootcanal flagged:
 
@@ -417,7 +417,7 @@ Everything so far is the data plane — HCI packets moving between guest and con
 - `Reset` returns the whole simulation to its initial state.
 - `PatchCapture` / `ListCapture` / `GetCapture` control PCAP capture per chip.
 
-The CLI is the Rust binary under `tools/netsim/rust/cli/`. Its argument grammar (`tools/netsim/rust/cli/src/args.rs`) maps subcommands onto those RPCs: `radio` (control a device's radio state), `devices`, `patch`, `capture` (aliased `pcap`), `reset`, `beacon`, and `bumble`. The `radio` subcommand takes a `RadioType` of `Ble` or another radio and a status, then issues a `PatchDevice` that flips the corresponding atomic flag described in section 19.6.3 — which, in turn, adds or removes the controller from its phy.
+The CLI is the Rust binary under `tools/netsim/rust/cli/`. Its argument grammar (`tools/netsim/rust/cli/src/args.rs`) maps subcommands onto those RPCs: `radio` (control a device's radio state), `devices`, `capture` (aliased `pcap`), `reset`, `beacon`, `bumble`, and `link`. Device radio toggling is done via `radio`, not a top-level `patch`. The `radio` subcommand takes a `RadioType` of `Ble` or another radio and a status, then issues a `PatchDevice` that flips the corresponding atomic flag described in section 19.6.3 — which, in turn, adds or removes the controller from its phy.
 
 ### Control plane vs. data plane
 

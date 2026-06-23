@@ -142,7 +142,7 @@ void registerServices() {
 }
 ```
 
-`AdbVsockPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.h`) is the virtio-vsock variant: same proxy role, but the guest side speaks vsock instead of the legacy pipe device. Both implement the same `AdbGuestAgent` interface so the host listener is identical for either transport. The non-vsock path additionally registers a `qemud:adb-debug` service via `AdbDebugPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbDebugPipe.h`), which dumps proxied ADB traffic to stderr when the emulator is launched with `-debug adb`.
+`AdbVsockPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.h`) is the virtio-vsock variant: same proxy role, but the guest side speaks vsock instead of the legacy pipe device. Both implement the same `AdbGuestAgent` interface so the host listener is identical for either transport. Regardless of whether the vsock or the legacy pipe transport is chosen, `registerServices()` always registers a `qemud:adb-debug` service via `AdbDebugPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbDebugPipe.h`) after the vsock/pipe `if`/`else` block. The service is registered unconditionally; only the stderr stream it dumps proxied ADB traffic to is attached, when the emulator is launched with `-debug adb` (`VERBOSE_CHECK(adb)`).
 
 ## 20.4 Two Agents: Host Listener and Guest Pipe
 
@@ -305,7 +305,7 @@ auto wireformat = StringFormat("%04x%s", (uint32_t)message.size(), message.c_str
 return android::base::socketSendAll(fd, wireformat.c_str(), wireformat.size());
 ```
 
-So `host:emulator:5555` becomes `000ehost:emulator:5555` on the wire. The server reads the port and adds a transport for `emulator-5554`. Two places trigger this notification: `android_adb_server_notify` in `adb-server.cpp` fires it asynchronously right after emulation setup (so a slow IPv6 loopback cannot stall startup), and `AdbGuestPipe::waitForHostConnection` fires it every time a guest pipe starts waiting.
+So `host:emulator:5555` becomes `0012host:emulator:5555` on the wire. The server reads the port and adds a transport for `emulator-5554`. Two places trigger this notification: `android_adb_server_notify` in `adb-server.cpp` fires it asynchronously right after emulation setup (so a slow IPv6 loopback cannot stall startup), and `AdbGuestPipe::waitForHostConnection` fires it every time a guest pipe starts waiting.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/adb-server.cpp
@@ -437,7 +437,7 @@ The transport command set is encoded in `AdbConnection.cpp` as a 4-byte little-e
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/AdbConnection.cpp
-enum class AdbWireMessage : uint32_t {
+enum class AdbWireMessage {
     A_SYNC = 0x434e5953,
     A_CNXN = 0x4e584e43,
     A_AUTH = 0x48545541,

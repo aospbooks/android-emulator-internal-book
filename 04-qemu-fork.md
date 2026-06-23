@@ -74,7 +74,7 @@ Each is a standard QEMU `SysBusDevice` registered with a `TypeInfo` and a string
 
 On x86 and x86-64 the emulator does not use a custom board at all. It uses QEMU's standard i440FX PC board (`pc-i440fx-2.12`, aliased `pc`, marked `is_default` in `hw/i386/pc_piix.c:499`) and bolts the goldfish devices on inside a `#if defined(CONFIG_ANDROID)` block. The interesting consequence is that on x86 the Android devices are wired at fixed physical addresses and fixed IRQ lines, with no device tree involved.
 
-Those fixed addresses live in a header shared between C and ACPI ASL, `external/qemu/include/hw/acpi/goldfish_defs.h`. For x86 the I/O memory is parked at `0xff001000` and above, and the interrupt lines run from 16 to 24.
+Those fixed addresses live in a header shared between C and ACPI ASL, `external/qemu/include/hw/acpi/goldfish_defs.h`. For x86 the I/O memory is parked at `0xff001000` and above, and the interrupt lines run from 16 to 23 (battery=16 ... rotary=23).
 
 ```c
 // Source: include/hw/acpi/goldfish_defs.h
@@ -204,7 +204,7 @@ create_simple_device(vbi, pic, RANCHU_GOLDFISH_SYNC, "goldfish_sync",
                      "generic,goldfish-sync", 2, 0, 0);
 ```
 
-The second argument is the QEMU device type name (it must match a registered `TypeInfo`); the NUL-separated strings are the device tree `compatible` values the guest kernel matches its drivers against. The pipe device, notably, presents itself to the kernel as `google,android-pipe`.
+The fourth argument (`sysbus_name`, here `"goldfish_fb"`) is the QEMU device type name (it must match a registered `TypeInfo`); the NUL-separated strings are the device tree `compatible` values the guest kernel matches its drivers against. The pipe device, notably, presents itself to the kernel as `google,android-pipe`.
 
 ### 4.3.3 Board Initialization Sequence
 
@@ -264,7 +264,7 @@ if (device_tree_setup_func) {
 }
 ```
 
-The glue registers `ranchu_device_tree_setup` (in `android-qemu2-glue/qemu-setup.cpp:164`) as that callback. It adds the `fstab` subtree and, for each of the system and vendor partitions, looks up the in-guest device path from the AVD and emits an `ext4` mount entry:
+The glue *defines* `ranchu_device_tree_setup` (`android-qemu2-glue/qemu-setup.cpp:164`), while QEMU core installs it as that callback from `vl.c` via `qemu_device_tree_setup_callback(ranchu_device_tree_setup)` (`external/qemu/vl.c:4665`). It adds the `fstab` subtree and, for each of the system and vendor partitions, looks up the in-guest device path from the AVD and emits an `ext4` mount entry:
 
 ```cpp
 // Source: android-qemu2-glue/qemu-setup.cpp
@@ -407,7 +407,7 @@ graph LR
     end
     D -->|"guest_open, recv, send"| SO
     SO --> S
-    S -->|"doHostCommand,<br/>wake_on"| HW
+    S -->|"doHostCommand,<br/>signalWake"| HW
     HW --> D
 ```
 
@@ -542,12 +542,11 @@ The order is strict because each step depends on the previous one. Console agent
 graph TD
     A["main.cpp main_impl"] --> B["injectQemuConsoleAgents"]
     B --> C["parse options, build QEMU argv"]
-    C --> D["qemu_android_emulation_early_setup"]
+    C --> G["run_qemu_main"]
+    G --> F["vl.c: register ranchu_device_tree_setup"]
+    F --> D["vl.c: qemu_android_emulation_early_setup"]
     D --> E["qemu_android_pipe_init<br/>qemu_android_sync_init"]
-    D --> F["register ranchu_device_tree_setup"]
-    E --> G["run_qemu_main"]
-    F --> G
-    G --> H["board init: ranchu_init or pc_init"]
+    E --> H["board init: ranchu_init or pc_init"]
     H --> I["devices created, FDT/ACPI built"]
     I --> J["arm_load_kernel, guest boots"]
     J --> K["qemu_android_emulation_setup<br/>start gRPC, advertise ports"]

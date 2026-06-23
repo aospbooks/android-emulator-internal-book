@@ -19,6 +19,7 @@ The sensor list itself is defined once, as an X-macro, in `external/qemu/android
     SENSOR_(GYROSCOPE,"gyroscope",Gyroscope,vec3,"gyroscope:%g:%g:%g") \
     SENSOR_(MAGNETIC_FIELD,"magnetic-field",Magnetometer,vec3,"magnetic:%g:%g:%g") \
     SENSOR_(ORIENTATION,"orientation",Orientation,vec3,"orientation:%g:%g:%g") \
+    SENSOR_(TEMPERATURE,"temperature",Temperature,float,"temperature:%g") \
     SENSOR_(PROXIMITY,"proximity",Proximity,float,"proximity:%g") \
     SENSOR_(LIGHT,"light",Light,float,"light:%g") \
     ...
@@ -87,7 +88,7 @@ The protocol is documented in a long comment at the top of `hw-sensors.cpp`, and
 
 1. `list-sensors` asks which sensors exist. The host replies with an integer bitmask built from the per-sensor `enabled` flags set during init from the AVD hardware config.
 2. `set:<name>:<flag>` enables or disables reporting for one sensor by toggling a bit in the client's `enabledMask`.
-3. `set-delay:<ms>` sets the reporting period; the default is 200 ms.
+3. `set-delay:<ms>` sets the reporting period; the default is 800 ms (the value `cl->delay_ms = 800` set in `_hwSensorClient_new`).
 4. `wake` is echoed straight back; the HAL uses this ping-pong to unblock a blocking read on another thread.
 5. `time:<ns>` hands the host the guest's clock so the host can compute a host-to-guest time offset.
 
@@ -161,11 +162,12 @@ sequenceDiagram
 
 The values the tick sends are never set directly. Instead, `serializeSensorValue` pulls them from a `PhysicalModel`, allocated per emulator in `_hwSensors_init` via `physicalModel_new()`. The model is the substantive engineering in this chapter: it converts a desired device pose into the readings a real inertial measurement unit would produce.
 
-The model is built from three submodels, declared together in `PhysicalModelImpl` in `external/qemu/android/android-emu/android/physics/PhysicalModel.cpp`.
+The model is built from four submodels, declared together in `PhysicalModelImpl` in `external/qemu/android/android-emu/android/physics/PhysicalModel.cpp`.
 
 1. `InertialModel mInertialModel` owns the rigid body: position, velocity, acceleration, jerk, and rotation.
 2. `AmbientEnvironment mAmbientEnvironment` owns the world around the body: gravity, magnetic field, temperature, proximity, light, pressure, and humidity.
-3. `BodyModel mBodyModel` owns wearable-specific values such as heart rate.
+3. `FoldableModel mFoldableModel` owns hinge/posture state.
+4. `BodyModel mBodyModel` owns wearable-specific values such as heart rate.
 
 ### 10.3.1 Targets, interpolation, and parameters
 
@@ -559,7 +561,7 @@ if (wear28plus || hwCfg.hw_sensors_heart_rate) {
 }
 ```
 
-Similarly an Android Automotive image at API 35+ enables the `HEADING` sensor. The heart-rate value itself comes from `mBodyModel`, the third submodel, which simply stores and returns a beats-per-minute value with the same target/default machinery as the ambient quantities.
+Similarly an Android Automotive image at API 35+ enables the `HEADING` sensor. The heart-rate value itself comes from `mBodyModel`, the fourth submodel, which simply stores and returns a beats-per-minute value with the same target/default machinery as the ambient quantities.
 
 ## 10.8 State-Change Callbacks and Ground-Truth Recording
 

@@ -8,7 +8,7 @@ This chapter follows a frame from the moment the AVD configuration is read, thro
 
 ## 16.1 Source Selection at AVD Boot
 
-The camera subsystem comes up exactly once, during machine setup. In `external/qemu/vl.c:4753` the emulator calls `android_camera_service_init()`, defined in `external/qemu/android/android-emu/android/camera/camera-service.cpp:1874`. That function does almost nothing itself — it constructs a single static `CameraService` object, and "all the interesting things happen in the ctor."
+The camera subsystem comes up exactly once, during machine setup. In `external/qemu/vl.c:4754` the emulator calls `android_camera_service_init()`, defined in `external/qemu/android/android-emu/android/camera/camera-service.cpp:1874`. That function does almost nothing itself — it constructs a single static `CameraService` object, and "all the interesting things happen in the ctor."
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-service.cpp

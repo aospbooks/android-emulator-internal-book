@@ -29,7 +29,7 @@ The macro expands twice: once to declare the `AndroidConsoleAgents` struct field
 
 ### 8.1.1 Where the ports come from
 
-The console port is allocated during `android_ports_setup` in `external/qemu/android/android-emu/android/qemu-setup.cpp`. The default base port is `ANDROID_CONSOLE_BASEPORT`, defined as `5554` in `hardware/google/aemu/host-common/constants.h`. The setup loop tries successive even ports — 5554, 5556, 5558, ... — until it can bind, with the ADB port always at `base_port + 1`:
+The console port is allocated during `android_ports_setup` in `external/qemu/android/android-emu/android/qemu-setup.cpp`. The default base port is `ANDROID_CONSOLE_BASEPORT`, defined as `5554` in `hardware/google/aemu/host-common/include/host-common/constants.h`. The setup loop tries successive even ports — 5554, 5556, 5558, ... — until it can bind, with the ADB port always at `base_port + 1`:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/qemu-setup.cpp
@@ -43,7 +43,7 @@ for (; tries > 0; tries--, base_port += 2) {
 }
 ```
 
-That is why the first emulator answers on console port 5554 and ADB 5555, the second on 5556/5557, and so on, and why the AVD shows up to `adb` as `emulator-5554`. The gRPC port is computed separately in `qemu_setup_grpc` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`) as `android_serial_number_port + 3000`, scanning a 1000-port range until one binds. None of these ports is fixed; clients discover the actual numbers from a registration file, covered in section 8.7.
+That is why the first emulator answers on console port 5554 and ADB 5555, the second on 5556/5557, and so on, and why the AVD shows up to `adb` as `emulator-5554`. The gRPC port is computed separately in `qemu_setup_grpc` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`) as `android_serial_number_port + 3000`, scanning a 1000-port range until one binds. None of these ports is fixed; clients discover the actual numbers from a registration file, covered in section 8.8.
 
 ### 8.1.2 The two planes at a glance
 
@@ -179,7 +179,7 @@ do_avd_grpc_port(ControlClient client, char* args) {
 }
 ```
 
-The `kill` command (`do_kill`) is the bluntest: it stops any active screen recording, prints a farewell, and tears the process down. On headless ARM hosts that support snapshot save, it routes through the UI agent's `requestExit` so a quickboot snapshot can be written first; otherwise it sends `SIGINT` to itself.
+The `kill` command (`do_kill`) is the bluntest: it stops any active screen recording, prints a farewell, and tears the process down. On headless ARM hosts that support snapshot save, it sends `SIGINT` to itself (`kill(getpid(), SIGINT)`) so a graceful quickboot save can run first; otherwise it routes through the UI/libui agent's `requestExit`. (On Windows the snapshot-save path uses `requestExit` instead of `SIGINT`.)
 
 ### 8.3.1 Command dispatch flow
 
@@ -417,7 +417,7 @@ auto builder = EmulatorControllerService::Builder()
         .withService(bluetooth);
 ```
 
-Note the distinction between `withService` and `withSecureService`: the ADB transport (`waterfall`) is registered as a *secure* service, meaning the `Builder::build` step only registers it when TLS with client-certificate validation is active. Everything else registers unconditionally.
+Note the distinction between `withService` and `withSecureService`. The service registered with `withSecureService` is the separate `adb` service (`getAdbService`, the `Adb::Service` that hands out the ADB private key), not waterfall — the `Builder::build` step only registers it when TLS with client-certificate validation is active. The waterfall transport (`h2o = getWaterfallService(...)`) is registered with the ordinary `withService` and is not gated on TLS; everything else likewise registers unconditionally.
 
 `Builder::build` in `external/qemu/android/android-grpc/services-stack/src/android/emulation/control/GrpcServices.cpp` is where the gRPC `ServerBuilder` is finally assembled. It picks credentials, attaches an auth metadata processor when a token or JWT path was configured, registers every service, installs interceptors, and calls `BuildAndStart`:
 

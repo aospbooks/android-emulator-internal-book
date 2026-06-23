@@ -37,7 +37,7 @@ The familiar `dprint`, `dinfo`, `dwarning`, `derror`, and `dfatal` macros are th
 
 ### 28.1.1 Severity versus the minimum level
 
-There are two independent knobs. `getMinLogLevel()` / `setMinLogLevel()` set the floor: anything below the floor is dropped. `severity()` / `setSeverity()` track the current default. Both are backed by a single global in the configuration translation unit.
+There are two independent knobs, each backed by its own global in a separate translation unit. `getMinLogLevel()` / `setMinLogLevel()` set the floor: anything below the floor is dropped. They read and write `gMinLogLevel`, defined alongside them in `Log.cpp`. `severity()` / `setSeverity()` track the current default, which lives in the separate `android_log_severity` global in `LogConfiguration.cpp`. The two are distinct: `base_enable_verbose_logs()` has to update both `setMinLogLevel(...)` and `android_log_severity` independently.
 
 ```cpp
 // Source: external/qemu/android/emu/base/logging/src/android/base/logging/LogConfiguration.cpp
@@ -621,7 +621,7 @@ combinedFile << guestFile.rdbuf() << hostFile.rdbuf();
 
 ### 28.8.3 Where trace points live
 
-The graphics stack (gfxstream) is the heaviest user of these trace points. It has its own parallel `gfxstream::base` tracing surface with the same `beginTrace`/`endTrace`/`ScopedTrace` shape, and higher-level `GFXSTREAM_TRACE_EVENT` macros sprinkled through the renderer. For example, `virtio_gpu_frontend.cpp` wraps virtio-gpu command handling in trace events under a stream-renderer category, and `sync_thread.cpp` and `frame_buffer.cpp` add their own. When tracing is enabled, these emit `gfx` events into the host trace that show exactly how long each renderer operation took.
+The graphics stack (gfxstream) is the heaviest user of these trace points. It has its own parallel `gfxstream::base` tracing surface with the same `beginTrace`/`endTrace`/`ScopedTrace` shape, and higher-level `GFXSTREAM_TRACE_EVENT` macros sprinkled through the renderer. For example, `virtio_gpu_frontend.cpp` wraps virtio-gpu command handling in trace events under a stream-renderer category, and `sync_thread.cpp` and `frame_buffer.cpp` add their own. When tracing is enabled, these emit events under gfxstream's own Perfetto categories (`gfxstream.stream_renderer`, `gfxstream.default`, etc.) into the host trace that show exactly how long each renderer operation took. (The single `gfx` category from 28.8.1 belongs to the gfxstream::base/`AEMU_SCOPED_TRACE` shim path, not to these `GFXSTREAM_TRACE_EVENT` macros.)
 
 ### 28.8.4 The trace data path
 
@@ -800,10 +800,10 @@ List and inspect local crash reports with the bundled crash tool (the binary is 
 
 ```bash
 # List minidumps in the local crash database
-crash-uploader -l
+crashreport -l
 
 # Symbolize a minidump against a symbol directory
-crash-uploader -d /path/to/minidump.dmp objs/build/symbols
+crashreport -d /path/to/minidump.dmp objs/build/symbols
 ```
 
 Disable crash reporting entirely for a session:
@@ -822,7 +822,7 @@ emulator -avd <your_avd> -crash-report-mode disabled
 - Crash reporting is out-of-process: a `crashpad_handler` binary started at launch writes minidumps even when the emulator's own address space is corrupt; uploads stay disabled until consent is granted.
 - Context travels with the dump as Crashpad string annotations — `command_line`, allow-listed `environment_vars`, and an `ERRLOG` stream that captures error/fatal log lines automatically via `CrashpadLogSink`.
 - `crashhandler_die` and `GenerateDumpAndDie` force a minidump at the fault point with a deliberate null dereference; the `HangDetector` and `CrashOnTimeout` convert freezes and slow operations into the same fatal path.
-- Breakpad is retained for offline work: `crash-uploader -d` uses Breakpad's `MinidumpProcessor` and `dump_syms`-produced symbols to print symbolized stacks plus the annotation bundle as JSON.
+- Breakpad is retained for offline work: `crashreport -d` uses Breakpad's `MinidumpProcessor` and `dump_syms`-produced symbols to print symbolized stacks plus the annotation bundle as JSON.
 - Perfetto tracing runs through a thin in-process shim with a single-branch fast path when disabled; `VPERFETTO_*` env vars name the host, guest, and combined trace files, and the shim concatenates host and guest traces into one timeline.
 - Graphics debugging stacks three layers: gfxstream log levels (`GFXSTREAM_LOG_LEVEL`), Perfetto `gfx` track events, and Vulkan validation layers wired up by `vkdebugenv.sh`.
 

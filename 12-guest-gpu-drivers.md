@@ -91,11 +91,11 @@ void glActiveTexture(GLenum texture)
 }
 ```
 
-`getEGLThreadInfo()` returns a thread-local `EGLThreadInfo`, whose `hostConn` field holds the thread's `HostConnection`. Because the connection (and thus the encoder and its stream buffer) is thread-local, two app threads issuing GLES calls never contend on the same wire buffer — each has its own. The encoder object itself, `GL2Encoder`, is a C++ class generated from a spec; the next two sections explain where it comes from and what bytes it writes.
+`getEGLThreadInfo()` returns a thread-local `EGLThreadInfo`, whose `hostConn` field holds the thread's `HostConnection`. Because the connection (and thus the encoder and its stream buffer) is thread-local, two app threads issuing GLES calls never contend on the same wire buffer — each has its own. The encoder object itself, `GL2Encoder`, is a hand-written class (`GL2Encoder.cpp`) that derives from a generated base, `gl2_encoder_context_t` (declared in `gl2_enc.h`, implemented in `gl2_enc.cpp`); the next two sections explain how that base is generated and what bytes it writes.
 
 ### 12.2.1 GLClientState: not everything is forwarded
 
-`GL2Encoder` is not a pure forwarder. It maintains a `GLClientState` (declared in its base, see `hardware/google/gfxstream/guest/GLESv2_enc/GL2Encoder.h`) so it can answer client-side queries without a host round-trip, batch vertex-attribute setup, and validate arguments before they ever reach the host. The spec marks such functions `custom_decoder` or wraps them in hand-written code in `GL2Encoder.cpp`. The default for an unannotated call, though, is pure serialize-and-send, and that default is what the code generator produces.
+`GL2Encoder` is not a pure forwarder. It maintains a `GLClientState` (declared in `hardware/google/gfxstream/guest/OpenglCodecCommon/include/gfxstream/guest/GLClientState.h`, held as a `GLClientState* m_state` member in `GL2Encoder.h`) so it can answer client-side queries without a host round-trip, batch vertex-attribute setup, and validate arguments before they ever reach the host. The spec marks such functions `custom_decoder` or wraps them in hand-written code in `GL2Encoder.cpp`. The default for an unannotated call, though, is pure serialize-and-send, and that default is what the code generator produces.
 
 ## 12.3 emugen: Generating the Encoders
 
@@ -589,7 +589,7 @@ return handle;
 
 ### 12.11.3 The legacy gralloc HAL
 
-The traditional gralloc HAL module still lives in the old tree at `device/generic/goldfish-opengl/system/gralloc/gralloc_old.cpp`. Its `gralloc_alloc` validates the request, opens a `HostConnection` via a `DEFINE_HOST_CONNECTION` macro, and for renderable formats asks the host to create a color buffer. This is the implementation that backs `GoldfishGralloc` semantics on older system images; on current images the `Gralloc` abstraction above is what gfxstream's own code consumes.
+The traditional gralloc HAL module still lives in the old tree at `device/generic/goldfish-opengl/system/gralloc/gralloc_old.cpp`. Its `gralloc_alloc` validates the request, opens a `HostConnection` via a `DEFINE_AND_VALIDATE_HOST_CONNECTION` macro, and for renderable formats asks the host to create a color buffer. This is the implementation that backs `GoldfishGralloc` semantics on older system images; on current images the `Gralloc` abstraction above is what gfxstream's own code consumes.
 
 ### 12.11.4 Buffer sharing paths
 

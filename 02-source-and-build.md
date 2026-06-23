@@ -10,7 +10,7 @@ This chapter walks the layout from the outside in: how `repo` materializes the t
 
 The emulator source is assembled by `repo`, the same multi-repository tool used by AOSP. After `repo init` and `repo sync`, the top of the tree contains a hidden `.repo/` directory and a set of top-level project directories: `external/`, `hardware/`, `device/`, `tools/`, `prebuilts/`, `build/`, and `third_party/`.
 
-The active manifest is a two-line wrapper that pulls in the real one:
+The active manifest is a thin wrapper that pulls in the real one:
 
 ```xml
 <!-- Source: .repo/manifest.xml -->
@@ -156,7 +156,7 @@ add_custom_command(
 add_library(${bazel_TARGET} STATIC IMPORTED GLOBAL)
 ```
 
-This is invoked from `android_add_library` in `android/build/cmake/android.cmake`: when a library declaration carries a `BAZEL` argument and the host is Linux or macOS x86_64, CMake routes the build to Bazel instead of compiling the sources itself. The Bazel path is explicitly disabled for Windows MSVC and Linux aarch64 — those targets compile everything through CMake.
+This is invoked from `android_add_library` in `android/build/cmake/android.cmake`: when a library declaration carries a `BAZEL` argument and the host is Linux x86_64 or any macOS (x86_64 or aarch64), CMake routes the build to Bazel instead of compiling the sources itself. The Bazel path is explicitly disabled for Windows MSVC and Linux aarch64 — those targets compile everything through CMake.
 
 ### Build system collaboration
 
@@ -275,10 +275,12 @@ class BuildTask:
         self.name = self.__class__.__name__[:-4]
 
     def run(self) -> None:
+        """Runs the task if it is enabled."""
         if self.enabled:
+            logging.info("Running %s: %s", self.name, self.__class__.__doc__)
             self.do_run()
         else:
-            logging.info("Skipping %s", self.name)
+            logging.info("Skipping %s: %s", self.name, self.__class__.__doc__)
 ```
 
 `cmake.py` constructs the task list in `get_tasks` and then simply iterates over it, calling `run()` on each. The comment in the source is honest about the design: *"tasks are very simple without any dependency resolution."* There is no DAG — order is hard-coded in the list. The principal tasks, in order, are:
@@ -640,7 +642,7 @@ The final task, `DistributionTask`, only runs when a `--dist` directory is suppl
 },
 ```
 
-A release build therefore emits at least three zips: the user-facing emulator package (everything under `distribution/`), a separate debug-info package, and a Breakpad symbols package (`.sym` files for crash symbolication). On Linux it adds an `UNSTRIPPED-*` zip from the unstripped distribution that `CompileTask` produced; on Linux and macOS it adds a `FISHTANK-*` zip. The `{target}` and `{sdk_build_number}` placeholders are filled from the toolchain's distribution name and the `--sdk_build_number` argument, so the zips are self-describing.
+A release build therefore emits at least three zips: the user-facing emulator package (everything under `distribution/`), a separate debug-info package, and a Breakpad symbols package (`.sym` files for crash symbolication). On Linux it adds an `UNSTRIPPED-*` zip from the unstripped distribution that `CompileTask` produced; it adds a `FISHTANK-*` zip for every target except `linux_aarch64`. The `{target}` and `{sdk_build_number}` placeholders are filled from the toolchain's distribution name and the `--sdk_build_number` argument, so the zips are self-describing.
 
 The valid distribution targets mirror the toolchain map exactly:
 

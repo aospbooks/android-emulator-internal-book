@@ -85,7 +85,7 @@ static void goldfish_audio_write_buffer(struct goldfish_audio_state *s,
 
 ### 15.2.1 Fixed output format, 8 kHz mono input
 
-The device opens its host voices with hard-coded formats in `goldfish_audio_realize()`. Output is 44100 Hz, two channels, signed 16-bit; the microphone input is 8000 Hz mono.
+The output voice is opened with a hard-coded format in `goldfish_audio_realize()` — 44100 Hz, two channels, signed 16-bit — gated on `s->output`. The 8000 Hz mono microphone input voice is not opened here; it is opened lazily in `goldfish_audio_get_voicein()` when the guest first starts a read.
 
 ```c
 // Source: external/qemu/hw/audio/goldfish_audio.c
@@ -164,7 +164,7 @@ The device advertises its topology through the virtio config space: a count of j
 
 ### 15.3.1 Opening a host voice on demand
 
-Unlike goldfish, which opens its voices at realize time with a fixed format, virtio-snd opens a host voice only when the guest prepares a stream, and it uses the format the guest actually requested. `virtio_snd_voice_open()` unpacks the guest's 16-bit format word into a QEMU `audsettings` and tries to open the voice, falling back to fewer channels if the host rejects the request.
+Unlike goldfish, which opens its output voice at realize time with a fixed format, virtio-snd opens a host voice only when the guest prepares a stream, and it uses the format the guest actually requested. `virtio_snd_voice_open()` unpacks the guest's 16-bit format word into a QEMU `audsettings` and tries to open the voice, falling back to fewer channels if the host rejects the request.
 
 ```c
 // Source: external/qemu/hw/audio/virtio-snd.c
@@ -378,7 +378,7 @@ static void my_capture(void* opaque, void* buf, int size)
 
 `start()` builds `audsettings` from the capturer's requested rate/bits/channels, fills an `audio_capture_ops` with `my_capture`, and calls `AUD_add_capture()`. Multiple capturers can be active at once — they are keyed in an `unordered_map` — so the recorder, a WebRTC stream, and a gRPC `streamAudio` client can each receive the same mixed output independently.
 
-The recording subsystem's `AudioProducer` is one such consumer; it wraps an `AudioCapturer` whose `onSample` feeds the video encoder (`external/qemu/android/android-ui/modules/aemu-recording/src/android/recording/audio/AudioProducer.cpp`). The WebRTC `InprocessAudioSource` is another; it opens a `QemuAudioOutputStream` at 48000 Hz stereo S16 and forwards each frame to libwebrtc's `OnData` (`external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/capture/InprocessAudioSource.cpp`).
+The recording subsystem's `AudioProducer` is one such consumer; it wraps an `AudioCapturer` whose `onSample` feeds the video encoder (`external/qemu/android/android-ui/modules/aemu-recording/src/android/recording/audio/AudioProducer.cpp`). The WebRTC `InprocessAudioSource` is another; it opens a `QemuAudioOutputStream` at 44100 Hz stereo S16 and forwards each frame to libwebrtc's `OnData` (`external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/capture/InprocessAudioSource.cpp`).
 
 ### 15.6.2 The microphone forwarder
 
@@ -397,7 +397,7 @@ int QemuAudioInputEngine::start(android::emulation::AudioCapturer* capturer)
 }
 ```
 
-The forwarder is the `fwd` pseudo-driver. Its header comment is blunt about the technique — it modifies the global audio state to "interject a new active driver," saving the previous input voice and configuration so they can be restored on `audio_forwarder_disable()`. A virtio-snd device registers its input voice with the forwarder via `audio_forwarder_register_card()` during realize, and unregisters it during unrealize. Only one forwarder can be active at a time, which is why `QemuAudioInputEngine` guards entry with an atomic `compare_exchange_strong` and the gRPC layer rejects a second concurrent microphone.
+The forwarder is the `fwd` pseudo-driver. A comment in `audio_forwarder.c` is blunt about the technique — it modifies the global audio state to "interject a new active driver," saving the previous input voice and configuration so they can be restored on `audio_forwarder_disable()`. A virtio-snd device registers its input voice with the forwarder via `audio_forwarder_register_card()` during realize, and unregisters it during unrealize. Only one forwarder can be active at a time, which is why `QemuAudioInputEngine` guards entry with an atomic `compare_exchange_strong` and the gRPC layer rejects a second concurrent microphone.
 
 The two capture mechanisms — output tap versus input forwarder:
 
@@ -509,7 +509,7 @@ QEMU_AUDIO_DRV=none emulator -avd <name> -verbose 2>&1 | grep -i "audio"
 QEMU_AUDIO_DRV=wav  emulator -avd <name>   # writes playback to a wav file
 ```
 
-Capture the guest's audio output over gRPC with the bundled Python sample, which calls `streamAudio`:
+Inject a WAV file into the guest microphone over gRPC with the bundled Python sample, which reads the file and calls `injectAudio`:
 
 ```bash
 # The emulator prints its gRPC port to stdout; pass it to the sample client.

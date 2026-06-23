@@ -296,7 +296,7 @@ extern SmsPDU   smspdu_create_from_hex( const char*  hex, int  hexlen );
 extern int      smspdu_to_hex( SmsPDU  pdu, char*  hex, int  hexsize );
 ```
 
-`smspdu_create_deliver_utf8` returns an array because a long message must be split into several concatenated SMS PDUs; the array is NULL-terminated. The address handling follows the spec: `SMS_ADDRESS_MAX_SIZE` is 10 octets and characters are packed at `BITS_PER_SMS_CHAR` (7 bits) for the GSM default alphabet, with `is_in_gsm_default_alphabet` deciding whether a character can use the 7-bit packing in `gsm.c`.
+`smspdu_create_deliver_utf8` returns an array because a long message must be split into several concatenated SMS PDUs; the array is NULL-terminated. The address handling follows the spec: `SMS_ADDRESS_MAX_SIZE` is 10 octets and characters are packed at `BITS_PER_SMS_CHAR` (7 bits) for the GSM default alphabet, with `is_in_gsm_default_alphabet` deciding whether a character can use the 7-bit packing in `sms.c`.
 
 To deliver an inbound SMS to the guest, `amodem_receive_sms` encodes the PDU as hex, wraps it in a `+CMT:` unsolicited header, and pushes it down the serial line.
 
@@ -411,7 +411,7 @@ static int do_gsm_call(ControlClient client, char* args) {
 
 ### 21.8.2 The cellular agent
 
-The console and gRPC layers do not call the modem directly for cellular-state changes; they go through the `QAndroidCellularAgent`, a vtable of function pointers defined in `cellular_agent.h` and implemented in `qemu-cellular-agent-impl.c`. This indirection keeps the UI and control code free of modem internals.
+The gRPC layer and the UI do not call the modem directly for cellular-state changes; they go through the `QAndroidCellularAgent`, a vtable of function pointers defined in `cellular_agent.h` and implemented in `qemu-cellular-agent-impl.c`. This indirection keeps the UI and control code free of modem internals. The telnet console, by contrast, calls the `amodem_*`/`amodem_*_vx` functions directly: `do_gsm_signal` calls `amodem_set_signal_strength`, `do_gsm_signal_profile` calls `amodem_set_signal_strength_profile_vx`, `do_gsm_data` and `do_gsm_voice` call `amodem_set_data_registration_vx` and `amodem_set_voice_registration_vx`, and `do_gsm_call` calls `amodem_add_inbound_call_vx`.
 
 ```c
 // Source: external/qemu/android-qemu2-glue/qemu-cellular-agent-impl.c
@@ -459,7 +459,7 @@ flowchart TD
     LEGACY["ModemLegacy<br/>modem.c"]
     SIM["ModemSimulator<br/>Cuttlefish"]
 
-    TELNET -->|do_gsm_signal etc| AGENT
+    TELNET -->|"do_gsm_signal etc"| VX
     TELNET -->|"do_gsm_call / sms send"| VX
     GRPC -->|"setCellInfo"| AGENT
     GRPC -->|"createCall / receiveSms"| VX

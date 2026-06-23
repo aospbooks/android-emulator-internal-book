@@ -167,7 +167,7 @@ From the guest's point of view the protocol is: open `/dev/qemu_pipe`, write a N
 //      connect to the ADB pipe service ...
 ```
 
-The `pipe:` prefix selects a pipe service; `qemud:` selects the qemud multiplexer (see below); the remainder names a specific qemud service. New pipe service handlers register at emulation-startup time and are dispatched by the bytes the guest writes after opening the device. The framebuffer and codec paths bypass the pipe and use the address-space device instead (Section 24.7), but sensors, camera, and several smaller services all ride the pipe through qemud.
+The `pipe:` prefix selects a pipe service; `qemud:` selects the qemud multiplexer (see below); the remainder names a specific qemud service. New pipe service handlers register at emulation-startup time and are dispatched by the bytes the guest writes after opening the device. The codec path (and the large DMA buffer transfers behind gralloc) use the address-space device instead (Section 24.7.3), but sensors, camera, and several smaller services all ride the pipe through qemud; the graphics render-control channel itself also rides the pipe (Section 24.4).
 
 ### 24.3.1 The qemud multiplexer
 
@@ -237,7 +237,7 @@ When the framework calls `gralloc_alloc`, the module does not allocate GPU memor
 ```cpp
 // Source: device/generic/goldfish-opengl/system/gralloc/gralloc_old.cpp
 #define DEFINE_HOST_CONNECTION \
-    HostConnection* hostCon = HostConnection::get(); \
+    HostConnection *hostCon = createOrGetHostConnection(); \
     ExtendedRCEncoderContext *rcEnc = (hostCon ? hostCon->rcEncoder() : NULL);
 ```
 
@@ -366,7 +366,7 @@ When you change the charge level or AC state in the extended-controls UI (or via
 
 ### 24.6.4 Sync and fences
 
-`external/qemu/hw/misc/goldfish_sync.c` provides host-backed sync timelines so the guest can create real fence file descriptors for buffers that the *host* is still rendering. The HWC and gralloc paths use it to express "this color buffer is done compositing" without busy-waiting: the guest gets a fence fd immediately, and the host signals the corresponding timeline (commands such as `SYNC_GUEST_CMD_TRIGGER_HOST_WAIT`) when the GPU work completes. This is the glue that lets the host-composited graphics path participate in Android's normal fence-based buffer lifecycle.
+`external/qemu/hw/misc/goldfish_sync.c` provides host-backed sync timelines so the guest can create real fence file descriptors for buffers that the *host* is still rendering. The HWC and gralloc paths use it to express "this color buffer is done compositing" without busy-waiting: the guest gets a fence fd immediately, and the host signals the corresponding timeline (via `goldfish_sync_timeline_inc` over the host->guest `SYNC_REG_BATCH_COMMAND` path) when the GPU work completes. (The opposite-direction guest->host command `SYNC_GUEST_CMD_TRIGGER_HOST_WAIT` is the guest asking the host to wait on host GPU/CPU work, not a timeline signal.) This is the glue that lets the host-composited graphics path participate in Android's normal fence-based buffer lifecycle.
 
 Direct-MMIO HAL data paths
 
@@ -444,7 +444,7 @@ if (goldfish_address_space_ping(mHandle, &pingInfo) == false) {
 }
 ```
 
-Because the region is shared host/guest memory, the guest never copies frame data across a pipe: it writes the compressed input into the mapped region, pings `DecodeImage`, and reads decoded YUV (or a host color-buffer handle) back from the same region after `GetImage`. The header carves the region into fixed 8 MB slots (`getMemorySlot` / `returnMemorySlot`), one per concurrent decoder instance, with four slots available.
+Because the region is shared host/guest memory, the guest never copies frame data across a pipe: it writes the compressed input into the mapped region, pings `DecodeImage`, and reads decoded YUV (or a host color-buffer handle) back from the same region after `GetImage`. The implementation (`goldfish_media_utils.cpp`) subdivides the ~32 MB shared region into 32 base lots of 2 MB each, handed out by `getMemorySlot` / `returnMemorySlot` so multiple decoder instances can share the region; a single decoder can grab a larger contiguous span (the slot search assigns 32M, 16M, 8M, 4M, 2M, or 1M depending on concurrency).
 
 ### 24.7.3 The address-space device
 

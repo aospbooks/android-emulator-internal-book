@@ -89,7 +89,7 @@ The companion `TestTempDir` (in `android/base/testing/TestTempDir.h`) creates a 
 
 ### 27.2.2 Fixtures and test suites
 
-Tests that share setup use a googletest fixture — a class deriving from `::testing::Test` with `SetUp`/`TearDown`, instantiated per `TEST_F`. The snapshot tests build on this: `SnapshotFeatureControlTest` in `external/qemu/android/android-emu/android/snapshot/Snapshot_unittest.cpp` derives from a `FeatureControlTest` base so each snapshot test starts from a controlled feature-flag state. gfxstream's `FrameBufferTest` (in `hardware/google/gfxstream/host/frame_buffer_unittest.cpp`) uses the heavier `SetUpTestSuite`/`TearDownTestSuite` hooks to create the expensive rendering context once for the whole suite rather than per test.
+Tests that share setup use a googletest fixture — a class deriving from `::testing::Test` with `SetUp`/`TearDown`, instantiated per `TEST_F`. The snapshot tests build on this: `SnapshotFeatureControlTest` in `external/qemu/android/android-emu/android/snapshot/Snapshot_unittest.cpp` derives from a `FeatureControlTest` base so each snapshot test starts from a controlled feature-flag state. gfxstream's `FrameBufferTest` (in `hardware/google/gfxstream/host/frame_buffer_unittest.cpp`) uses the heavier `SetUpTestSuite` hook to create the expensive rendering context once for the whole suite rather than per test.
 
 How a unit test reaches its subject under test
 
@@ -194,8 +194,8 @@ Three details matter here. The executable is marked `NODISTRIBUTE`, so test bina
 `android_add_default_test_properties` (also in `android.cmake`, around line 843) attaches a consistent environment to every registered test:
 
 - An `ASAN_OPTIONS` value read from `external/qemu/android/asan_overrides`, so AddressSanitizer behaves uniformly across tests.
-- An `LLVM_PROFILE_FILE` set to `<test-name>.profraw`, which is what makes per-test coverage collection possible (see 27.8).
-- A `TIMEOUT` property of 600 seconds as a backstop.
+- An `LLVM_PROFILE_FILE` set to `<test-name>.profraw`, which is what makes per-test coverage collection possible (see 27.9.1).
+- A `TIMEOUT` property of 600 seconds set on every registered test, which becomes the operative per-test limit (a per-test `TIMEOUT` property takes precedence over ctest's `--timeout` default; see 27.5).
 - Platform-specific Qt library search paths (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on Windows) so tests that touch the Qt UI can find the Qt runtime.
 
 ### 27.4.2 Bundling many test files into one target
@@ -227,7 +227,7 @@ Command(
 ).in_directory(self.destination).with_environment(env).run()
 ```
 
-The JUnit file is written to `testlogs/test_results.xml` under the distribution directory specifically so the *test scraper* on CI can find it. The 180-second per-test ctest timeout is tighter than the 600-second CMake property — ctest enforces it first.
+The JUnit file is written to `testlogs/test_results.xml` under the distribution directory specifically so the *test scraper* on CI can find it. The `--timeout 180` value is only a default for tests that have no `TIMEOUT` property of their own; because `android_add_default_test_properties` sets a `TIMEOUT` property of 600 seconds on every registered test (see 27.4.1), and a per-test `TIMEOUT` property takes precedence over the `--timeout` default, the effective per-test limit here is 600 seconds, not 180.
 
 ### 27.5.1 Retry-and-report on failure
 
@@ -301,12 +301,13 @@ add_executable(
     tests/StalePtrRegistry_unittest.cpp)
 target_link_libraries(
     OpenglRender_unittests
-    PRIVATE gfxstream_backend_static gfxstream_common_testenv
+    PRIVATE gfxstream_backend_static gfxstream_common_base
+            gfxstream_common_testenv gfxstream_host_common
             gfxstream_host_testing_support gmock gtest_main)
 discover_tests(OpenglRender_unittests)
 ```
 
-There are three rendering-test executables in that file: `gfxstream_backend_unittests` (backend and feature-flag tests), `OpenglRender_unittests` (basic GLES rendering), and `OpenglRender_snapshot_unittests` (a large suite that saves and restores GL state across snapshots — `tests/GLSnapshot*_unittest.cpp`). The snapshot tests are the most valuable here because GL state restoration is exactly the kind of thing a unit test cannot reach but an integration-style render-and-compare test can.
+That file registers five test executables via `discover_tests`. Three of them are the GLES suites: `gfxstream_backend_unittests` (backend and feature-flag tests), `OpenglRender_unittests` (basic GLES rendering), and `OpenglRender_snapshot_unittests` (a large suite that saves and restores GL state across snapshots — `tests/GLSnapshot*_unittest.cpp`). The other two cover the Vulkan path: `Vulkan_unittests` (which ships `vulkan/testdata/*.png` golden images, copied to `testdata` at build time) and `Vulkan_integrationtests`. The snapshot tests are the most valuable here because GL state restoration is exactly the kind of thing a unit test cannot reach but an integration-style render-and-compare test can.
 
 ### 27.6.1 The graphics test environment
 
@@ -326,7 +327,7 @@ bool IsGraphicsTestEnvironmentProvidingVulkanDriver();
 
 ### 27.6.2 Why software rendering matters for CI
 
-Because the tests run against SwiftShader rather than a vendor GPU, they are deterministic and reproducible on any build machine — the same code path the `CTestTask` SwiftShader environment sets up for `android-emu`'s graphics tests. That determinism is what lets golden-image comparison tests (render a known scene, compare pixels to a checked-in `.bmp`) be trusted; a real GPU's driver-specific rounding would make pixel-exact golden tests fragile.
+Because the tests run against SwiftShader rather than a vendor GPU, they are deterministic and reproducible on any build machine — the same code path the `CTestTask` SwiftShader environment sets up for `android-emu`'s graphics tests. That determinism is what lets golden-image comparison tests (render a known scene, compare pixels to a checked-in `.png`) be trusted; a real GPU's driver-specific rounding would make pixel-exact golden tests fragile.
 
 gfxstream rendering test against a software GPU
 
@@ -337,7 +338,7 @@ flowchart LR
   OSW["OSWindow off-screen surface"]
   FB["FrameBuffer / render thread"]
   SW["SwiftShader<br/>GLES via ANGLE + Vulkan ICD"]
-  GOLD["Golden .bmp comparison"]
+  GOLD["Golden .png comparison"]
   T --> ENV
   ENV --> OSW
   T --> FB
@@ -378,7 +379,7 @@ async def has_network(adb):
     return False
 ```
 
-The harness wraps the running emulator in helper classes under `external/adt-infra/pytest/test_embedded/src/emu/`. `BaseEmulator` (in `src/emu/emulator.py`) exposes `launch`, `wait_for_boot`, `has_booted`, `console`, `start_activity`, and a `mobly` accessor, while the concrete `Emulator` subclass actually spawns the process and waits for ADB to come online. Tests request these through pytest fixtures — `avd`, `adb`, `emulator_log`, `mbs` — defined in `tests/fixtures/emulator_fixtures.py` and `tests/fixtures/mobly_fixtures.py`, with the emulator-level fixtures scoped to `module` so one boot is shared across the tests in a file.
+The harness wraps the running emulator in helper classes under `external/adt-infra/pytest/test_embedded/src/emu/`. `BaseEmulator` (in `src/emu/emulator.py`) exposes `launch`, `wait_for_boot`, `has_booted`, `console`, `start_activity`, and a `mobly` accessor, while the concrete `Emulator` subclass actually spawns the process and waits for ADB to come online. Tests request these through pytest fixtures — `avd`, `adb_shell`, `emulator_log`, `mbs` — defined in `tests/fixtures/emulator_fixtures.py` and `tests/fixtures/mobly_fixtures.py`, with the emulator-level fixtures scoped to `module` so one boot is shared across the tests in a file.
 
 ### 27.7.2 Suites, markers, and AVD configurations
 

@@ -42,6 +42,15 @@ Good: participant App as Application (App Process)
 
 `<br/>` in message labels and `Note` blocks is fine.
 
+**Reserved-word participant ids.** A `participant` id (the token before `as`) must not collide with a sequenceDiagram keyword: `loop`, `alt`, `opt`, `par`, `and`, `note`, `end`, `activate`, `deactivate`, `rect`, `critical`, `break`. The collision is case-insensitive, so an id like `Loop` breaks the parse the moment it is used in a message (`Setup->>Loop: ...`), and the error points at the *following* line, which makes it hard to spot. Rename the id (e.g. `Loop` → `TLoop`) and keep the readable name in the `as` alias:
+
+```
+Bad:  participant Loop as Looper / ThreadLooper
+      Setup->>Loop: qemu_looper_setForThread
+Good: participant TLoop as Looper / ThreadLooper
+      Setup->>TLoop: qemu_looper_setForThread
+```
+
 ### stateDiagram-v2
 Parentheses in transition labels cause parse errors — and **this is by far the most common Mermaid breakage in this book** (a single audit pass fixed 100+ instances across 25+ chapters). Quoting does not save you here; you must rewrite without parens:
 

@@ -2,7 +2,7 @@
 
 The guest never touches a real GPU. Its OpenGL ES and Vulkan calls are serialized into a byte stream (Chapter 14), shipped across the virtio-gpu / goldfish-pipe transport, and replayed on the host by a renderer that the emulator links in as a shared library: gfxstream's host backend, historically called `libOpenglRender` and now built from `hardware/google/gfxstream/host/`. This chapter is about what happens on the host side once those bytes arrive: how the command stream is decoded, how GLES calls are translated to whatever the host can actually run (desktop GL, ANGLE, SwiftShader, mesa/lavapipe), how Vulkan is forwarded to a real host driver (including MoltenVK on macOS), and how the rendered pixels — held in host `ColorBuffer` objects — finally reach a window, the recorder, or the WebRTC encoder.
 
-The central object is the `FrameBuffer` singleton in `hardware/google/gfxstream/host/frame_buffer.h`, which despite its name is really the renderer's global display state. Around it sit two emulation backends — `EmulationGl` and `VkEmulation` — a set of per-context render threads, three command decoders, and a `PostWorker` that puts finished frames on screen. We follow a frame from the decode loop down to the host driver and back up to the display.
+The central object is the `FrameBuffer` singleton in `hardware/google/gfxstream/host/frame_buffer.h`, which despite its name is really the renderer's global display state. Around it sit two emulation backends — `EmulationGl` and `VkEmulation` — a set of per-context render threads, four command decoders, and a `PostWorker` that puts finished frames on screen. We follow a frame from the decode loop down to the host driver and back up to the display.
 
 ---
 
@@ -30,7 +30,7 @@ public:
 
 ### 13.1.1 GLES vs. Vulkan as separate concerns
 
-A subtle but important fact: GLES emulation and Vulkan emulation are two independent backends, selected independently. The build can even compile out GLES entirely — every GL-specific declaration in `frame_buffer.h` is guarded by `#if GFXSTREAM_ENABLE_HOST_GLES`. `FrameBuffer` queries each backend's presence at runtime:
+A subtle but important fact: GLES emulation and Vulkan emulation are two independent backends, selected independently. The build can even compile out GLES entirely — much of the GL-specific surface in `frame_buffer.h` is guarded by `#if GFXSTREAM_ENABLE_HOST_GLES`, though some `GLenum`-typed legacy methods (the `Deprecated` create/read/update color-buffer variants) remain outside the guard. `FrameBuffer` queries each backend's presence at runtime:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/frame_buffer.h
@@ -109,7 +109,7 @@ So there are five named modes the emulator distinguishes internally:
 
 ### 13.2.1 The `auto` decision
 
-The default `-gpu auto` does not appear in the enum above because it is resolved earlier into one of the concrete modes. In `emuglConfig_setupEnv()`, `auto` falls back to software rendering when the host has no usable GPU, and otherwise prefers `host`:
+The default `-gpu auto` does not appear in the enum above because it is resolved earlier into one of the concrete modes. In `emuglConfig_init()`, `auto` falls back to software rendering when the host has no usable GPU, and otherwise prefers `host`:
 
 ```cpp
 // Source: external/qemu/android/android-ui/modules/aemu-gl-init/src/android/opengl/emugl_config.cpp
@@ -146,7 +146,7 @@ How `-gpu` becomes a backend selection
 
 ```mermaid
 flowchart TB
-  U["-gpu mode"] --> CFG["emuglConfig_setupEnv()"]
+  U["-gpu mode"] --> CFG["emuglConfig_init()"]
   CFG --> A{"mode == auto?"}
   A -->|yes| B{"host GPU usable?"}
   B -->|no| SW["swangle / swiftshader"]
@@ -317,7 +317,7 @@ SwiftShader is Google's pure-CPU implementation of GL ES and Vulkan. In `swiftsh
 
 ### 13.5.4 mesa lavapipe / llvmpipe
 
-`external/mesa3d/` provides mesa's software renderers: llvmpipe (a Gallium OpenGL driver) and lavapipe (a Vulkan driver built on the same LLVM-based rasterizer). On Linux, `-gpu lavapipe` selects these as the software path. As the mesa3d README notes, the tree's mesa also supplies the *guest* gfxstream/virtio-gpu Vulkan driver — but on the host it is the lavapipe/llvmpipe software ICD. `vulkan_dispatch.cpp` even has a direct-load path for it that bypasses the Vulkan loader in high-integrity mode (`kLavapipeIcdJson`, resolving `libvulkan_lvp`).
+`external/mesa3d/` provides mesa's software renderers: llvmpipe (a Gallium OpenGL driver) and lavapipe (a Vulkan driver built on the same LLVM-based rasterizer). On Linux, `-gpu lavapipe` selects these as the software path. The tree's mesa (under `src/gfxstream` and `src/virtio`) also supplies the *guest* gfxstream/virtio-gpu Vulkan driver — but on the host it is the lavapipe/llvmpipe software ICD. `vulkan_dispatch.cpp` even has a direct-load path for it that bypasses the Vulkan loader in high-integrity mode (`kLavapipeIcdJson`, resolving `libvulkan_lvp`).
 
 A note on `external/virglrenderer/`: virglrenderer is the *other* virtio-gpu host renderer (the OpenGL-focused "virgl" path used by plain QEMU/crosvm). The Android stack uses gfxstream rather than virgl for Android guests, but virglrenderer ships in the tree because crosvm can be built with either.
 
@@ -473,7 +473,7 @@ Before display, multiple `ColorBuffer` layers (from SurfaceFlinger's HWC layers,
 
 ## 13.9 Posting: From ColorBuffer to Screen and Encoder
 
-The last step is "post": taking the final `ColorBuffer` and getting it to the user's eyes (or the recorder). The guest triggers this through `rcFBPost`/`rcFBPostWithCallback`, which calls `FrameBuffer::post()`. Posting always happens on a dedicated `PostWorker` thread (`post_worker.cpp`) so that the GL/Vulkan presentation work does not block the render threads. `FrameBuffer::sendPostWorkerCmd()` enqueues a `Post` command:
+The last step is "post": taking the final `ColorBuffer` and getting it to the user's eyes (or the recorder). The guest triggers this through `rcFBPost`, which calls `FrameBuffer::post()` (a host-side `FrameBuffer::postWithCallback()` variant exists for callers that need a completion callback). Posting always happens on a dedicated `PostWorker` thread (`post_worker.cpp`) so that the GL/Vulkan presentation work does not block the render threads. `FrameBuffer::sendPostWorkerCmd()` enqueues a `Post` command:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/post_commands.h
@@ -493,7 +493,7 @@ There are two `PostWorker` subclasses for the two display backends: `PostWorkerG
 
 `FrameBuffer::initialize()` takes a `useSubWindow` flag. There are two consumers of a posted frame:
 
-1. The on-screen sub-window — when the emulator UI creates a child window (`setupSubWindow()`), the `PostWorker` blits/presents directly into it. The native window handle is platform-specific (`native_sub_window_*.cpp` for X11, Cocoa, Win32).
+1. The on-screen sub-window — when the emulator UI creates a child window (`setupSubWindow()`), the `PostWorker` blits/presents directly into it. The native window handle is platform-specific (`native_sub_window_*` for X11, Cocoa, Win32 — the Cocoa variant is `native_sub_window_cocoa.mm`).
 2. A registered post callback — for headless use, screen recording, and WebRTC streaming, the consumer registers an `OnPostCallback` and the renderer reads the posted frame back into CPU memory and hands it over.
 
 The callback signature, in `Renderer.h`, always delivers RGBA bytes:

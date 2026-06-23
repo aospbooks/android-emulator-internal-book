@@ -324,11 +324,13 @@ The rate and latency values come from named presets defined in `external/qemu/an
 // Source: external/qemu/android/emu/cmdline/include/android/network/constants.h
 #define ANDROID_NETWORK_LIST_MODES(X) \
     X(gsm,   "GSM/CD",        14.4,     14.4, 150, 550) \
+    X(hscsd, "HSCSD",         14.4,     57.6,  80, 400) \
     X(gprs,  "GPRS",          28.8,     57.6,  35, 200) \
     X(umts,  "UMTS/3G",      384.0,    384.0,  35, 200) \
     X(edge,  "EDGE/EGPRS",   473.6,    473.6,  80, 400) \
     X(hsdpa, "HSDPA",       5760.0,  13980.0,   0,   0) \
     X(lte,   "LTE",        58000.0, 173000.0,   0,   0) \
+    X(evdo,  "EVDO",       75000.0, 280000.0,   0,   0) \
 ```
 
 The console `network speed` and `network delay` commands (`do_network_speed` / `do_network_delay` in `external/qemu/android/android-emu/android/console.cpp:933`) parse these names and update the global `android_net_upload_speed`, `android_net_download_speed`, and the min/max latency through `android_network_set_speed` / `android_network_set_latency` (`external/qemu/android/android-emu/android/network/control.cpp`). The shaper picks up the new rate on the next frame.
@@ -415,6 +417,7 @@ The decision tree mirrors how a real AP behaves: management and control frames a
 // Source: external/qemu/android-qemu2-glue/emulation/WifiService.cpp
 static const uint8_t kBssID[] = {0x00, 0x13, 0x10, 0x85, 0xfe, 0x01};
 static const char* kNetwork = "10.0.2.0";
+static const char* kMask = "255.255.255.0";
 static const char* kHost = "10.0.2.2";
 static const char* kDhcp = "10.0.2.15";
 static const char* kDns = "10.0.2.3";

@@ -12,7 +12,7 @@ Every path in this appendix is rooted at one of the superproject's top-level dir
 
 The five roots that matter for this book are these.
 
-- `external/qemu/` is the QEMU fork. It contains both upstream QEMU (`hw/`, `vl.c`, `softmmu/`) and a large `android/` subtree of emulator-specific code that upstream QEMU has never seen. The `android-qemu2-glue/` directory bridges the two.
+- `external/qemu/` is the QEMU fork. It contains both upstream QEMU (`hw/`, `vl.c`, `cpus.c`) and a large `android/` subtree of emulator-specific code that upstream QEMU has never seen. The `android-qemu2-glue/` directory bridges the two.
 - `hardware/google/aemu/` and `hardware/google/gfxstream/` are standalone CMake/Bazel libraries. `aemu` is the base utility and host-common layer; `gfxstream` is the graphics streaming renderer. Both are vendored into AOSP and built independently as well as inside the emulator.
 - `device/generic/` holds guest-side code that compiles into the Android system image: `goldfish-opengl` (the guest GPU driver stack) and `vulkan-cereal` (a guest mirror of the gfxstream encoder).
 - `device/google/cuttlefish/` is the entire Cuttlefish virtual device — host launchers, guest HALs, and the orchestration that runs Android on crosvm rather than QEMU.
@@ -30,7 +30,7 @@ The diagram below shows how the top-level source roots stack from the build syst
 flowchart TB
     subgraph HOST["Host process (emulator / qemu-system)"]
         BUILD["external/qemu/android/build (CMake + Python tasks)"]
-        QEMU["external/qemu (QEMU fork: hw, vl.c, softmmu)"]
+        QEMU["external/qemu (QEMU fork: hw, vl.c, cpus.c)"]
         GLUE["external/qemu/android-qemu2-glue (bridge)"]
         CORE["external/qemu/android/android-emu (core emulation)"]
         AEMU["hardware/google/aemu (base + host-common)"]
@@ -75,7 +75,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 | `external/qemu/android/build/python/aemu/cmake.py` | Locates and wraps the prebuilt CMake binary used for configuration. |
 | `external/qemu/android/build/cmake/android.cmake` | CMake module with the emulator's per-target helpers and platform settings. |
 | `external/qemu/android/build/cmake/prebuilts.cmake` | Resolves the `prebuilts/android-emulator-build` dependencies into the build. |
-| `external/qemu/rebuild.sh` | Convenience shell wrapper that invokes the Python build for the current host. |
+| `external/qemu/android/rebuild.sh` | Convenience shell wrapper that invokes the Python build for the current host. |
 | `hardware/google/aemu/CMakeLists.txt` | Standalone build entry for the `aemu` base + host-common libraries. |
 | `hardware/google/gfxstream/CMakeLists.txt` | Standalone build entry for the gfxstream host renderer. |
 
@@ -83,7 +83,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 
 ## A.3 QEMU Fork and Glue
 
-`external/qemu/` is a fork of QEMU, not a clean upstream checkout. The upstream machinery (`vl.c`, `softmmu/`, `hw/`) is still there, but a large `android/` subtree and an `android-qemu2-glue/` bridge layer have been bolted on. The glue is what lets QEMU call into the emulator's host services and what lets the emulator drive the QEMU machine.
+`external/qemu/` is a fork of QEMU, not a clean upstream checkout. The upstream machinery (`vl.c`, `cpus.c`, `hw/`) is still there, but a large `android/` subtree and an `android-qemu2-glue/` bridge layer have been bolted on. The glue is what lets QEMU call into the emulator's host services and what lets the emulator drive the QEMU machine.
 
 | File / Directory | Purpose |
 |---|---|
@@ -116,7 +116,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 | `external/qemu/android/android-emu/android/hw-sensors.cpp` | The sensor port: maps the host `QAndroidSensorsAgent` onto the guest sensor HAL over a pipe. |
 | `external/qemu/android/android-emu/android/main-common.c` | Shared command-line front-end logic used by the launcher before QEMU starts. |
 | `external/qemu/android/android-emu/android/process_setup.cpp` | Early process initialization (crash handler, logging, environment) common to all entry points. |
-| `external/qemu/android/android-emu/android/emulation/AndroidPipe.h` | The `AndroidPipe` base interface for goldfish-pipe services; implemented in `hardware/google/aemu/host-common/AndroidPipe.cpp`. |
+| `hardware/google/aemu/host-common/include/host-common/AndroidPipe.h` | The `AndroidPipe` base interface for goldfish-pipe services; implemented in `hardware/google/aemu/host-common/AndroidPipe.cpp`. |
 | `external/qemu/android/android-emu/android/emulation/AdbGuestPipe.cpp` | The guest end of the ADB-over-pipe transport. |
 | `external/qemu/android/android-emu/android/emulation/AdbVsockPipe.cpp` | The vsock-based ADB transport used on newer images. |
 | `external/qemu/android/android-emu/android/emulation/address_space_graphics.cpp` | Address-space device context that carries gfxstream's ring buffers. |
@@ -124,7 +124,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 | `external/qemu/android/android-emu/android/snapshot/Quickboot.cpp` | Quickboot orchestration — save on exit, restore on next launch. |
 | `external/qemu/android/android-emu/android/snapshot/RamLoader.cpp` | Lazy / incremental RAM restore for snapshots. |
 | `external/qemu/android/android-emu/android/snapshot/Compressor.cpp` | Snapshot RAM compression. |
-| `external/qemu/android/android-emu/android/avd/info.c` | Parses the AVD config and hardware ini into the runtime AVD info. |
+| `external/qemu/android/emu/avd/src/android/avd/info.c` | Parses the AVD config and hardware ini into the runtime AVD info. |
 | `external/qemu/android/android-emu/android/console.cpp` | The legacy telnet console server; `ControlClientRec` tracks each connected client and dispatches commands. |
 | `external/qemu/android/emu/feature/src/android/featurecontrol/FeatureControl.cpp` | Runtime feature flags that gate experimental subsystems. |
 | `external/qemu/android/emulator/main-emulator.cpp` | The launcher binary: scans AVDs, picks the right backend, and re-execs the QEMU-backed emulator. |
@@ -195,8 +195,8 @@ Connectivity covers the guest's network stack, its radios (Wi-Fi, Bluetooth, cel
 
 | File / Directory | Purpose |
 |---|---|
-| `external/qemu/android/android-net/android/network/control.cpp` | Network control surface (speed/latency shaping, DNS) for the emulated NIC. |
-| `external/qemu/android/android-net/android/network/wifi.cpp` | Host-side Wi-Fi emulation entry. |
+| `external/qemu/android/android-emu/android/network/control.cpp` | Network control surface (speed/latency shaping, DNS) for the emulated NIC. |
+| `external/qemu/android/android-emu/android/network/wifi.cpp` | Host-side Wi-Fi emulation entry. |
 | `external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp` | Forwards virtio-wifi frames between the guest and the host / netsim. |
 | `external/qemu/android-qemu2-glue/net-android.cpp` | Bridges QEMU's net backends to the emulator's network control. |
 | `tools/netsim/rust/daemon/src/lib.rs` | The netsim daemon — the radio backplane that simulates Wi-Fi, BLE, and UWB across devices. |
@@ -295,7 +295,7 @@ Tests live next to the code they exercise: any file named `*_unittest.cpp` is a 
 | `external/qemu/android/emu/tracing/` | Host-side tracing instrumentation. |
 | `external/qemu/android/emu/crashreport/` | Crash handler and minidump collection wired up in `process_setup.cpp`. |
 | `external/qemu/android/emu/metrics/` | Usage and performance metrics reporting. |
-| `external/qemu/android-qemu2-glue/emulation/AdbMessageSniffer.cpp` | Decodes ADB traffic for debugging the transport. |
+| `external/qemu/android/android-emu/android/emulation/AdbMessageSniffer.cpp` | Decodes ADB traffic for debugging the transport. |
 | `device/google/cuttlefish/host/commands/kernel_log_monitor/` | Watches the Cuttlefish guest kernel log for boot milestones during debugging. |
 
 ---
@@ -308,7 +308,7 @@ The table below maps the kinds of questions readers ask to the first file to ope
 |---|---|
 | Where does the emulator process start? | `external/qemu/android/emulator/main-emulator.cpp`, then `external/qemu/android-qemu2-glue/main.cpp` |
 | How are host services exposed to QEMU? | `external/qemu/android/android-emu/android/android.h` and `external/qemu/android-qemu2-glue/qemu-setup.cpp` |
-| How does host/guest high-bandwidth I/O work? | `external/qemu/hw/misc/goldfish_pipe.c` and `external/qemu/android/android-emu/android/emulation/AndroidPipe.h` |
+| How does host/guest high-bandwidth I/O work? | `external/qemu/hw/misc/goldfish_pipe.c` and `hardware/google/aemu/host-common/include/host-common/AndroidPipe.h` |
 | How is the screen rendered? | `hardware/google/gfxstream/host/frame_buffer.cpp` and `hardware/google/gfxstream/host/render_api.cpp` |
 | How does the guest encode GL/Vulkan? | `device/generic/goldfish-opengl/system/` |
 | How do snapshots and Quickboot work? | `external/qemu/android/android-emu/android/snapshot/Quickboot.cpp` |

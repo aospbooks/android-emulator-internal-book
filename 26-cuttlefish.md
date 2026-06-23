@@ -97,11 +97,11 @@ for (const auto& instance : config->Instances()) {
 }
 ```
 
-This is the architectural opposite of the emulator. There, `main.c` in `external/qemu/android/android-emu/android/` parses options and then becomes QEMU. Here the launcher never becomes the VMM; it spawns separate assembly and runtime processes and exits, leaving `run_cvd` as the long-lived parent.
+This is the architectural opposite of the emulator. There, `main-emulator.cpp` in `external/qemu/android/emulator/` parses options and then becomes QEMU. Here the launcher never becomes the VMM; it spawns separate assembly and runtime processes and exits, leaving `run_cvd` as the long-lived parent.
 
 ### 26.2.2 assemble_cvd: turn flags and images into a config and disks
 
-`device/google/cuttlefish/host/commands/assemble_cvd/assemble_cvd.cc` is the configuration compiler. It owns the bulk of the flags (it includes `flags.h`, `disk_flags.h`, `graphics_flags.h`, `network_flags.h`), composes super-image partitions, builds the virtual disks, and emits `cuttlefish_config.json`. The directory makes the scope visible: `disk_builder.cpp`, `super_image_mixer.cc`, `boot_image_utils.cc`, `graphics_flags.cc`, `network_flags.cpp`. Assembly is a one-shot transform — it reads images and flags, writes disks and a JSON config, and exits. Nothing it produces is a running process.
+`device/google/cuttlefish/host/commands/assemble_cvd/assemble_cvd.cc` is the configuration compiler. It owns the bulk of the flags (it includes `disk_flags.h` and `flags.h`), composes super-image partitions, builds the virtual disks, and emits `cuttlefish_config.json`. The directory makes the scope visible: `disk_builder.cpp`, `super_image_mixer.cc`, `boot_image_utils.cc`, `graphics_flags.cc`, `network_flags.cpp`. Assembly is a one-shot transform — it reads images and flags, writes disks and a JSON config, and exits. Nothing it produces is a running process.
 
 The emulator has no equivalent standalone phase; option parsing, AVD-config loading, and disk preparation all happen inside the single `emulator` process before QEMU starts. Cuttlefish factors that work into its own binary so the same assembled config can be reused, inspected, and shared across the per-instance runners.
 
@@ -287,7 +287,7 @@ flowchart TB
 
 ## 26.5 vsock and virtio-console: The Guest Transport
 
-This is the deepest break from the emulator. The QEMU emulator multiplexes almost all host/guest communication over Goldfish "qemu pipes" — a custom virtual device where the guest opens `/dev/qemu_pipe` and names a service (`qemud:`, sensors, GPS); `external/qemu/android/android-emu/android/` is full of `qemu_pipe` references (`hw-sensors.cpp`, `car.cpp`, `qemu-setup.cpp`). Cuttlefish uses two upstream virtio transports instead: virtio-vsock for socket-style services and virtio-console for stream-style links.
+This is the deepest break from the emulator. The QEMU emulator multiplexes almost all host/guest communication over Goldfish "qemu pipes" — a custom virtual device where the guest opens `/dev/qemu_pipe` and names a service (`qemud:`, sensors, GPS); `external/qemu/android/android-emu/android/` is full of `qemud` references (`hw-sensors.cpp`, `car.cpp`, `qemu-setup.cpp`). Cuttlefish uses two upstream virtio transports instead: virtio-vsock for socket-style services and virtio-console for stream-style links.
 
 ### 26.5.1 Each device gets a vsock CID
 
@@ -463,7 +463,7 @@ sequenceDiagram
 
 ## 26.7 Shared Graphics: gfxstream on crosvm
 
-Cuttlefish renders guest graphics with gfxstream, the same host renderer the emulator uses, but it plugs in through crosvm's virtio-gpu and rutabaga path rather than living inside the VMM. The connecting API is `stream_renderer_init` and friends, declared in `hardware/google/gfxstream/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h`, where context types like `gfxstream-gles` and `gfxstream-vulkan` are negotiated.
+Cuttlefish renders guest graphics with gfxstream, the same host renderer the emulator uses, but it plugs in through crosvm's virtio-gpu and rutabaga path rather than living inside the VMM. The connecting API is `stream_renderer_init` and friends, declared in `hardware/google/gfxstream/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h`; the context types like `gfxstream-gles` and `gfxstream-vulkan` are selected by crosvm (see 26.7.1).
 
 ### 26.7.1 Configuring the GPU device
 
