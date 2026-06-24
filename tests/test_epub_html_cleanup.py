@@ -733,10 +733,10 @@ class TestDiagramSizeBehaviors:
 
 class TestChapterSlugFor:
     def test_prepends_ch_to_stem(self):
-        assert chapter_slug_for("07-bionic-and-linker.md") == "ch07-bionic-and-linker"
+        assert chapter_slug_for("07-android-emu-architecture.md") == "ch07-android-emu-architecture"
 
     def test_never_starts_with_digit(self):
-        # All AOSP book filenames follow the NN-slug.md convention, which
+        # All book chapter filenames follow the NN-slug.md convention, which
         # would produce invalid CSS identifiers without a non-digit prefix.
         for src in ("01-intro.md", "42.md", "09-abc.md", "00-frontmatter.md"):
             assert not chapter_slug_for(src)[0].isdigit()

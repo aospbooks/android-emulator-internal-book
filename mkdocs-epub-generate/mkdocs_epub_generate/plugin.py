@@ -132,10 +132,10 @@ class EpubGeneratePlugin(BasePlugin):
         book = epub.EpubBook()
 
         # Metadata
-        book.set_identifier("aosp-internals-epub")
+        book.set_identifier("android-emulator-internals-epub")
         book.set_title(config.get("site_name", "Book"))
         book.set_language("en")
-        book.add_author("AOSP Internals Contributors")
+        book.add_author("Android Emulator Internals Contributors")
         book.add_metadata("DC", "description",
                           config.get("site_description", ""))
         book.add_metadata("DC", "date",
