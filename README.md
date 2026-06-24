@@ -19,39 +19,41 @@ emulator tree.
 machine model up through the host renderer, the streaming UIs, and the
 crosvm-based Cuttlefish virtual device:
 
-| Part | Ch. | Topics |
-|------|-----|--------|
-| Front | 0 | Frontmatter |
-| I | 1 | Introduction (host/guest split, architecture) |
-| I | 2 | Source Code & Build System (repo manifest, CMake/Bazel) |
-| I | 3 | Running the Emulator (launcher, AVDs, config) |
-| II | 4 | The QEMU Fork (ranchu/goldfish, qemu2-glue) |
-| II | 5 | CPU Acceleration (KVM/HVF/WHPX/AEHD/TCG) |
-| II | 6 | Virtual Hardware & virtio |
-| III | 7 | android-emu Architecture & Lifecycle |
-| III | 8 | Console & gRPC Control Plane |
-| III | 9 | Snapshots & Quickboot |
-| III | 10 | Sensors, Battery & Location |
-| IV | 11 | Graphics Architecture (gfxstream) |
-| IV | 12 | Guest GPU Drivers |
-| IV | 13 | Host Rendering (libOpenglRender/ANGLE/mesa) |
-| IV | 14 | gfxstream Protocol |
-| V | 15 | Audio |
-| V | 16 | Camera |
-| V | 17 | Display & Multi-Display |
-| VI | 18 | Networking (slirp/netsim) |
-| VI | 19 | Bluetooth (rootcanal) |
-| VI | 20 | ADB Integration |
-| VI | 21 | Modem & Telephony |
-| VII | 22 | The Qt UI |
-| VII | 23 | WebRTC & the Embedded Emulator |
-| VIII | 24 | System Images & the Goldfish HAL |
-| VIII | 25 | Guest Boot |
-| IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) |
-| X | 27 | Testing |
-| X | 28 | Debugging, Tracing & Crash Reporting |
-| App. | A | Key Files Reference |
-| App. | B | Glossary |
+| Part | Ch. | Topics | Reviewed |
+|------|-----|--------|----------|
+| Front | 0 | Frontmatter | ✗ |
+| I | 1 | Introduction (host/guest split, architecture) | ✗ |
+| I | 2 | Source Code & Build System (repo manifest, CMake/Bazel) | ✗ |
+| I | 3 | Running the Emulator (launcher, AVDs, config) | ✗ |
+| II | 4 | The QEMU Fork (ranchu/goldfish, qemu2-glue) | ✗ |
+| II | 5 | CPU Acceleration (KVM/HVF/WHPX/AEHD/TCG) | ✗ |
+| II | 6 | Virtual Hardware & virtio | ✗ |
+| III | 7 | android-emu Architecture & Lifecycle | ✗ |
+| III | 8 | Console & gRPC Control Plane | ✗ |
+| III | 9 | Snapshots & Quickboot | ✗ |
+| III | 10 | Sensors, Battery & Location | ✗ |
+| IV | 11 | Graphics Architecture (gfxstream) | ✗ |
+| IV | 12 | Guest GPU Drivers | ✗ |
+| IV | 13 | Host Rendering (libOpenglRender/ANGLE/mesa) | ✗ |
+| IV | 14 | gfxstream Protocol | ✗ |
+| V | 15 | Audio | ✗ |
+| V | 16 | Camera | ✗ |
+| V | 17 | Display & Multi-Display | ✗ |
+| VI | 18 | Networking (slirp/netsim) | ✗ |
+| VI | 19 | Bluetooth (rootcanal) | ✗ |
+| VI | 20 | ADB Integration | ✗ |
+| VI | 21 | Modem & Telephony | ✗ |
+| VII | 22 | The Qt UI | ✗ |
+| VII | 23 | WebRTC & the Embedded Emulator | ✗ |
+| VIII | 24 | System Images & the Goldfish HAL | ✗ |
+| VIII | 25 | Guest Boot | ✗ |
+| IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) | ✗ |
+| X | 27 | Testing | ✗ |
+| X | 28 | Debugging, Tracing & Crash Reporting | ✗ |
+| App. | A | Key Files Reference | ✗ |
+| App. | B | Glossary | ✗ |
+
+✗ = not yet reviewed by a human; published openly for community review.
 <!-- --8<-- [end:coverage] -->
 
 ## How to Give Feedback
