@@ -399,7 +399,134 @@ sequenceDiagram
 
 The launcher captures restart parameters with `initializeEmulatorRestartParameters()` before it mangles `argv`, so the engine can relaunch itself with the same options after a quickboot restart. `-read-only` disables restart (and snapshot saving) so multiple instances can share one AVD. The `-is-restart <pid>` option, set when the engine respawns, makes the new launcher wait up to ten seconds for the old process to exit before proceeding. The launcher's small `-kill`/`-sleep` handler (run before anything else in `main()`) is the watchdog used to terminate a hung emulator process by pid.
 
-## 3.9 Try It
+## 3.9 One Engine, Many Form Factors
+
+There is no separate "Wear emulator" or "Android TV emulator" binary. The same `qemu-system-*` engine and the same launcher you have followed through this chapter boot a watch, a television, a foldable phone, a car head unit, a desktop, and an XR headset. What differs is entirely *data*: the AVD's `config.ini`, the system image's `build.prop`, and the chosen skin. Three pieces of derived state turn that data into device-specific behavior — an `AvdFlavor` classification, a hardware profile of geometry and input devices, and per-device sensor configuration — and all three flow through the same `avdInfo_initHwConfig` merge (section 3.6) into one `hardware-qemu.ini`.
+
+### Diagram: one AVD configuration, many form factors
+
+```mermaid
+flowchart TD
+    BP["build.prop<br/>ro.product.* names"] --> FL["propertyFile_getAvdFlavor<br/>→ AvdFlavor"]
+    CFG["config.ini<br/>hw.device.name, hw.lcd.*,<br/>hw.sensor.hinge.*, skin.name"] --> MERGE["avdInfo_initHwConfig<br/>defaults + skin + config.ini"]
+    FL --> AVD["AvdInfo<br/>(flavor + hw config)"]
+    MERGE --> AVD
+    AVD --> HW["hardware-qemu.ini<br/>handed to QEMU"]
+    AVD -->|"flavor + hinge config"| B1["Sensors: hinge, posture,<br/>heart rate (Ch 10)"]
+    AVD -->|"flavor + lcd config"| B2["Display: round face, multi-display,<br/>stacked car layout (Ch 17)"]
+    AVD -->|"flavor"| B3["UI: which extended-control<br/>panels appear (Ch 22)"]
+```
+
+### 3.9.1 The AVD flavor
+
+The coarse device class is an `AvdFlavor` enum, declared in `external/qemu/android/emu/avd/include/android/avd/util.h:125`:
+
+```c
+// Source: external/qemu/android/emu/avd/include/android/avd/util.h
+typedef enum {
+    AVD_PHONE = 0,
+    AVD_TV = 1,
+    AVD_WEAR = 2,
+    AVD_ANDROID_AUTO = 3,
+    AVD_DESKTOP = 4,
+    AVD_XR = 5,
+    AVD_GLASSES = 6,
+    AVD_OTHER = 255,
+} AvdFlavor;
+```
+
+The flavor is not stored in `config.ini`; it is *recovered* from the system image's build properties. `propertyFile_getAvdFlavor` (`external/qemu/android/emu/avd/src/android/avd/util.c:236`) matches the product name against a small table of substrings and returns the first hit:
+
+```c
+// Source: external/qemu/android/emu/avd/src/android/avd/util.c
+const char* phone_names[]   = {"phone"};
+const char* tv_names[]      = {"atv"};
+const char* wear_names[]    = {"aw", "wear"};
+const char* car_names[]     = {"car"};
+const char* desktop_names[] = {"pc", "desktop"};
+const char* xr_names[]      = {"xr"};
+const char* glasses_names[] = {"glasses"};
+```
+
+`avdInfo_initHwConfig` stores the result on the `AvdInfo` (`external/qemu/android/emu/avd/src/android/avd/info.c:889`), and every form-factor decision downstream reads it back through `avdInfo_getAvdFlavor` (`external/qemu/android/emu/avd/include/android/avd/info.h:214`). A desktop image additionally gates some behavior on API level via `avdInfo_isDesktopApi36OrHigher` (`info.c:573`).
+
+### 3.9.2 The device profile: geometry, density, and input
+
+Within a flavor, the concrete device is named by `hw.device.name` (a profile id such as `pixel_6`, `wearos_small_round`, or `tv_1080p`). The profile supplies the screen and input keys the SDK writes into `config.ini`, all declared in the host-common config schema (`hardware/google/aemu/host-common/include/host-common/hw-config-defs.h`):
+
+- `hw.device.name` (`:892`) — the profile id, read back wherever a feature needs the exact device (for example the Pixel Fold check below).
+- `hw.lcd.width` / `hw.lcd.height` / `hw.lcd.density` / `hw.lcd.depth` — the panel geometry that becomes the guest framebuffer.
+- `hw.lcd.circular` (`:283`) — a round display, the tell-tale of a circular Wear OS watch face.
+- `hw.keyboard` (`:108`) and `hw.rotaryInput` (`:136`) — input hardware; the rotary input models a Wear OS bezel/crown.
+
+Skins layer a bezel and a set of orientation layouts on top of that geometry. The skin keys live in `external/qemu/android/emu/avd/include/android/avd/keys.h`:
+
+```c
+// Source: external/qemu/android/emu/avd/include/android/avd/keys.h
+#define  SKIN_PATH       "skin.path"
+#define  SKIN_NAME       "skin.name"
+#define  PIXEL_FOLD_DEFAULT_SKIN_NAME       "default"
+#define  PIXEL_FOLD_CLOSED_SKIN_NAME        "closed"
+#define  SKIN_DEFAULT    "HVGA"
+```
+
+A phone needs one skin; a foldable needs two (the open "default" and the folded "closed"), which is why the Pixel Fold has dedicated skin-name constants. The skin's own `hardware.ini` participates in the merge from section 3.6, sitting between the built-in defaults and `config.ini`.
+
+### 3.9.3 Foldables, rollables, and the resizable AVD
+
+Folding and rolling devices add a block of `hw.sensor.*` keys that configure the `FoldableModel` covered in Chapter 10. The schema (`hw-config-defs.h`) declares `hw.sensor.hinge` (`:710`), `hw.sensor.hinge.count` (`:717`), `hw.sensor.hinge.ranges`, `hw.sensor.posture_list`, and the rollable equivalents under `hw.sensor.roll`. Setting a hinge angle through the control plane recomputes a discrete posture (`POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, `POSTURE_TENT`) — the state machine in section 10.7 — and the display side (section 17.10) lights the inner or outer panel accordingly.
+
+A Pixel-class fold is special-cased. `android_foldable_is_pixel_fold` (`external/qemu/android/android-emu/android/hw-sensors.cpp:1438`) returns true when the device name contains `fold` and the `SupportPixelFold` feature is on, or whenever the resizable-34 configuration is active:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/hw-sensors.cpp
+bool android_foldable_is_pixel_fold() {
+    if (resizableEnabled34()) {
+        return true;
+    }
+    const auto devname = getConsoleAgents()->settings->hw()->hw_device_name;
+    return (devname && std::string::npos != std::string(devname).find("fold") &&
+            fc::isEnabled(fc::SupportPixelFold));
+}
+```
+
+The **resizable** AVD is one device that morphs between form factors at runtime instead of fixing one at create time. Its presets are an enum in `external/qemu/android/android-emu/android/emulation/resizable_display_config.h:20`:
+
+```c
+// Source: external/qemu/android/android-emu/android/emulation/resizable_display_config.h
+enum PresetEmulatorSizeType {
+    PRESET_SIZE_PHONE = 0,
+    PRESET_SIZE_UNFOLDED = 1,
+    PRESET_SIZE_TABLET = 2,
+    PRESET_SIZE_MAX = 3,
+};
+```
+
+The three sizes (geometry plus density) come from a single `hw.resizable.configs` string, whose built-in default is parsed in `resizable_display_config.cpp:47`:
+
+```c
+// Source: external/qemu/android/android-emu/android/emulation/resizable_display_config.cpp
+"phone-0-1080-2340-420, unfolded-1-1768-2208-420,"
+"tablet-2-1920-1200-240";
+```
+
+Each entry is `name-id-width-height-dpi`; switching presets reconfigures the panel without relaunching the engine, which is how a single resizable image previews phone, unfolded, and tablet layouts.
+
+### 3.9.4 How the flavor steers the runtime
+
+Once classified, the flavor reaches into both the display pipeline and the UI. On the display side, automotive devices get a multi-display *stacked* layout: `getDisplayType` (`external/qemu/android/android-emu/android/emulation/AutoDisplays.cpp:33`) maps the AVD to `DISTANT_DISPLAY`, `DYNAMIC_MULTI_DISPLAY`, or `GENERIC_DISPLAY`, and `MultiDisplay::recomputeStackedLayoutLocked` arranges the cluster and center-stack panels (section 17.8). The `setMultiDisplay` entry point refuses TV and Wear flavors outright (section 17.6).
+
+On the UI side, the extended-controls window enables or hides whole panels by flavor. The multi-display panel, for instance, is gated so that TV, Wear, XR, and Glasses never see it (`external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/extended-window.cpp:226`):
+
+```cpp
+// Source: aemu-ui-qt/src/android/skin/qt/extended-window.cpp
+avdFlavor != AVD_TV &&
+avdFlavor != AVD_WEAR && avdFlavor != AVD_XR && avdFlavor != AVD_GLASSES &&
+```
+
+Further down, the same constructor branches once per flavor to add device-appropriate controls: a TV remote page (`:332`), Wear-specific controls (`:341`), the car data pages (`:348`), and an XR/Glasses input mode (`:376`). The sensor layer makes the matching move at init time — a Wear OS image auto-enables the heart-rate and wrist-tilt sensors and an Automotive image enables the heading sensor, as Chapter 10 describes. The net effect is that one engine presents itself as whatever device the AVD's flavor, profile, and skin describe.
+
+## 3.10 Try It
 
 The following commands exercise the launch path described above. They assume a configured SDK with at least one AVD.
 
@@ -458,13 +585,17 @@ emulator @My_AVD -no-window -quit-after-boot 120
 - `-accel-check` forwards to the standalone `emulator-check` binary and returns stable status codes that Android Studio depends on; the normal path turns the accelerator choice into a QEMU `-enable-*` flag.
 - `-gpu` selects between the host GPU and software renderers (`swiftshader`, `swangle`, `lavapipe`); `auto` probes the host GPU asynchronously during `main()`.
 - Boot completion is signaled by the guest writing `bootcomplete` to `QemuMiscPipe`, which runs `bootCompleteFunction()`, touches `bootcompleted.ini`, and flips the `guest_boot_completed` global.
+- One engine serves every form factor: an `AvdFlavor` recovered from `build.prop` (`AVD_PHONE`/`AVD_TV`/`AVD_WEAR`/`AVD_ANDROID_AUTO`/`AVD_DESKTOP`/`AVD_XR`/`AVD_GLASSES`), a `hw.device.name` profile of geometry and input, optional `hw.sensor.hinge.*` foldable config, and the `resizable` AVD's preset sizes all feed the same `hardware-qemu.ini` and then steer sensors (Ch 10), displays (Ch 17), and which UI panels appear (Ch 22).
 
 ### Key Source Files
 
 | File | Purpose |
 |------|---------|
 | external/qemu/android/emulator/main-emulator.cpp | Launcher: engine selection, library paths, `-accel-check`/`-qemu`/`-gpu` early handling, `execv` |
-| external/qemu/android/emu/avd/src/android/avd/util.c | AVD content-path and target-arch resolution from root ini and `config.ini` |
+| external/qemu/android/emu/avd/src/android/avd/util.c | AVD content-path and target-arch resolution; `propertyFile_getAvdFlavor` flavor detection |
+| external/qemu/android/emu/avd/include/android/avd/util.h | The `AvdFlavor` enum (phone, TV, Wear, Auto, desktop, XR, glasses) |
+| hardware/google/aemu/host-common/include/host-common/hw-config-defs.h | Schema for `hw.device.name`, `hw.lcd.*`, and the `hw.sensor.hinge.*` foldable keys |
+| external/qemu/android/android-emu/android/emulation/resizable_display_config.cpp | Resizable AVD presets and the `hw.resizable.configs` default string |
 | external/qemu/android/emu/avd/src/android/avd/scanner.c | Filesystem scan backing `-list-avds` and `-snapshot-list` |
 | external/qemu/android/emu/avd/include/android/avd/keys.h | Names of the `config.ini` and root-ini keys |
 | external/qemu/android/emu/cmdline/include/android/cmdline-options.h | The X-macro declaration of every command-line option |
