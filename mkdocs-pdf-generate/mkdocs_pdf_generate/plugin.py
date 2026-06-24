@@ -69,7 +69,7 @@ pre, .highlight, table, .admonition, details {
   padding: 6px 10px !important;
 }
 .md-typeset table th {
-  background-color: #e8f5e9 !important;
+  background-color: #E3F2FD !important;
   font-weight: 600;
   border-bottom: 2px solid #616161 !important;
 }
@@ -101,7 +101,7 @@ pre, .highlight, table, .admonition, details {
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   height: 100vh; text-align: center;
-  background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 40%, #43a047 100%);
+  background: linear-gradient(135deg, #0D47A1 0%, #1565C0 40%, #1E88E5 100%);
   color: white; font-family: 'Roboto', sans-serif;
   page-break-after: always;
 }
@@ -311,12 +311,12 @@ body {{
   color: #1b1b1b; font-size: 10pt; line-height: 1.5;
 }}
 .toc-title {{
-  font-size: 2em; font-weight: 700; color: #1b5e20;
+  font-size: 2em; font-weight: 700; color: #0D47A1;
   margin-bottom: 0.8em; padding-bottom: 0.3em;
-  border-bottom: 3px solid #4CAF50;
+  border-bottom: 3px solid #2196F3;
 }}
 .toc-h1 {{
-  font-size: 1.05em; font-weight: 700; color: #1b5e20;
+  font-size: 1.05em; font-weight: 700; color: #0D47A1;
   margin: 0.6em 0 0.15em 0; padding-top: 0.3em;
   border-top: 1px solid #e0e0e0;
 }}

@@ -121,7 +121,7 @@ div.mermaid[data-zoomable] {
 }
 
 div.mermaid[data-zoomable]:hover {
-  outline: 2px solid #4CAF50;
+  outline: 2px solid #2196F3;
   outline-offset: 4px;
   border-radius: 4px;
 }
@@ -161,7 +161,7 @@ div.mermaid[data-zoomable]:hover {
 }
 
 /* Header / top bar dark-mode adaptation. Material keeps the primary color
-   (green) in the header for both schemes by design; this override switches
+   (blue) in the header for both schemes by design; this override switches
    the header to the page background under slate so the search input area
    stops looking out of place against the dark content. */
 [data-md-color-scheme="slate"] .md-header,
