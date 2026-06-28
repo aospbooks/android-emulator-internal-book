@@ -1,4 +1,4 @@
-# Appendix A: Key Files Reference
+# Appendix B: Key Files Reference
 
 This appendix is a map. The preceding chapters walked through the Android Emulator one subsystem at a time, citing the source as they went; this reference collects the single most important file or directory for each subsystem into tables you can scan when you are trying to find *where* something lives. Every path here is repo-relative and starts at a top-level project directory you can `cd` into from the emulator superproject root, and every entry was opened and confirmed against the real tree rather than reconstructed from memory.
 
@@ -6,7 +6,7 @@ The emulator is not one repository. It is a superproject that stitches together 
 
 ---
 
-## A.1 How to Read the Paths
+## B.1 How to Read the Paths
 
 Every path in this appendix is rooted at one of the superproject's top-level directories. Knowing which directory a file lives under already tells you a lot about what it is and which build produces it.
 
@@ -20,7 +20,7 @@ The five roots that matter for this book are these.
 
 When a chapter cites `external/qemu/android/android-emu/android/console.cpp`, the `external/qemu/` prefix tells you it is part of the QEMU fork, the `android/android-emu/` tells you it is the core host emulation library, and the rest is the path within that library.
 
-### A.1.1 The directory layering at a glance
+### B.1.1 The directory layering at a glance
 
 The diagram below shows how the top-level source roots stack from the build system at the bottom up to the user-facing UI, with the guest image as a separate column that the host talks to over pipes and sockets.
 
@@ -61,7 +61,7 @@ flowchart TB
 
 ---
 
-## A.2 Build System
+## B.2 Build System
 
 The emulator is configured and built by a Python orchestration layer that drives CMake, which in turn drives Ninja and a set of toolchain files. The Python tasks live under `external/qemu/android/build/python/aemu/` and the CMake entry point is the top of the QEMU fork.
 
@@ -81,7 +81,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 
 ---
 
-## A.3 QEMU Fork and Glue
+## B.3 QEMU Fork and Glue
 
 `external/qemu/` is a fork of QEMU, not a clean upstream checkout. The upstream machinery (`vl.c`, `cpus.c`, `hw/`) is still there, but a large `android/` subtree and an `android-qemu2-glue/` bridge layer have been bolted on. The glue is what lets QEMU call into the emulator's host services and what lets the emulator drive the QEMU machine.
 
@@ -105,7 +105,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 
 ---
 
-## A.4 android-emu Core
+## B.4 android-emu Core
 
 `external/qemu/android/android-emu/android/` is the heart of the host-side emulation: AVD handling, the goldfish pipe service registry, sensors, snapshots, the OpenGL ES bring-up, ADB, and the command-line front end. This is where most emulator-specific behaviour that is not strictly a QEMU device lives.
 
@@ -131,7 +131,7 @@ The emulator is configured and built by a Python orchestration layer that drives
 
 ---
 
-## A.5 Control Plane: Console and gRPC
+## B.5 Control Plane: Console and gRPC
 
 The emulator exposes two control surfaces: the legacy line-oriented telnet console and a modern gRPC API. The gRPC services live under `external/qemu/android/android-grpc/` with one subdirectory per service, each split into `server/`, `client/`, and a shared `.proto`.
 
@@ -150,7 +150,7 @@ The emulator exposes two control surfaces: the legacy line-oriented telnet conso
 
 ---
 
-## A.6 Graphics: gfxstream and Guest Drivers
+## B.6 Graphics: gfxstream and Guest Drivers
 
 Graphics is the largest single subsystem. On the host, `hardware/google/gfxstream/host/` decodes the GL/Vulkan command stream and replays it against the real host GPU through a `FrameBuffer` and per-thread `RenderThread`. In the guest, `device/generic/goldfish-opengl/` encodes the application's GL/Vulkan calls into that stream.
 
@@ -172,7 +172,7 @@ Graphics is the largest single subsystem. On the host, `hardware/google/gfxstrea
 
 ---
 
-## A.7 Media: Camera, Audio, and Recording
+## B.7 Media: Camera, Audio, and Recording
 
 Media support spans capture (camera, microphone), playback, and screen recording. The host camera service can bridge a real webcam, a fake animated scene, or a virtual scene rendered through gfxstream. Screen recording uses an FFmpeg-based pipeline.
 
@@ -189,7 +189,7 @@ Media support spans capture (camera, microphone), playback, and screen recording
 
 ---
 
-## A.8 Connectivity: Networking, Bluetooth, and Telephony
+## B.8 Connectivity: Networking, Bluetooth, and Telephony
 
 Connectivity covers the guest's network stack, its radios (Wi-Fi, Bluetooth, cellular), and GPS. The emulator increasingly delegates radio behaviour to two standalone tools: `netsim` for Wi-Fi/UWB and `rootcanal` for Bluetooth.
 
@@ -211,7 +211,7 @@ Connectivity covers the guest's network stack, its radios (Wi-Fi, Bluetooth, cel
 
 ---
 
-## A.9 UI and Streaming
+## B.9 UI and Streaming
 
 The host UI is a Qt application split into reusable modules under `external/qemu/android/android-ui/modules/`. The same emulator can also run headless and stream its display over WebRTC for the embedded (Android Studio / web) experience.
 
@@ -229,7 +229,7 @@ The host UI is a Qt application split into reusable modules under `external/qemu
 
 ---
 
-## A.10 Guest Integration
+## B.10 Guest Integration
 
 A handful of host files exist purely to set up the guest environment: kernel command line, boot config, ramdisk hardware properties, and the goldfish/ranchu hardware contract. These determine what the guest sees at boot.
 
@@ -241,11 +241,11 @@ A handful of host files exist purely to set up the guest environment: kernel com
 | `external/qemu/android-qemu2-glue/dtb.cpp` | Generates the device tree blob describing the virtual hardware to the guest. |
 | `external/qemu/android/android-emu/android/avd/hw-config.h` | The hardware-config schema (defines every `hw.*` AVD property the guest depends on). |
 | `external/qemu/android/android-emu/android/emulation/QemuMiscPipe.cpp` | The misc pipe that carries boot-time handshakes and time sync with the guest. |
-| `device/generic/goldfish-opengl/system/` | The guest-side GPU driver that the system image loads at boot (see A.6). |
+| `device/generic/goldfish-opengl/system/` | The guest-side GPU driver that the system image loads at boot (see B.6). |
 
 ---
 
-## A.11 Cuttlefish
+## B.11 Cuttlefish
 
 Cuttlefish is a separate virtual device under `device/google/cuttlefish/`. Instead of QEMU it runs Android on crosvm, orchestrated by a family of host launcher binaries. `assemble_cvd` prepares disks and configs, `run_cvd` starts the per-instance processes, and `secure_env` provides the trusted-execution backends.
 
@@ -265,7 +265,7 @@ Cuttlefish is a separate virtual device under `device/google/cuttlefish/`. Inste
 
 ---
 
-## A.12 Shared Host Libraries
+## B.12 Shared Host Libraries
 
 Both the QEMU emulator and gfxstream depend on `hardware/google/aemu/`. Its `base/` directory is the portable utility layer (strings, files, threads, sockets) and `host-common/` holds the cross-component contracts — feature control, the `AndroidPipe` base, logging, and the graphics-agent factory.
 
@@ -283,7 +283,7 @@ Both the QEMU emulator and gfxstream depend on `hardware/google/aemu/`. Its `bas
 
 ---
 
-## A.13 Infrastructure: Testing and Debugging
+## B.13 Infrastructure: Testing and Debugging
 
 Tests live next to the code they exercise: any file named `*_unittest.cpp` is a host unit test built into the same CMake target tree. Cross-cutting test, tracing, and crash-reporting machinery lives in dedicated subdirectories.
 
@@ -300,7 +300,7 @@ Tests live next to the code they exercise: any file named `*_unittest.cpp` is a 
 
 ---
 
-## A.14 Quick Index by Question
+## B.14 Quick Index by Question
 
 The table below maps the kinds of questions readers ask to the first file to open. It is a starting point, not the whole answer — but every path resolves to a real file that the relevant chapter discusses in depth.
 

@@ -1,4 +1,4 @@
-# Appendix B: Glossary
+# Appendix C: Glossary
 
 This appendix collects the recurring terminology of the Android Emulator codebase in one place. Each entry defines a term as it is actually used in this source tree, with a pointer to a representative file so you can trace the concept back to real code. The emulator carries decades of accreted naming — board names borrowed from QEMU machine types, device names inherited from a virtual SoC, accelerator acronyms that differ per host OS — and the same component is often referred to by two or three names depending on which layer of the stack you are reading. Where that happens, the entry notes the aliases.
 
@@ -6,7 +6,7 @@ Unlike the numbered chapters, this is a reference list rather than a narrative: 
 
 ---
 
-## B.1 How the terms cluster
+## C.1 How the terms cluster
 
 Before the alphabetical list, four diagrams group the terms that are easiest to confuse with one another. Read them as a map; the definitions that follow fill in the detail.
 
@@ -76,7 +76,7 @@ flowchart TB
 
 ---
 
-## B.2 Alphabetical glossary
+## C.2 Alphabetical glossary
 
 **AEHD** — Android Emulator Hypervisor Driver, a Google-maintained kernel-mode hypervisor driver for Windows that backs the `CPU_ACCELERATOR_AEHD` value of the `CpuAccelerator` enum in `external/qemu/android/emu/feature/include/android/emulation/CpuAccelerator.h`. It is one of two acceleration paths the emulator offers on Windows (the other is WHPX), and the command-line help in `external/qemu/android/emu/cmdline/src/android/help.c` notes that on Windows the emulator "relies on WHPX or AEHD." AEHD replaced the older, now-deprecated HAXM driver.
 

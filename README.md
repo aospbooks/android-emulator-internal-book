@@ -50,8 +50,9 @@ crosvm-based Cuttlefish virtual device:
 | IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) | ✗ |
 | X | 27 | Testing | ✗ |
 | X | 28 | Debugging, Tracing & Crash Reporting | ✗ |
-| App. | A | Key Files Reference | ✗ |
-| App. | B | Glossary | ✗ |
+| App. | A | Paravirtualization from Xen to Android | ✗ |
+| App. | B | Key Files Reference | ✗ |
+| App. | C | Glossary | ✗ |
 
 ✗ = not yet reviewed by a human; published openly for community review.
 <!-- --8<-- [end:coverage] -->
@@ -105,7 +106,7 @@ Tests `mkdocs build` on push to `main` and PRs (~2 min); deploys to GitHub Pages
 
 ```
 [0-9]*.md                  chapter files
-[A-B]-appendix-*.md        appendix files
+[A-C]-appendix-*.md        appendix files
 index.md                   Website homepage
 mkdocs.yml                 MkDocs config (Material theme + Mermaid)
 docs/                      Symlinks for MkDocs (gitignored)
