@@ -42,16 +42,16 @@ How the two modes reach the guest's `adbd`:
 
 ```mermaid
 flowchart TB
-    subgraph LEGACY["Legacy mode (API < 16)"]
-        direction LR
-        L1["Host adb server"] -->|"loopback 5555"| L2["SLIRP NAT redirect"]
-        L2 -->|"guest tcp 5555"| L3["guest adbd"]
-    end
     subgraph PIPE["Pipe mode (modern)"]
         direction LR
         P1["Host adb server"] -->|"loopback adb_port"| P2["AdbHostListener"]
         P2 --> P3["AdbGuestPipe proxy"]
         P3 -->|"qemu_pipe"| P4["guest adbd"]
+    end
+    subgraph LEGACY["Legacy mode (API < 16)"]
+        direction LR
+        L1["Host adb server"] -->|"loopback 5555"| L2["SLIRP NAT redirect"]
+        L2 -->|"guest tcp 5555"| L3["guest adbd"]
     end
 ```
 
@@ -188,8 +188,8 @@ sequenceDiagram
     Server->>Listener: TCP connect on adb_port
     Listener->>Service: onHostConnection socket
     Service->>Service: searchForActivePipe
-    Service->>Pipe: onHostConnection socket
     Service->>Listener: stopListening if no pipe still waiting
+    Service->>Pipe: onHostConnection socket
 ```
 
 ## 20.5 The Pipe Handshake State Machine
@@ -499,7 +499,7 @@ struct ShellHeader {
 
 `AdbShellStream::isV1` reports which protocol is in use; for v1 the exit code is never set and stderr is folded into stdout, while v2 separates the three streams. This is what backs the gRPC `logcat` and shell RPCs and the file-push helpers without ever shelling out to `adb`.
 
-`AdbInterfaceImpl::runAdbCommand` falls back to this in-process path for `shell` and `logcat` only under a precise condition: the emulator was launched with `-no-direct-adb`, the external bridge has already `failed()`, and the command is one of those two. In that case it builds an `AdbDirect` rather than an `AdbThroughExe`:
+`AdbInterfaceImpl::runAdbCommand` falls back to this in-process path for `shell` and `logcat` only under a precise condition: the emulator was launched with `-no-direct-adb`, the direct bridge (`AdbConnection`) has already `failed()`, and the command is one of those two. In that case it builds an `AdbDirect` rather than an `AdbThroughExe`:
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/AdbInterface.cpp
@@ -520,7 +520,9 @@ flowchart TB
         DIRECT["AdbConnection (in-process)"]
         SHELL["AdbShellStream"]
         LISTEN["AdbHostListener : loopback adb_port"]
+        PIPE["AdbGuestPipe proxy"]
         SHELL --> DIRECT
+        LISTEN --> PIPE
     end
     EXE["external adb binary"]
     SRV["host adb server : 5037"]
@@ -528,7 +530,6 @@ flowchart TB
     EXE --> SRV
     SRV -->|"connect adb_port"| LISTEN
     DIRECT -->|"connect adb_port"| LISTEN
-    LISTEN --> PIPE["AdbGuestPipe proxy"]
     PIPE -->|"qemu_pipe"| ADBD["guest adbd"]
 ```
 

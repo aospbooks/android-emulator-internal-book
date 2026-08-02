@@ -131,6 +131,8 @@ The dispatch decision flow
 flowchart TD
     START["amodem_send(cmd)"]
     WAITSMS{"wait_sms set?"}
+    RUNH_SMS["handleSendSMSText"]
+    REPLY_SMS["REPLY immediately"]
     PFX{"starts with AT<br/>and non-empty?"}
     SCAN["scan sDefaultResponses"]
     FOUND{"match found?"}
@@ -141,11 +143,13 @@ flowchart TD
     CANNED["return answer + OK"]
     OKONLY["return OK"]
     WRAP["wrap handler result with OK"]
+    RET_NULL["return NULL (no response)"]
 
     START --> WAITSMS
-    WAITSMS -->|yes| RUNH
+    WAITSMS -->|yes| RUNH_SMS
+    RUNH_SMS --> REPLY_SMS
     WAITSMS -->|no| PFX
-    PFX -->|no| START
+    PFX -->|no| RET_NULL
     PFX -->|yes| SCAN
     SCAN --> FOUND
     FOUND -->|no| ERR
@@ -215,7 +219,7 @@ register_savevm_live(NULL,
                 android_modem);
 ```
 
-A comment in the modem's own save routine is candid about scope: it persists calls and the call count but admits "TODO: save more than just calls and call_count - rssi, power, etc." On restore the code wants to nudge the guest into re-reading the clock, which it does by sneaking a time update into the next periodic signal-strength poll (Section 21.6).
+A stale TODO in the modem's own save routine reads "save more than just calls and call_count - rssi, power, etc." In practice the routine goes further than that comment suggests: after serialising the call list it also saves `radio_state`, `data_network`, `data_network_requested`, and the `send_phys_channel_cfg_unsol` flag (lines 747–750 of `modem.c`). Signal parameters such as `rssi`, `area_code`, and `cell_id` remain unsaved. On restore, `modem_state_load` in `modem_init.c` calls `android_modem_driver_send_nitz_now()` when `android_snapshot_update_timer()` is enabled, immediately pushing a NITZ time update to the guest over the serial line.
 
 ## 21.4 Voice Calls
 
@@ -241,9 +245,9 @@ The call state machine
 ```mermaid
 stateDiagram-v2
     [*] --> DIALING : ATD outbound
-    [*] --> INCOMING : gsm call inbound
     DIALING --> ALERTING : timer 1s
     ALERTING --> ACTIVE : timer 1s
+    [*] --> INCOMING : gsm call inbound
     INCOMING --> ACTIVE : ATA answer
     ACTIVE --> HELD : ATA while active
     HELD --> ACTIVE : CHLD resume
@@ -326,7 +330,8 @@ sequenceDiagram
     AM->>MD: unsol +CMT: 0 + hex PDU
     MD->>RIL: write to serial line
     RIL->>RIL: decode PDU, post to Messaging
-    RIL->>AM: AT+CNMA acknowledge
+    RIL->>MD: AT+CNMA
+    MD->>AM: amodem_send
 ```
 
 ## 21.6 Signal Strength and Network Registration
@@ -346,7 +351,7 @@ static const signal_t NET_PROFILES[5] = {
 
 The thirteen fields cover GSM, CDMA, EVDO, and LTE signal metrics — RSSI, BER, dBm, Ec/Io, SNR, RSRP, RSRQ, CQI, and timing advance — derived, per the source comment, from the ranges used by the `SignalStrength` class in the framework's telephony layer. `handleSignalStrength` emits them all in one `+CSQ:` line.
 
-Because `+CSQ` is periodic, the modem piggybacks other one-time updates onto it. On the first poll, on wake from sleep, and after a snapshot restore, the handler also sends a NITZ time update (`%CTZV:`) and a physical-channel-configuration update. This is an explicit workaround noted in the comments: there is no clean way to prod the guest, so the modem rides the signal poll it knows is coming.
+Because `+CSQ` is periodic, the modem piggybacks other one-time updates onto it. On the first poll and on wake from sleep, the handler also sends a NITZ time update (`%CTZV:`) and a physical-channel-configuration update. This is an explicit workaround noted in the comments: there is no clean way to prod the guest, so the modem rides the signal poll it knows is coming. After a snapshot restore, NITZ is delivered differently — `modem_state_load` in `modem_init.c` calls `android_modem_driver_send_nitz_now()` when `android_snapshot_update_timer()` is enabled, rather than waiting for the next poll.
 
 Network registration is split into voice (`+CREG`) and data (`+CGREG`). The guest sets the unsolicited reporting mode with `AT+CREG=2`, and thereafter the modem reports `stat` plus the area code and cell id whenever they change.
 
@@ -376,7 +381,7 @@ bool sim_is_present() {
 }
 ```
 
-SIM file access uses the standard `AT+CRSM` (restricted SIM access) and `AT+CSIM` (generic SIM access) commands, which the modem forwards to `asimcard_io` and `asimcard_csim`. The SIM model in `sim_card.c` holds a small table of elementary files keyed by their hex file ids — for example `0x2fe2` is the ICCID file, `0x6f14` and `0x6f11` are operator-related files — and a set of canned `+CRSM:` responses for the exact command lines the RIL is known to send. SIM files can be marked read-only or PIN-protected via flags like `SIM_FILE_READ_ONLY` and `SIM_FILE_NEED_PIN`.
+SIM file access uses the standard `AT+CRSM` (restricted SIM access) and `AT+CSIM` (generic SIM access) commands, which the modem forwards to `asimcard_io` and `asimcard_csim`. The SIM model in `sim_card.c` holds a small table of elementary files keyed by their hex file ids — for example `0x2fe2` is the ICCID file, `0x6f14` is a Service Provider Name file, and `0x6f11` is a voicemail configuration file — and a set of canned `+CRSM:` responses for the exact command lines the RIL is known to send. SIM files can be marked read-only or PIN-protected via flags like `SIM_FILE_READ_ONLY` and `SIM_FILE_NEED_PIN`.
 
 The modem also models logical channels for the carrier-API / UICC applet world: `AT+CCHO` opens a logical channel and returns its number, `AT+CCHC` closes it, and `AT+CGLA` transmits an APDU on it. There are `MAX_LOGICAL_CHANNELS` (16) slots; channel 0 is the always-open basic channel with the master-file id `0x3F00`.
 
@@ -501,6 +506,7 @@ if (feature_is_enabled(kFeature_ModemSimulator) && !opts->ui_only) {
                         opts->phone_number);
         args.add("-device");
         args.add("virtio-serial,ioeventfd=off");
+        args.add("-chardev");
         args.addFormat(
                 "socket,port=%d,host=%s,nowait,nodelay,reconnect=10,%s,id=modem",
                 modem_simulator_guest_port, ...);
@@ -546,7 +552,7 @@ The console commands work on any running emulator. Connect to the console and au
 - Inject a raw PDU: `sms sendpdu <hexstring>` with a valid SMS-DELIVER hex string.
 - Drop the signal to one bar, then restore it: `gsm signal-profile 1`, wait about 15 seconds for the next `+CSQ` poll, then `gsm signal-profile 4`.
 - Force a roaming indicator: `gsm voice roaming`, and put the data connection into searching: `gsm data searching`.
-- Change the network technology and watch the status bar: `gsm data lte` versus `gsm data gprs`. Confirm with `gsm status`.
+- Change the network technology and watch the status bar: `network speed lte` versus `network speed gprs`. Confirm with `gsm status`.
 - Watch the AT traffic: start the emulator with `emulator -avd <name> -verbose`, and add `-debug modem` to log every AT command line the modem handles (the driver wires `VERBOSE_CHECK(modem)` into `android_telephony_debug_modem`).
 - Boot without a SIM to exercise the no-SIM path: `emulator -avd <name> -no-sim`, then check `gsm status` and the SIM state in Settings.
 

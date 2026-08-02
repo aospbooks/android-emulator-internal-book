@@ -16,7 +16,7 @@ The next layer is `android-emu-base`. Its build rule is in `external/qemu/androi
 
 On top of those sits `android-emu` itself, in `external/qemu/android/android-emu/`. Its CMake fragment is `external/qemu/android/android-emu/android-emu.cmake`, and that file's dependency lists show it building on `android-emu-base`, `android-emu-base-headers`, and `qemu-host-common-headers`. This is the layer that knows what an Android Virtual Device is — sensors, battery, telephony, snapshots, ADB, the gRPC services — but still does not know what QEMU is.
 
-Sitting beside `android-emu` (not under it) is `hardware/google/aemu/host-common/`. This is the contract surface: it defines the C structs and abstract C++ classes — `VmLock`, `vm_operations.h`, `AndroidPipe`, `DeviceContextRunner`, the `*_agent.h` interfaces — that `android-emu` calls and that the VMM glue implements. Its CMake target produces the interface library `aemu-host-common.headers`; the `qemu-host-common-headers` target that `android-emu` actually links is the qemu-side re-export of it, defined in `external/qemu/android/emu/host-common/CMakeLists.txt`.
+Sitting beside `android-emu` (not under it) is `hardware/google/aemu/host-common/`. This is the contract surface: it defines the C structs and abstract C++ classes — `VmLock`, `vm_operations.h`, `AndroidPipe`, `DeviceContextRunner`, and the graphics/display agent interfaces (`window_agent.h`, `display_agent.h`, `multi_display_agent.h`, `record_screen_agent.h`) — that `android-emu` calls and that the VMM glue implements. The bulk of the agent interfaces — battery, sensors, telephony, clipboard, and about twenty others — reside instead in `external/qemu/android/emu/agents/include/android/emulation/control/`. Its CMake target produces the interface library `aemu-host-common.headers`; the `qemu-host-common-headers` target that `android-emu` actually links is the qemu-side re-export of it, defined in `external/qemu/android/emu/host-common/CMakeLists.txt`.
 
 The foundation libraries and their dependency direction
 
@@ -27,7 +27,7 @@ flowchart TB
     HC["host-common<br/>(interfaces: VmLock, agents, pipes)"]
     AEB["android-emu-base<br/>(legacy android::base utils)"]
     AB["aemu/base<br/>(shared base: threads, Looper, locks)"]
-    QEMU["QEMU 2 (hw/, accel/, main-loop)"]
+    QEMU["QEMU 2<br/>(hw/, accel/, main-loop)"]
 
     GLUE --> AE
     GLUE --> QEMU
@@ -182,15 +182,13 @@ The `RecursiveScopedVmLockIfInstance` variant is the one you see throughout the 
 How VmLock decouples android-emu from the QEMU iothread mutex
 
 ```mermaid
-flowchart LR
-    subgraph CORE["android-emu (no QEMU headers)"]
+flowchart TD
+    AGENT["battery agent impl call<br/>(android-qemu2-glue)"]
+    subgraph CORE["host-common / android-emu core"]
         SC["RecursiveScopedVmLockIfInstance"]
         IF["android::VmLock interface"]
     end
-    subgraph GLUE["android-qemu2-glue"]
-        AGENT["battery agent impl call"]
-        IMPL["qemu2::VmLock"]
-    end
+    IMPL["qemu2::VmLock<br/>(android-qemu2-glue)"]
     subgraph QEMUSIDE["QEMU"]
         IO["qemu_mutex_lock_iothread"]
         DEV["goldfish device state"]
@@ -233,7 +231,9 @@ A representative interface is `QAndroidBatteryAgent`, in `external/qemu/android/
 typedef struct QAndroidBatteryAgent {
     void (*setHasBattery)(bool hasBattery);
     bool (*hasBattery)();
+    // ...
     void (*setIsCharging)(bool isCharging);
+    // ...
     void (*setChargeLevel)(int percentFull);
     int  (*chargeLevel)();
     void (*setHealth)(enum BatteryHealth health);
@@ -274,7 +274,7 @@ sequenceDiagram
     Core->>Impl: battery_setChargeLevel(80)
     Impl->>Lock: acquire VM lock if needed
     Impl->>HW: goldfish_battery_set_prop(CAPACITY, 80)
-    HW-->>UI: guest reads new level via sysfs
+    Note right of HW: Guest Android OS independently reads new level via sysfs
 ```
 
 ## 7.7 Collecting the Agents: the Console Factory
@@ -303,7 +303,7 @@ typedef struct AndroidConsoleAgents {
 CONSOLE_API const AndroidConsoleAgents* getConsoleAgents();
 ```
 
-The injection machinery lives in `external/qemu/android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp`. A process calls `injectConsoleAgents(factory)` once; the factory's `android_get_*` methods are invoked for each agent to fill a static `AndroidConsoleAgents`, and a flag flips to mark the agents available. Reading them before injection is a fatal error:
+The injection machinery lives in `external/qemu/android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp`. A process calls `injectConsoleAgents(factory)` at least once (repeated calls are permitted and issue a non-fatal warning rather than aborting, a fact the debug path exploits to layer a second factory); the factory's `android_get_*` methods are invoked for each agent to fill a static `AndroidConsoleAgents`, and a flag flips to mark the agents available. Reading them before any injection is a fatal error:
 
 ```cpp
 // Source: external/qemu/android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp
@@ -397,7 +397,7 @@ The header also documents the shutdown causes (`QemuShutdownCause`) and uses `st
 
 ## 7.9 Process Lifecycle and Initialization Order
 
-Putting the pieces together, the emulator's startup is an ordering problem: each interface must be installed before anyone uses it. The sequence runs in `external/qemu/android-qemu2-glue/main.cpp`.
+Putting the pieces together, the emulator's startup is an ordering problem: each interface must be installed before anyone uses it. The first steps run in `external/qemu/android-qemu2-glue/main.cpp`; the VMM-side wiring is triggered from `external/qemu/vl.c` (inside `run_qemu_main`) and then runs in `external/qemu/android-qemu2-glue/qemu-setup.cpp`.
 
 The very first call is `process_early_setup(argc, argv)`, declared in `external/qemu/android/android-emu/android/process_setup.h` and implemented in the corresponding `.cpp`. Its comment notes it is "the first thing emulator calls," which is why it also handles `-wait-for-debugger`. It initializes sockets, file locks, and libcurl, and sets up logging — all before any threads are launched:
 
@@ -448,18 +448,21 @@ Startup ordering of the core interfaces
 ```mermaid
 sequenceDiagram
     participant Main as main.cpp
+    participant VL as vl.c / run_qemu_main
     participant Setup as qemu_android_emulation_early_setup
     participant TLoop as Looper / ThreadLooper
     participant Lock as VmLock
     participant Pipe as AndroidPipe / sync
+    participant Snap as Snapshot subsystem
 
     Main->>Main: process_early_setup
     Main->>Main: injectQemuConsoleAgents
-    Main->>Setup: qemu_android_emulation_early_setup
+    Main->>VL: enter_qemu_main_loop
+    VL->>Setup: qemu_android_emulation_early_setup
     Setup->>TLoop: qemu_looper_setForThread
     Setup->>Lock: VmLock::set(new qemu2::VmLock)
     Setup->>Pipe: qemu_android_pipe_init(vmLock)
-    Setup->>Pipe: androidSnapshot_initialize(vm agent)
+    Setup->>Snap: androidSnapshot_initialize(vm agent)
 ```
 
 At teardown, `process_late_teardown()` runs the symmetric cleanup (`curl_cleanup()` and friends). The symmetry of early-setup / late-teardown bookends the whole process.
@@ -522,7 +525,7 @@ grep -n "qemu_looper_setForThread\|VmLock::set\|qemu_android_pipe_init" \
 - `VmLock` (`host-common/VmLock.h`) is an injected interface whose QEMU implementation is literally `qemu_mutex_lock_iothread()`. RAII helpers — `ScopedVmLock`, `RecursiveScopedVmLock`, `RecursiveScopedVmLockIfInstance`, `ScopedVmUnlock` — serialize all access to virtual device state.
 - `DeviceContextRunner<T>` builds on `VmLock` to either run an operation immediately (if the lock is held) or defer it to the main loop thread; the Android pipe waker uses it via `AndroidPipe::initThreading(vmLock)`.
 - Agents are plain-C function-pointer structs (one per capability, e.g. `QAndroidBatteryAgent`, `QAndroidVmOperations`) defined in the agents headers and implemented in `android-qemu2-glue/qemu-*-agent-impl`. They are the seam that decouples the core from the VMM.
-- A single X-macro, `ANDROID_CONSOLE_AGENTS_LIST`, generates the `AndroidConsoleAgents` struct, the factory getters, and the injection setters. `injectConsoleAgents()` runs once; `getConsoleAgents()` is fatal before injection. The graphics path reuses the identical pattern via `GRAPHICS_AGENTS_LIST`.
+- A single X-macro, `ANDROID_CONSOLE_AGENTS_LIST`, generates the `AndroidConsoleAgents` struct, the factory getters, and the injection setters. `injectConsoleAgents()` may be called more than once (repeated calls issue a non-fatal warning); `getConsoleAgents()` is fatal before the first injection. The graphics path reuses the identical pattern via `GRAPHICS_AGENTS_LIST`.
 - Startup ordering is strict: `process_early_setup` then `injectQemuConsoleAgents` (before option parsing) then `qemu_android_emulation_early_setup`, which installs the `Looper`, then the `VmLock`, then pipe/sync services, then hands the `vm` agent to the snapshot subsystem.
 
 ### Key Source Files

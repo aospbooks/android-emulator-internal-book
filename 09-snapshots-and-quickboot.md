@@ -50,6 +50,7 @@ flowchart TB
     SNAP["Snapshot / Snapshotter"] --> PB
     RS["RamSaver"] --> RAM
     TS["TextureSaver"] --> TEX
+    FB["File-backed RAM<br/>(androidSnapshot_prepareAutosave)"] --> IMG
     SAVEVM["QEMU savevm.c"] --> VMS
     SAVEVM --> DISK
     SNAP --> SS
@@ -233,7 +234,7 @@ stream.putBe32(uint32_t(mIndex.flags));
 stream.putBe32(uint32_t(mIndex.totalPages));
 ```
 
-The hashes drive both deduplication within one snapshot and incremental saving across snapshots. When a previous load left a `RamLoader` around with gap-tracking intact, the new `Saver` passes that loader to the `RamSaver` (`tryIncremental = loader && !loader->hasError() && loader->hasGaps()`), and pages whose hash matches the previously-loaded page can be left in place rather than rewritten. The leftover free space from rewriting is tracked by a `GapTracker`, also serialized into the index (only for version > 1).
+The hashes enable incremental saving: when a prior RamLoader is present, any page whose hash matches the corresponding previously-saved page is reused on disk rather than rewritten, and the hash is stored in the index so future saves can do the same comparison. When a previous load left a `RamLoader` around with gap-tracking intact, the new `Saver` passes that loader to the `RamSaver` (`tryIncremental = loader && !loader->hasError() && loader->hasGaps()`), and pages whose hash matches the previously-loaded page can be left in place rather than rewritten. The leftover free space from rewriting is tracked by a `GapTracker`, also serialized into the index (only for version > 1).
 
 #### RamSaver page pipeline
 
@@ -360,7 +361,7 @@ The dirty flag is just the presence of a `ram.img.dirty` marker file, written by
 
 ### 9.6.2 Remapping between shared and private at runtime
 
-The `snapshotRemap` operation (`qemu_snapshot_remap` in the glue) lets the running emulator switch a file-backed RAM mapping between shared and private without restarting. It only supports the `default_boot` snapshot. To go private to shared it does a `savevm` then `ram_blocks_remap_shared(true)`; to go shared to private it does `ram_blocks_remap_shared(false)` then a `loadvm`:
+The `snapshotRemap` operation (`qemu_snapshot_remap` in the glue) lets the running emulator switch a file-backed RAM mapping between shared and private without restarting. It only supports the `default_boot` snapshot. To go shared to private it does a `savevm` then `ram_blocks_remap_shared(false)`; to go private to shared it does `ram_blocks_remap_shared(true)` then a `loadvm`:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp
@@ -386,8 +387,8 @@ stateDiagram-v2
     [*] --> None : no ram-file
     [*] --> Shared : ram-file shared
     [*] --> Private : ram-file private
-    Private --> Shared : remap savevm then remap shared
-    Shared --> Private : remap private then loadvm
+    Private --> Shared : remap + loadvm
+    Shared --> Private : savevm + remap
     Shared --> Saved : flush on exit, clear dirty
     Private --> Saved : copy ram.bin on exit
     None --> Saved : copy ram.bin on exit
@@ -437,7 +438,7 @@ void Quickboot::onLivenessTimer() {
 }
 ```
 
-If the guest does not come alive within `bootTimeoutMs()` (7 seconds on x86, longer for ARM or read-only mode), the monitor first nudges adb, then resets the adb connection, and finally — after `kMaxAdbConnectionRetries` — deletes the `default_boot` snapshot and shows a cold-boot message. Deleting the snapshot guarantees that the next launch starts clean rather than re-loading a snapshot that hangs.
+If the guest does not come alive within `bootTimeoutMs()` (7 seconds on x86, longer for ARM or read-only mode), the monitor escalates in three stages. On the first timeout it only shows a UI warning ("Attempting to reconnect to the emulator") and increments an internal retry counter — no adb action is taken. On each subsequent timeout below `kMaxAdbConnectionRetries` it shows a second warning ("Final attempt to reconnect to the emulator") and calls `android_adb_reset_connection()` to reset the adb connection. After `kMaxAdbConnectionRetries` retries are exhausted it deletes the `default_boot` snapshot and shows a cold-boot error message. Deleting the snapshot guarantees that the next launch starts clean rather than re-loading a snapshot that hangs.
 
 ### 9.7.3 Save gating
 

@@ -172,6 +172,7 @@ The parser, `cmdline-option.cpp`, includes the *same* header to build a parallel
 static const OptionInfo  option_keys[] = {
 #define  OPT_FLAG(_name,_descr)             OPTION(_name,OPTION_IS_FLAG,0)
 #define  OPT_PARAM(_name,_template,_descr)  OPTION(_name,OPTION_IS_PARAM,0)
+#define  OPT_LIST(_name,_template,_descr)   OPTION(_name,OPTION_IS_LIST,0)
 #include "android/cmdline-options.h"
     { NULL, 0, 0, 0 }
 };
@@ -259,8 +260,9 @@ sequenceDiagram
     Common->>Common: android_parse_options fills opts
     Common->>Common: scan for -qemu boundary
     Common->>Avd: createAVD / avdInfo_new
-    Avd->>Hw: avdInfo_initHwConfig merge
-    Glue->>Hw: apply -gpu, -memory, -cores, etc
+    Common->>Hw: avdInfo_initHwConfig(avd)
+    Common->>Hw: apply -memory, -cores
+    Glue->>Hw: apply -accel / GPU
     Glue->>Glue: genHwIniFile writes hardware-qemu.ini
     Glue->>Qemu: enter_qemu_main_loop with -android-hw path
 ```
@@ -279,7 +281,7 @@ args.add2("-android-hw", coreHwIniPath);
 The `AndroidHwConfig` struct is itself X-macro generated. `hardware-properties.ini` is the master description of every hardware property — its name, type, default, and documentation — and `android/scripts/gen-hw-config.py` turns it into `hw-config-defs.h`. That generated header defines the struct fields, the loader, and the writer all from one list:
 
 ```c
-// Source: external/qemu/objs/avd_config/android/avd/hw-config-defs.h
+// Source: hardware/google/aemu/host-common/include/host-common/hw-config-defs.h
 HWCFG_STRING(
   hw_cpu_arch,
   "hw.cpu.arch",
@@ -358,7 +360,7 @@ flowchart TD
 
 ## 3.8 The Lifecycle: Launch to Boot Complete
 
-With options parsed, the AVD merged, `hardware-qemu.ini` written, and accelerator/GPU chosen, the glue builds the final QEMU argument vector and spawns the VM. `skin_winsys_spawn_thread()` runs `enter_qemu_main_loop()` on a dedicated thread (or directly when `-no-window` is set), which calls `run_qemu_main()` — the QEMU machine setup that creates the CPUs, RAM, and virtual devices described by the hardware ini.
+With options parsed, the AVD merged, `hardware-qemu.ini` written, and accelerator/GPU chosen, the glue builds the final QEMU argument vector and spawns the VM. `skin_winsys_spawn_thread()` runs `enter_qemu_main_loop()` on a dedicated thread, which calls `run_qemu_main()` — the QEMU machine setup that creates the CPUs, RAM, and virtual devices described by the hardware ini.
 
 ### 3.8.1 Window vs. headless
 
@@ -390,9 +392,9 @@ sequenceDiagram
     Guest->>Pipe: write "bootcomplete"
     Pipe->>Pipe: qemuMiscPipeDecodeAndExecute
     Pipe->>Misc: spawn detached thread
+    Misc->>Misc: report boot duration metric
     Misc->>Misc: touch bootcompleted.ini
     Misc->>Glob: set_guest_boot_completed(true)
-    Misc->>Misc: report boot duration metric
 ```
 
 ### 3.8.3 Restart and clean shutdown
@@ -401,9 +403,9 @@ The launcher captures restart parameters with `initializeEmulatorRestartParamete
 
 ## 3.9 One Engine, Many Form Factors
 
-There is no separate "Wear emulator" or "Android TV emulator" binary. The same `qemu-system-*` engine and the same launcher you have followed through this chapter boot a watch, a television, a foldable phone, a car head unit, a desktop, and an XR headset. What differs is entirely *data*: the AVD's `config.ini`, the system image's `build.prop`, and the chosen skin. Three pieces of derived state turn that data into device-specific behavior — an `AvdFlavor` classification, a hardware profile of geometry and input devices, and per-device sensor configuration — and all three flow through the same `avdInfo_initHwConfig` merge (section 3.6) into one `hardware-qemu.ini`.
+There is no separate "Wear emulator" or "Android TV emulator" binary. The same `qemu-system-*` engine and the same launcher you have followed through this chapter boot a watch, a television, a foldable phone, a car head unit, a desktop, and an XR headset. What differs is entirely *data*: the AVD's `config.ini`, the system image's `build.prop`, and the chosen skin. Three pieces of derived state turn that data into device-specific behavior — an `AvdFlavor` classification, a hardware profile of geometry and input devices, and per-device sensor configuration — and all three flow through the same `avdInfo_initHwConfig` merge (section 3.5.2) into one `hardware-qemu.ini`.
 
-### Diagram: one AVD configuration, many form factors
+One AVD configuration, many form factors
 
 ```mermaid
 flowchart TD
@@ -448,7 +450,7 @@ const char* xr_names[]      = {"xr"};
 const char* glasses_names[] = {"glasses"};
 ```
 
-`avdInfo_initHwConfig` stores the result on the `AvdInfo` (`external/qemu/android/emu/avd/src/android/avd/info.c:889`), and every form-factor decision downstream reads it back through `avdInfo_getAvdFlavor` (`external/qemu/android/emu/avd/include/android/avd/info.h:214`). A desktop image additionally gates some behavior on API level via `avdInfo_isDesktopApi36OrHigher` (`info.c:573`).
+`_avdInfo_extractBuildProperties` stores the result on the `AvdInfo` (`external/qemu/android/emu/avd/src/android/avd/info.c:889`), and every form-factor decision downstream reads it back through `avdInfo_getAvdFlavor` (`external/qemu/android/emu/avd/include/android/avd/info.h:214`). A desktop image additionally gates some behavior on API level via `avdInfo_isDesktopApi36OrHigher` (`info.c:572`).
 
 ### 3.9.2 The device profile: geometry, density, and input
 
@@ -470,7 +472,7 @@ Skins layer a bezel and a set of orientation layouts on top of that geometry. Th
 #define  SKIN_DEFAULT    "HVGA"
 ```
 
-A phone needs one skin; a foldable needs two (the open "default" and the folded "closed"), which is why the Pixel Fold has dedicated skin-name constants. The skin's own `hardware.ini` participates in the merge from section 3.6, sitting between the built-in defaults and `config.ini`.
+A phone needs one skin; a foldable needs two (the open "default" and the folded "closed"), which is why the Pixel Fold has dedicated skin-name constants. The skin's own `hardware.ini` participates in the merge from section 3.5.2, sitting between the built-in defaults and `config.ini`.
 
 ### 3.9.3 Foldables, rollables, and the resizable AVD
 
@@ -519,12 +521,12 @@ Once classified, the flavor reaches into both the display pipeline and the UI. O
 On the UI side, the extended-controls window enables or hides whole panels by flavor. The multi-display panel, for instance, is gated so that TV, Wear, XR, and Glasses never see it (`external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/extended-window.cpp:226`):
 
 ```cpp
-// Source: aemu-ui-qt/src/android/skin/qt/extended-window.cpp
+// Source: external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/extended-window.cpp
 avdFlavor != AVD_TV &&
 avdFlavor != AVD_WEAR && avdFlavor != AVD_XR && avdFlavor != AVD_GLASSES &&
 ```
 
-Further down, the same constructor branches once per flavor to add device-appropriate controls: a TV remote page (`:332`), Wear-specific controls (`:341`), the car data pages (`:348`), and an XR/Glasses input mode (`:376`). The sensor layer makes the matching move at init time — a Wear OS image auto-enables the heart-rate and wrist-tilt sensors and an Automotive image enables the heading sensor, as Chapter 10 describes. The net effect is that one engine presents itself as whatever device the AVD's flavor, profile, and skin describe.
+Further down, the same constructor branches once per flavor. The Android Auto branch (`:348`) adds car-specific controls (car data buttons, sensor replay, and a rotary controller). The TV (`:332`), Wear (`:341`), and XR/Glasses (`:376`) branches do the opposite — they hide controls that are inappropriate for those form factors, such as location, cellular, fingerprint, and telephony buttons. The sensor layer makes the matching move at init time — a Wear OS image auto-enables the heart-rate and wrist-tilt sensors and an Automotive image enables the heading sensor, as Chapter 10 describes. The net effect is that one engine presents itself as whatever device the AVD's flavor, profile, and skin describe.
 
 ## 3.10 Try It
 

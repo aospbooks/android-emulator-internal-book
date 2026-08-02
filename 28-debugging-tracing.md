@@ -23,7 +23,7 @@ typedef enum LogSeverity {
 } LogSeverity;
 ```
 
-The familiar `dprint`, `dinfo`, `dwarning`, `derror`, and `dfatal` macros are thin wrappers that compare the message severity against the process-wide minimum before formatting anything. The comparison short-circuits before the variadic arguments are evaluated, so a disabled `dprint` costs one integer compare:
+The familiar `dprint`, `dinfo`, `dwarning`, and `derror` macros are thin wrappers that compare the message severity against the process-wide minimum before formatting anything. The comparison short-circuits before the variadic arguments are evaluated, so a disabled `dprint` costs one integer compare. `dfatal` is the exception: it expands unconditionally to `EMULOG(EMULATOR_LOG_FATAL, ...)` with no guard, because a fatal message must never be suppressed:
 
 ```c
 // Source: hardware/google/aemu/base/include/aemu/base/logging/CLog.h
@@ -78,8 +78,8 @@ flowchart TD
     CALL["dwarning(fmt, ...)"] --> CMP{"WARNING >= getMinLogLevel?"}
     CMP -->|no| DROP["discard, no formatting"]
     CMP -->|yes| EMULOG["EMULOG: __emu_log_print, file + line"]
-    EMULOG --> FMT["LogFormatter.format"]
-    FMT --> SINKS["registered absl LogSinks"]
+    EMULOG --> ABSL["absl LogMessage dispatch"]
+    ABSL --> SINKS["registered absl LogSinks"]
     SINKS --> STDOUT["ColorLogSink to stdout"]
     SINKS --> CRASH["CrashpadLogSink"]
 ```
@@ -184,7 +184,7 @@ if (!strcmp(opt, "-debug-time")) {
 }
 ```
 
-After the loop, the launcher calls `base_configure_logs(logFlags)` once. The `LoggingFlags` enum (`kLogEnableTime`, `kLogEnableVerbose`, `kLogEnableDuplicateFilter`) selects which formatter the sink uses, so `-debug-time` selects the timestamped formatter and `-log-detailed` selects the verbose formatter with the thread/location prefix.
+After the loop, the launcher calls `base_configure_logs(logFlags)` once. That function reads `kLogEnableVerbose` — set by `-log-detailed` or `-debug-log` — to enable the verbose formatter on `ColorLogSink`, which adds a timestamp, thread id, and file:line prefix to every line. `kLogEnableTime` (set by `-debug-time`) is defined in the `LoggingFlags` enum but `base_configure_logs` does not currently handle it, so `-debug-time` has no effect on the output format.
 
 ### 28.2.3 From tag string to enabled bit
 
@@ -365,7 +365,7 @@ void CrashReporter::GenerateDumpAndDie(const char* message) {
 }
 ```
 
-The comment in the source explains the reasoning: `abort()` is not caught by the handler on Windows, an explicit store can be optimized out, and requesting a dump then exiting later leaves a window where a real crash could land in the middle. The double-`volatile` store defeats the optimizer. `enableSignalTermination()` itself unblocks `SIGSEGV`, `SIGABRT`, `SIGFPE`, and the rest so the handler can observe the fault.
+The comment in the source explains the reasoning: `abort()` is not caught by Breakpad on Windows (the comment predates the migration to Crashpad), an explicit store can be optimized out, and requesting a dump then exiting later leaves a window where a real crash could land in the middle. The double-`volatile` store defeats the optimizer. `enableSignalTermination()` itself unblocks `SIGSEGV`, `SIGABRT`, `SIGFPE`, and the rest so the handler can observe the fault.
 
 ---
 
@@ -538,6 +538,7 @@ flowchart LR
         DUMPSYMS["dump_syms: binary to .sym"]
         PROC["MinidumpProcessor: symbolize"]
     end
+    CLIENT --> HANDLER
     HANDLER --> CPDB
     CPDB --> MINIDUMP["minidump file"]
     MINIDUMP --> PROC
@@ -565,7 +566,7 @@ TRACING_API void endTrace();
 #define AEMU_SCOPED_TRACE_CALL() AEMU_SCOPED_TRACE(__func__)
 ```
 
-The hot path is optimized for the common case where tracing is off. `beginTrace` and `ScopedTrace` first test a cached `tracingDisabledPtr` and return immediately if tracing is disabled, so an inactive trace point is a single branch:
+The hot path is optimized for the common case where Perfetto has not been compiled in or initialized. `beginTrace` and `ScopedTrace` first test a cached `tracingDisabledPtr` and return immediately when that pointer is null (i.e., `initializeTracing()` was never called), so an uninitialized trace point is a single branch. Once `initializeTracing()` is called, `tracingDisabledPtr` is set to a non-null address and the null check no longer fires; the fast path for "initialized but no active session" is then Perfetto's own internal category-enable check inside `TRACE_EVENT_BEGIN`:
 
 ```cpp
 // Source: hardware/google/aemu/base/Tracing.cpp
@@ -684,7 +685,7 @@ if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_VERBOSE") == "1") {
 }
 ```
 
-The valid names are `error`, `warning`, `info`, `debug`, and `verbose`. There is also a coarser `ANDROID_EMUGL_VERBOSE` variable that the virtio-gpu renderer sets internally when other verbose modes are requested.
+The valid names are `error`, `warning`, `info`, `debug`, and `verbose`. There is also a coarser `ANDROID_EMUGL_VERBOSE` variable that the virtio-gpu renderer sets internally when `ANDROID_GFXSTREAM_EGL=1` (EGL-on-EGL rendering mode is enabled).
 
 ### 28.9.2 Vulkan validation via vkdebugenv
 
@@ -708,7 +709,7 @@ Two layers are enabled. `VK_LAYER_KHRONOS_validation` checks every Vulkan call a
 The graphics debugging surfaces, from cheapest to most detailed.
 
 ```mermaid
-flowchart TD
+flowchart LR
     subgraph L1["Layer 1: gfxstream logs"]
         ENV1["GFXSTREAM_LOG_LEVEL=verbose"] --> GLOG["GfxstreamLog level gate"]
     end

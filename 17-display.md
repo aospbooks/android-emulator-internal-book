@@ -10,7 +10,7 @@ The two big themes are *decoupling* and *coordination*. Decoupling: the hardware
 
 The classic single-display path predates gfxstream and still backs no-GPU and software-rendered configurations. It is described in the emulator's own design note, `external/qemu/android/docs/DISPLAY-STATE.TXT`, and is worth understanding because the abstractions it defines (`DisplaySurface`, `DisplayChangeListener`) are reused everywhere else.
 
-A `DisplayState` owns a `DisplaySurface` — "nothing more than a pixel buffer with specific dimensions, pitch and format" — plus a list of `DisplayChangeListener` objects. The hardware framebuffer emulation pushes updates into the surface; each listener receives callbacks (`dpy_gfx_update`, `dpy_gfx_switch`, `dpy_refresh`) and copies or forwards the pixels to wherever it displays them. A GUI timer drives the whole loop: it fires `dpy_refresh`, which polls input and calls `graphic_hw_update()`, which asks the hardware emulation to copy dirty rectangles into the surface and then fan them out to listeners.
+A `DisplayState` owns a `DisplaySurface` — "nothing more than a pixel buffer with specific dimensions, pitch and format" — plus a list of `DisplayChangeListener` objects. The hardware framebuffer emulation pushes updates into the surface; each listener receives callbacks (`dpy_gfx_update`, `dpy_gfx_switch`, `dpy_refresh`) and copies or forwards the pixels to wherever it displays them. A GUI timer drives the whole loop via two independent paths: the DCL's `dpy_refresh` callback (`android_display_refresh`) calls `qframebuffer_poll()` to process input events, while a separate `emulator_window_refresh()` → `qframebuffer_check_updates()` call invokes the QFrameBuffer producer check callback (`android_display_producer_check`), which calls `graphic_hw_update(NULL)` — asking the hardware emulation to copy dirty rectangles into the surface and fan them out to listeners.
 
 The Android emulator inserts its own indirection — `QFrameBuffer` — between the `DisplaySurface` and the UI, declared in `hardware/google/aemu/host-common/include/host-common/display_agent.h`. The header states the contract plainly:
 
@@ -39,8 +39,9 @@ flowchart LR
     DS -->|"dpy_gfx_update(x,y,w,h)"| DCL["DisplayChangeListener<br/>(qemu2-glue)"]
     DCL -->|"qframebuffer_update()"| QFB["QFrameBuffer<br/>(shared pixels)"]
     QFB -->|"fb_update callback"| UI["Skin window /<br/>recorder client"]
-    GUI["GUI timer"] -->|"dpy_refresh"| DCL
-    DCL -->|"graphic_hw_update(NULL)"| HW
+    GUI["GUI timer"] -->|"dpy_refresh /<br/>qframebuffer_poll()"| DCL
+    GUI -->|"emulator_window_refresh /<br/>qframebuffer_check_updates()"| PC["producer check<br/>callback"]
+    PC -->|"graphic_hw_update(NULL)"| HW
 ```
 
 The glue that wires QEMU's listener model to the `QFrameBuffer` lives in `external/qemu/android-qemu2-glue/display.cpp`. Its top comment captures the whole relationship in one line: `DisplayState <--> QFrameBuffer <--> QEmulator/SDL`.
@@ -77,7 +78,7 @@ static void android_display_update(DisplayChangeListener* dcl,
 }
 ```
 
-Two producer callbacks close the loop in the other direction. `android_display_producer_check()` calls `graphic_hw_update(NULL)` — that is what eventually triggers the listener's update callback — and `android_display_producer_invalidate()` calls `graphic_hw_invalidate(NULL)` so the next update resends the whole frame (used when a minimized window is restored). The same file registers a QEMU `QemuDisplay` of type `DISPLAY_TYPE_SDL` whose `init` hook is `sdl_display_init()`; for a headless run, `EmulatorWindow`'s `no_window` flag short-circuits it. There is a dedicated `android_display_init_no_window()` for the GPU-guest / no-window case that attaches only the check and invalidate callbacks so screen recording can still pull frames without a visible surface.
+Two producer callbacks close the loop in the other direction. `android_display_producer_check()` calls `graphic_hw_update(NULL)` — that is what eventually triggers the listener's update callback — and `android_display_producer_invalidate()` calls `graphic_hw_invalidate(NULL)` so the next update resends the whole frame (used when a minimized window is restored). The same file registers a QEMU `QemuDisplay` of type `DISPLAY_TYPE_SDL` whose `init` hook is platform-dependent: `sdl_display_init()` on Linux and Windows, or `android_sdl_display_init()` on macOS ARM64 — both check the `no_window` flag and delegate to `android_display_init()` when a window is needed. There is a dedicated `android_display_init_no_window()` for the GPU-guest / no-window case that attaches only the check and invalidate callbacks so screen recording can still pull frames without a visible surface.
 
 ### 17.2.1 The display agent
 
@@ -169,7 +170,7 @@ static constexpr uint32_t s_maxNumMultiDisplay = 11;
 static constexpr uint32_t s_invalidIdMultiDisplay = 0xFFFFFFAB;
 ```
 
-Display 0 is the primary Android display. Ids 1–5 belong to user-configurable secondary displays created through the UI, command line, or `config.ini`. Ids 6–10 are reserved for displays the *guest* creates dynamically (for example through HWComposer/`rcCommand`); these are deliberately not reported back to the guest by the multidisplay pipe, because the guest already knows about them — `MultiDisplayPipe::onMessage` breaks out of the QUERY loop once it sees an id at or past `s_displayIdInternalBegin`.
+Display 0 is the primary Android display. Ids 1–3 are user-configurable secondary displays created through the UI, command line, or `config.ini`; ids 4–5 are nominally reserved per the header comment but are not reachable through any current command-line, config.ini, or gRPC interface. Ids 6–10 are reserved for displays the *guest* creates dynamically (for example through HWComposer/`rcCommand`); these are deliberately not reported back to the guest by the multidisplay pipe, because the guest already knows about them — `MultiDisplayPipe::onMessage` breaks out of the QUERY loop once it sees an id at or past `s_displayIdInternalBegin`.
 
 `MultiDisplay` is also an `EventNotificationSupport<DisplayChangeEvent>`: every mutation (`createDisplay`, `setDisplayPose`, `destroyDisplay`, `notifyDisplayChanges`) fires a `DisplayChangeEvent` with one of `DisplayAdded`, `DisplayRemoved`, `DisplayChanged`, or `DisplayTransactionCompleted` so that the UI and gRPC subscribers can react.
 
@@ -256,7 +257,7 @@ if (rotation != SKIN_ROTATION_0) {
 }
 ```
 
-From there the path forks on whether *hot-plug* display is enabled (Minigbm feature plus `-hotplug-multidisplay` or the `hw.hotplug_multi_display` config). With hot-plug, the work is delegated directly to the VM operations agent (`mVmAgent->setDisplay(id, w, h, dpi)` to add, or zeros to remove). Without hot-plug, the classic path runs: `createDisplay()` reserves the id, `setDisplayPose()` records geometry, the multidisplay guest service is (re)started over adb, and the change is pushed to the guest through `MultiDisplayPipe`.
+From there the path forks on whether *hot-plug* display is enabled (Minigbm feature plus `-hotplug-multi-display` or the `hw.hotplug_multi_display` config). With hot-plug, the work is delegated directly to the VM operations agent (`mVmAgent->setDisplay(id, w, h, dpi)` to add, or zeros to remove). Without hot-plug, the classic path runs: `createDisplay()` reserves the id, `setDisplayPose()` records geometry, the multidisplay guest service is (re)started over adb, and the change is pushed to the guest through `MultiDisplayPipe`.
 
 ### Diagram: setMultiDisplay decision flow
 
@@ -334,7 +335,7 @@ When secondary displays share a single host window (the default, not "window per
 
 `getCombinedDisplaySizeLocked()` then reduces the map to the bounding size of all active displays (display 0 plus any with a non-zero color buffer), which becomes the argument to `setUIDisplayRegion`.
 
-Input goes the other way. The host window reports a click in window coordinates; `translateCoordination()` must figure out *which* display was hit and convert to that display's local coordinates. It has four branches — one per orientation — because the window's origin and axis directions differ in each. The portrait, normal-order (rotation 0) case is the simplest: it flips y from the window's top-left origin to the framebuffer's bottom-left origin and tests each display's rectangle.
+Input goes the other way. The host window reports a click in window coordinates; `translateCoordination()` must figure out *which* display was hit and convert to that display's local coordinates. It has four branches — one per orientation — because the window's origin and axis directions differ in each. The portrait, normal-order (rotation 0) case is the simplest: it converts the stored display position from the internal bottom-left-origin convention to the Qt window's top-left-origin convention, then tests whether the hit falls inside each display's rectangle.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/MultiDisplay.cpp
@@ -446,7 +447,7 @@ emulator -help-multidisplay
 
 ```bash
 emulator -avd <your_avd> -feature MultiDisplay \
-    -multidisplay 1,1200,800,240,0 -multidisplay 2,1080,1920,320,0
+    -multidisplay 1,1200,800,240,0,2,1080,1920,320,0
 ```
 
 - Configure secondary displays persistently in the AVD's `config.ini` instead:
@@ -483,7 +484,7 @@ adb shell dumpsys display | grep -i "Display Devices\|mDisplayId"
 
 - The frame path is layered: guest hardware framebuffer to QEMU `DisplaySurface`, fanned out by `DisplayChangeListener` callbacks, adapted into a `QFrameBuffer` by `external/qemu/android-qemu2-glue/display.cpp`, and finally consumed by a skin window or recorder client.
 - `QFrameBuffer` (`hardware/google/aemu/host-common/include/host-common/display_agent.h`) is the producer/client seam that decouples hardware emulation from any specific UI, and `QAndroidDisplayAgent` exposes the surface to android-emu consumers.
-- `MultiDisplay` (`MultiDisplay.cpp`) is the single source of truth for every display's geometry, dpi, flags, color buffer, and rotation; ids are partitioned 0 (primary), 1–5 (UI/config), 6–10 (guest-created).
+- `MultiDisplay` (`MultiDisplay.cpp`) is the single source of truth for every display's geometry, dpi, flags, color buffer, and rotation; ids are partitioned 0 (primary), 1–5 reserved for UI/config (only 1–3 reachable today), 6–10 (guest-created).
 - `QAndroidMultiDisplayAgent` is a C function-pointer struct (`qemu-multi-display-agent-impl.cpp`) that lets the QEMU glue, Qt UI, gRPC server, and gfxstream renderer all reach the one `MultiDisplay` singleton without a direct dependency.
 - `setMultiDisplay()` is the universal entry point; it gates on the MultiDisplay feature, foldable/resizable state, and zero rotation, validates against CDD limits, and pushes changes to the guest over `MultiDisplayPipe` (ADD/DEL/QUERY/BIND) or via hot-plug VM operations.
 - Layout, rotation, and input translation are orientation-aware: `performRotationLocked()` re-tiles displays from their original dimensions for each of the four rotations, `getCombinedDisplaySizeLocked()` sizes the host window, and `translateCoordination()` maps window clicks back to a display-local coordinate.

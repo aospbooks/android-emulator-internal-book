@@ -10,25 +10,35 @@ The payoff of routing every controller through one daemon is multi-device emulat
 
 Rootcanal lives in `tools/rootcanal/`. Its own README states the goal plainly: it is "a virtual Bluetooth Controller" whose emulation "is limited to features that have direct consequences on connected hosts," so "accurate implementation of HCI commands and events is thus critical to RootCanal's goal, while accurate emulation of the scheduler and base-band is out of scope" (`tools/rootcanal/README.md`).
 
-The heart of Rootcanal is the `DualModeController`, declared in `tools/rootcanal/model/controller/dual_mode_controller.h`. A dual-mode controller supports both Bluetooth Classic (BR/EDR) and Bluetooth Low Energy (LE). It exposes the four HCI packet-handling entry points the spec defines:
+The heart of Rootcanal is the `DualModeController`, declared in `tools/rootcanal/model/controller/dual_mode_controller.h`. A dual-mode controller supports both Bluetooth Classic (BR/EDR) and Bluetooth Low Energy (LE). It exposes eight HCI packet-handling entry points: four inbound handlers that consume packets from the host, and four outbound register-callbacks that route packets back to the host.
 
 - `HandleCommand` consumes HCI command packets issued by the host.
-- `HandleAcl` consumes ACL (asynchronous, connectionless) data packets.
+- `HandleAcl` consumes ACL (asynchronous connectionless) data packets.
+- `HandleSco` consumes SCO (synchronous connection-oriented, used for audio) data packets.
+- `HandleIso` consumes ISO (isochronous) data packets.
 - `RegisterEventChannel` registers the callback for HCI event packets sent back to the host.
 - `RegisterAclChannel` registers the callback for ACL data sent back to the host.
+- `RegisterScoChannel` registers the callback for SCO data sent back to the host.
+- `RegisterIsoChannel` registers the callback for ISO data sent back to the host.
 
 ```cpp
 // Source: tools/rootcanal/model/controller/dual_mode_controller.h
 void HandleAcl(std::shared_ptr<std::vector<uint8_t>> acl_packet);
 void HandleCommand(std::shared_ptr<std::vector<uint8_t>> command_packet);
+void HandleSco(std::shared_ptr<std::vector<uint8_t>> sco_packet);
+void HandleIso(std::shared_ptr<std::vector<uint8_t>> iso_packet);
 ...
 void RegisterEventChannel(
         const std::function<void(std::shared_ptr<std::vector<uint8_t>>)>& send_event);
 void RegisterAclChannel(
         const std::function<void(std::shared_ptr<std::vector<uint8_t>>)>& send_acl);
+void RegisterScoChannel(
+        const std::function<void(std::shared_ptr<std::vector<uint8_t>>)>& send_sco);
+void RegisterIsoChannel(
+        const std::function<void(std::shared_ptr<std::vector<uint8_t>>)>& send_iso);
 ```
 
-A `DualModeController` by itself only knows how to react to HCI traffic. To become a usable controller it is wrapped in an `HciDevice` (`tools/rootcanal/model/devices/hci_device.h`), which binds the controller's four output channels to an `HciTransport` and routes inbound transport packets back into the controller. The constructor in `tools/rootcanal/model/devices/hci_device.cc` wires every channel direction:
+A `DualModeController` by itself only knows how to react to HCI traffic. To become a usable controller it is subclassed by `HciDevice` (`tools/rootcanal/model/devices/hci_device.h`; `class HciDevice : public DualModeController`), which binds the controller's output channels to an `HciTransport` and routes inbound transport packets back into the controller. The constructor in `tools/rootcanal/model/devices/hci_device.cc` wires every channel direction:
 
 ```cpp
 // Source: tools/rootcanal/model/devices/hci_device.cc
@@ -150,10 +160,9 @@ flowchart TB
     C1 --> PB
     C2["Watch controller<br/>HciDevice"] --> PL
     C2 --> PB
-    BEAC["Beacon device"] --> PL
+    BEAC["Beacon device"] -->|"advertisements"| PL
     PL -.->|"link-layer packets"| C1
     PL -.->|"link-layer packets"| C2
-    PL -.->|"advertisements"| BEAC
 ```
 
 ---
@@ -174,7 +183,7 @@ if ((feature_is_enabled(kFeature_BluetoothEmulation) ||
 }
 ```
 
-Two QEMU command-line fragments do all the work. The `-device virtserialport,...,name=bluetooth` line creates the guest-visible virtio serial port that the HAL talks to. The `-chardev netsim,id=bluetooth` line creates a host-side character device of a custom type, `chardev-netsim`, whose entire job is to forward bytes to netsim. (UWB is set up the same way a few lines earlier with `netsim,id=uwb`; Wi-Fi takes a different forwarder.)
+Two QEMU command-line fragments do all the work. The `-device virtserialport,...,name=bluetooth` line creates the guest-visible virtio serial port that the HAL talks to. The `-chardev netsim,id=bluetooth` line creates a host-side character device of a custom type, `chardev-netsim`, whose entire job is to forward bytes to netsim. (UWB uses the same `netsim` chardev type — `netsim,id=uwb` — but a `virtconsole` guest device rather than a `virtserialport`; Wi-Fi takes a different forwarder.)
 
 The `chardev-netsim` type is registered in `external/qemu/android-qemu2-glue/netsim/qemu-packet-stream-agent-impl.cpp`. It is a QEMU `TypeInfo` with a write handler that hands guest bytes to a `PacketStreamerTransport`:
 
@@ -326,7 +335,7 @@ The returned `rootcanal_id` is the model's device identifier, and it is the hand
 
 ### 19.6.2 The Snapshot Quirk
 
-The facade also flips a Rootcanal "quirk" when a custom controller proto is supplied:
+The facade unconditionally enables a Rootcanal "quirk" on the global `controller_proto_` during `Start()`, so every controller inherits it. When a custom controller proto is also supplied via `Add()`, the quirk is explicitly set again on the custom proto to ensure it is not overridden:
 
 ```cpp
 // Source: tools/netsim/src/hci/bluetooth_facade.cc
@@ -372,17 +381,19 @@ flowchart TB
     subgraph RUST["netsimd Rust"]
         GS["PacketStreamerService<br/>stream_packets"]
         WIR["Bluetooth WirelessChip"]
-        DROP["Drop -> bluetooth_remove"]
     end
     subgraph CPP["netsimd C++ facade"]
         FAC["bluetooth_facade Add"]
+        HTR["HciPacketTransport"]
         STM["SimTestModel"]
         HD["HciDevice + DualModeController"]
     end
+    DROP["Drop -> bluetooth_remove"]
     GS -->|"wireless::handle_request"| WIR
-    WIR -->|"cxx FFI<br/>handle_bt_request"| FAC
+    WIR -->|"cxx FFI<br/>handle_bt_request"| HTR
     FAC --> STM
     STM --> HD
+    HTR --> HD
     WIR -.-> DROP
 ```
 
@@ -475,18 +486,25 @@ With stable addresses, two emulators that have paired once stay paired across re
 
 ```mermaid
 sequenceDiagram
+    box "Emulators"
     participant E1 as Emulator A
+    participant E2 as Emulator B
+    end
+    box "netsim"
     participant ND as netsimd
     participant RC as Rootcanal TestModel
-    participant E2 as Emulator B
+    end
     E1->>ND: StreamPackets initial_info kind BLUETOOTH
     ND->>RC: AddHciConnection, AddDeviceToPhy LE and BR_EDR
     E2->>ND: StreamPackets initial_info kind BLUETOOTH
     ND->>RC: AddHciConnection, AddDeviceToPhy LE and BR_EDR
-    E1->>RC: HCI LE Set Advertising Enable
+    E1->>ND: HCI LE Set Advertising Enable
+    ND->>RC: HCI LE Set Advertising Enable
     RC-->>E2: link-layer advertisement on shared LE phy
-    E2->>RC: HCI LE Create Connection
-    RC-->>E1: connection complete event
+    E2->>ND: HCI LE Create Connection
+    ND->>RC: HCI LE Create Connection
+    RC-->>ND: connection complete event
+    ND-->>E1: connection complete event
 ```
 
 ---
@@ -576,7 +594,7 @@ m root-canal
 ## Summary
 
 - The emulator has no real Bluetooth hardware; the guest stack talks to Rootcanal, a software HCI controller in `tools/rootcanal/` whose `DualModeController` accurately implements HCI commands and events while leaving the baseband out of scope.
-- A controller is a `DualModeController` wrapped in an `HciDevice` (`tools/rootcanal/model/devices/hci_device.cc`) that binds the four HCI channels (command, event, ACL, SCO/ISO) to an `HciTransport`; the H4 protocol frames the byte stream and `H4Parser` reassembles it.
+- `HciDevice` subclasses `DualModeController` (`tools/rootcanal/model/devices/hci_device.cc`) and binds all eight HCI channels (command, ACL, SCO, ISO inbound; event, ACL, SCO, ISO outbound) to an `HciTransport`; the H4 protocol frames the byte stream and `H4Parser` reassembles it.
 - Rootcanal's `TestModel` owns two phys, `LOW_ENERGY` and `BR_EDR`; controllers on the same phy can exchange link-layer packets, which is the entire mechanism behind multi-device emulation.
 - The guest reaches Rootcanal through a transport chain: a virtio serial port named `bluetooth`, a `chardev-netsim` QEMU character device, a gRPC `PacketStreamer` stream, and finally netsim's embedded Rootcanal — set up in `external/qemu/android-qemu2-glue/main.cpp` only when `kFeature_BluetoothEmulation` is on.
 - `BluetoothPacketProtocol` translates between the H4 byte stream and typed `HCIPacket` protobufs, and injects a hardware-error reset sequence on (re)connect so the guest stack re-initializes cleanly across snapshots.

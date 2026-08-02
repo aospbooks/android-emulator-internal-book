@@ -40,8 +40,8 @@ graph TD
         BD["ranchu / pc boards"]
         GF["goldfish_pipe, goldfish_battery,<br/>goldfish_fb, goldfish-events"]
     end
-    AE --> GP
-    AG --> AI
+    GP --> AE
+    AI --> AG
     GP --> GF
     AI --> GF
     BD --> GF
@@ -161,6 +161,7 @@ DEFINE_MACHINE("ranchu", ranchu_machine_init)
 // Source: hw/arm/ranchu.c
 static const MemMapEntry memmap[] = {
     [RANCHU_FLASH] = { 0, 0x8000000 },
+    [RANCHU_CPUPERIPHS] = { 0x8000000, 0x20000 },
     [RANCHU_GIC_DIST] = { 0x8000000, 0x10000 },
     [RANCHU_GIC_CPU] = { 0x8010000, 0x10000 },
     [RANCHU_UART] = { 0x9000000, 0x1000 },
@@ -367,7 +368,7 @@ bool qemu_android_pipe_init(android::VmLock* vmLock) {
 }
 ```
 
-Until that call runs, the QEMU device uses a defensive default. `goldfish_pipe.c` ships a `s_null_service_ops` whose `guest_open` logs "Android guest tried to open a pipe before service registration! Please call goldfish_pipe_set_service_ops() at setup time!" and returns NULL, force-closing the pipe (`hw/misc/goldfish_pipe.c:171` and `:208`). The null ops are a tripwire that catches a missing or mis-ordered glue setup.
+Until that call runs, the QEMU device uses a defensive default. `goldfish_pipe.c` ships a `s_null_service_ops` whose `guest_open` logs "Android guest tried to open a pipe before service registration! Please call goldfish_pipe_set_service_ops() at setup time!" and returns NULL, force-closing the pipe (`hw/misc/goldfish_pipe.c:171` and `:197`). The null ops are a tripwire that catches a missing or mis-ordered glue setup.
 
 ### 4.5.2 The Sync Device Bridge
 
@@ -394,7 +395,7 @@ bool qemu_android_sync_init(android::VmLock* vmLock) {
 `qemu_android_sync_init` calls *both* setters: `set_service_ops` points the device at the host, `set_hw_funcs` points the host at the device. After that one function returns, the two halves can call each other freely.
 
 ```mermaid
-graph LR
+graph TD
     subgraph SVC["android-emu host service"]
         S["AndroidPipe /<br/>GoldfishSyncCommandQueue"]
     end
@@ -602,10 +603,14 @@ sequenceDiagram
     participant Glue as service_ops lambda
     participant Svc as android-emu AndroidPipe
 
+    App->>Drv: open("/dev/qemu_pipe")
+    Drv->>Dev: PIPE_CMD_OPEN
+    Dev->>Glue: service_ops->guest_open
+    Glue->>Svc: android_pipe_guest_open (creates connector pipe)
     App->>Drv: write(fd, "opengles")
     Drv->>Dev: MMIO write
-    Dev->>Glue: service_ops->guest_open
-    Glue->>Svc: android_pipe_guest_open
+    Dev->>Glue: service_ops->guest_send
+    Glue->>Svc: android_pipe_guest_send (connector resolves service)
     App->>Drv: write(fd, command bytes)
     Drv->>Dev: MMIO write
     Dev->>Glue: service_ops->guest_send

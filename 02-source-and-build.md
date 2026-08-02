@@ -309,13 +309,14 @@ flowchart TD
   CLEAN --> PRE["PrebuiltsTask"]
   PRE --> CFG["ConfigureTask<br/>(cmake -G Ninja)"]
   CFG --> CMP["CompileTask<br/>(cmake --build)"]
-  CMP --> TST["CTestTask /<br/>GenEntriesTestTask"]
-  TST --> DIST["DistributionTask<br/>(zip the output)"]
+  CMP --> TST["CTestTask / GenEntriesTestTask /<br/>CoverageReportTask"]
+  TST --> PKG["PackageSamplesTask /<br/>ZipIntegrationTestsTask"]
+  PKG --> DIST["DistributionTask<br/>(zip the output)"]
 ```
 
 ### 2.5.2 ConfigureTask: assembling the CMake command line
 
-`ConfigureTask` is where the build's options become CMake `-D` flags. It locates the prebuilt `cmake` and `ninja` binaries, selects a toolchain file based on the target, maps the crash and configuration choices to definitions, and stamps in the SDK revision read from `source.properties`:
+`ConfigureTask` is where the build's options become CMake `-D` flags. It locates the prebuilt `cmake` and `ninja` binaries, selects a toolchain file based on the target, maps the crash and configuration choices to definitions, and stamps in the SDK build number supplied via `--sdk_build_number`:
 
 ```python
 # Source: external/qemu/android/build/python/aemu/tasks/configure.py
@@ -464,15 +465,20 @@ A few host prebuilts *are* built from source as the first real task in the pipel
 
 ```python
 # Source: external/qemu/android/build/python/aemu/prebuilts/__init__.py
-if HOST_OS == "darwin":
-    _prebuilt_funcs = {
-        "moltenvk": moltenvk.buildPrebuilt,
-        "vulkan_loader": vulkan_loader.buildPrebuilt,
-    }
-elif HOST_OS == "linux":
-    _prebuilt_funcs = {
-        'vulkan_loader': vulkan_loader.buildPrebuilt,
-    }
+if is_emulator_build:
+    if HOST_OS == "darwin":
+        _prebuilt_funcs = {
+            "moltenvk": moltenvk.buildPrebuilt,
+            "vulkan_loader": vulkan_loader.buildPrebuilt,
+        }
+    elif HOST_OS == "linux":
+        _prebuilt_funcs = {
+            'vulkan_loader': vulkan_loader.buildPrebuilt,
+        }
+    elif HOST_OS == "windows":
+        _prebuilt_funcs = {
+            'vulkan_loader': vulkan_loader.buildPrebuilt,
+        }
 ```
 
 These are built before configure because the rest of the CMake project consumes them as already-present libraries.
@@ -615,7 +621,7 @@ graph TD
   DIST --> LIBDATA["lib/pc-bios/<br/>BIOS, keymaps"]
   QEMUDIR --> Q1["qemu-system-x86_64<br/>+ -headless"]
   QEMUDIR --> Q2["qemu-system-aarch64<br/>+ -headless"]
-  QEMUDIR --> Q3["qemu-system-i386,<br/>qemu-system-armel"]
+  QEMUDIR --> Q3["qemu-system-i386,<br/>qemu-system-armel<br/>+ -headless"]
   LIB64 --> S1["libandroid-emu-shared.so"]
   LIB64 --> S2["libgfxstream_backend.so"]
   LIB64 --> S3["libc++.so"]

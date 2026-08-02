@@ -21,7 +21,7 @@ The driver is delivered as a set of `.so` files with `_emulation` stems, named s
 - `libEGL_emulation` from `hardware/google/gfxstream/guest/egl/Android.bp`
 - `libGLESv1_CM_emulation` from `hardware/google/gfxstream/guest/GLESv1/Android.bp`
 - `libGLESv2_emulation` from `hardware/google/gfxstream/guest/GLESv2/Android.bp`
-- `libgfxstream_guest_vulkan_with_host.so`, the Vulkan ICD named in `external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_icd.json`
+- `vulkan.ranchu.so` (build module `vulkan.ranchu` from `external/mesa3d/src/gfxstream/guest/vulkan/Android.bp`), the Vulkan ICD; Android's loader discovers it in `/vendor/lib[64]/hw/` via the standard `vulkan.<hw>.so` naming convention
 
 The platform EGL loader reads `egl.cfg` to learn which backend to load. The emulator ships the trivial `hardware/google/gfxstream/guest/egl/egl.cfg` containing a single line:
 
@@ -249,7 +249,7 @@ The surface's `swapBuffers()` ultimately calls `rcEnc->rcFlushWindowColorBufferA
 
 ### 12.5.1 EGL display is a singleton
 
-The EGL display is not negotiated per call — `egl.cpp` keeps a single `static eglDisplay s_display;` and `eglGetDisplay` always returns its address. Validation macros (`VALIDATE_DISPLAY_INIT`, `DEFINE_AND_VALIDATE_HOST_CONNECTION`) check that the passed `EGLDisplay` equals `&s_display` before touching it, so a bad handle fails fast in the guest instead of corrupting the wire stream.
+The EGL display is not negotiated per call — `egl.cpp` keeps a single `static eglDisplay s_display;` and `eglGetDisplay` returns its address for `EGL_DEFAULT_DISPLAY` (the only valid display on Android), and `EGL_NO_DISPLAY` for any other argument. Validation macros (`VALIDATE_DISPLAY_INIT`, `DEFINE_AND_VALIDATE_HOST_CONNECTION`) check that the passed `EGLDisplay` equals `&s_display` before touching it, so a bad handle fails fast in the guest instead of corrupting the wire stream.
 
 ### 12.5.2 An EGL frame, end to end
 
@@ -267,6 +267,8 @@ sequenceDiagram
   App->>EGL: eglCreateContext
   EGL->>RC: rcCreateContext
   RC->>Stream: opcode + args
+  Stream->>Host: flush + rcCreateContext request
+  Host-->>Stream: context handle (uint32_t)
   EGL-->>App: EGLContext handle
   App->>GL: glClear / glDrawArrays
   GL->>Stream: encoded commands (batched)
@@ -279,18 +281,7 @@ sequenceDiagram
 
 ## 12.6 The Vulkan ICD on the Mesa Runtime
 
-The Vulkan guest driver is structurally different from GLES. Instead of a thin hand-written ICD over a generated encoder, it is a full Mesa Vulkan driver that *reuses Mesa's dispatch runtime* and forwards through a generated `VkEncoder`. The loader finds it through the ICD manifest:
-
-```
-// Source: external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_icd.json
-{
-    "file_format_version": "1.0.0",
-    "ICD": {
-      "library_path": "libgfxstream_guest_vulkan_with_host.so",
-      "api_version": "1.0.5"
-    }
-}
-```
+The Vulkan guest driver is structurally different from GLES. Instead of a thin hand-written ICD over a generated encoder, it is a full Mesa Vulkan driver that *reuses Mesa's dispatch runtime* and forwards through a generated `VkEncoder`. On Android the loader discovers it as `vulkan.ranchu.so` in `/vendor/lib[64]/hw/` via the standard `vulkan.<hw>.so` naming convention (build module `vulkan.ranchu` in `external/mesa3d/src/gfxstream/guest/vulkan/Android.bp`). The file `external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_icd.json` is a desktop-Linux Vulkan loader manifest and is not used on Android; the library name it references (`libgfxstream_guest_vulkan_with_host.so`) does not match any current Android build output.
 
 `external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp` implements the entry points with the `gfxstream_vk_` prefix and wires them into Mesa's dispatch tables. `gfxstream_vk_CreateInstance` first builds a Mesa `vk_instance`, then makes the encoder call:
 
@@ -323,7 +314,7 @@ ALWAYS_INLINE_GFXSTREAM VkEncoder* ResourceTracker::getThreadLocalEncoder() {
 }
 ```
 
-Command ordering uses a monotonic sequence number so the host can detect out-of-order or dropped packets:
+Queue-submit ordering uses a monotonic sequence number so the host can detect out-of-order or dropped queue-flush packets:
 
 ```cpp
 // Source: external/mesa3d/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp

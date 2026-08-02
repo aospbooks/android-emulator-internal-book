@@ -116,7 +116,7 @@ Neither the encoders nor the matching host decoders are written by hand. They ar
 // Source: hardware/google/gfxstream/codegen/gles2/gles2.in
 GL_ENTRY(void, glActiveTexture, GLenum texture)
 GL_ENTRY(void, glAttachShader, GLuint program, GLuint shader)
-GL_ENTRY(void, glBindBuffer, GLenum target, GLuint buffer)
+GL_ENTRY(void, glBindAttribLocation, GLuint program, GLuint index, const GLchar* name)
 ```
 
 From a single set of `.in` and `.attrib` files, `emugen` emits three kinds of code, as the android-emugl `README` describes: sources to **encode** commands into a byte stream, sources to **decode** the byte stream into calls, and sources to **wrap** ordinary procedural calls. The `.attrib` file carries the extra knowledge the generator cannot infer from a C prototype — chiefly which pointer arguments are inputs versus outputs and how to compute their lengths, since the wire protocol must marshal pointed-to data explicitly.
@@ -308,7 +308,7 @@ last = tInfo->m_rcDec.decode(readBuf.buf(), readBuf.validData(), ioStream, &chec
 
 Each `decode` returns the number of bytes it consumed; if that is positive, the thread calls `readBuf.consume(last)`, sets `progress = true`, and loops again so another decoder can take the next packet. When no decoder makes progress the inner loop exits and the thread reads more bytes from the stream. The decoder dispatches each opcode to the matching host implementation — for GLES that means a call into the host translator or directly into the host GL driver; for renderControl it means a call into a function such as `rcCreateColorBuffer` (covered below).
 
-A revealing detail in the loop is an explicit NVIDIA driver workaround: before running the GLES decoders the thread takes `FrameBuffer::getFB()->lockContextStructureRead()`, because on some Linux NVIDIA drivers calling `glTexSubImage2D` concurrently with context creation segfaults. The comment in `render_thread.cpp` documents this verbatim — a reminder that the host path runs against real, quirky drivers.
+A revealing detail in the loop is an explicit NVIDIA driver workaround: before running the GLES decoders the thread takes `FrameBuffer::getFB()->lockContextStructureRead()`, because on some Linux NVIDIA drivers calling `glTexSubImage2D` concurrently with glXMakeCurrent (making a context current) segfaults. The comment in `render_thread.cpp` documents this verbatim — a reminder that the host path runs against real, quirky drivers.
 
 ### RenderThread main decode loop
 
@@ -316,16 +316,14 @@ A revealing detail in the loop is an explicit NVIDIA driver workaround: before r
 flowchart TB
   START["main: create RenderThreadInfo"] --> INIT["initGl / initRenderControl<br/>waitUntilInitialized"]
   INIT --> READ["readBuf.getData(ioStream, packetSize)"]
-  READ --> VK{"Vulkan decode?"}
-  VK -->|"consumed > 0"| CONS["consume + progress"]
-  VK -->|"0"| GL1{"GLESv1 decode?"}
-  GL1 -->|"consumed > 0"| CONS
-  GL1 -->|"0"| GL2{"GLESv2 decode?"}
-  GL2 -->|"consumed > 0"| CONS
-  GL2 -->|"0"| RC{"renderControl decode?"}
-  RC -->|"consumed > 0"| CONS
-  RC -->|"0"| READ
-  CONS --> VK
+  READ --> RESET["progress = false"]
+  RESET --> VK["Vulkan decode<br/>(consume if > 0, set progress)"]
+  VK --> GL1["GLESv1 decode<br/>(consume if > 0, set progress)"]
+  GL1 --> GL2["GLESv2 decode<br/>(consume if > 0, set progress)"]
+  GL2 --> RC["renderControl decode<br/>(consume if > 0, set progress)"]
+  RC --> CHK{"progress?"}
+  CHK -->|"true"| RESET
+  CHK -->|"false"| READ
 ```
 
 ---
@@ -489,7 +487,7 @@ sequenceDiagram
   participant PW as PostWorker
   participant Out as Sub-window or GpuFrameBridge
   Guest->>RC: compose layer list
-  RC->>FB: sendPostWorkerCmd(compose)
+  RC->>FB: compose(bufferSize, buffer, true)
   FB->>PW: composeImpl(layers)
   PW->>PW: blend into target color buffer
   FB->>PW: postImpl(target cb)
@@ -511,7 +509,7 @@ Third, the `RenderThread` runs the Vulkan decoder *first* and outside the GLES "
 
 ### 11.9.1 Synchronization with fences
 
-Vulkan and GLES are asynchronous: a draw call submitted to the host GPU completes later. gfxstream exposes host completion back to the guest through a `SyncThread` (`hardware/google/gfxstream/host/sync_thread.cpp`), which waits on host fences and then fires the guest's goldfish-sync timeline. It offers GL-flavored waits (`triggerWait` on an `EmulatedEglFenceSync`) and Vulkan-flavored waits (`triggerWaitVk` on a `VkFence`, and `triggerWaitVkQsriWithCompletionCallback` on a `VkImage` for queue-submit-with-release-image semantics). Each can take a `FenceCompletionCallback`, so the host can run arbitrary work — such as posting the just-rendered image — the instant the GPU signals.
+Vulkan and GLES are asynchronous: a draw call submitted to the host GPU completes later. gfxstream exposes host completion back to the guest through a `SyncThread` (`hardware/google/gfxstream/host/sync_thread.cpp`), which waits on host fences and then fires the guest's goldfish-sync timeline. It offers GL-flavored waits (`triggerWait` on an `EmulatedEglFenceSync`) and Vulkan-flavored waits (`triggerWaitVk` on a `VkFence`, and `triggerWaitVkQsriWithCompletionCallback` on a `VkImage` for queue-submit-with-release-image semantics). `triggerWait` and `triggerWaitVk` fire a goldfish-sync timeline increment; the `SyncThread` also provides `triggerWaitWithCompletionCallback` and `triggerWaitVkWithCompletionCallback` variants that accept a `FenceCompletionCallback` instead, so the host can run arbitrary work — such as posting the just-rendered image — the instant the GPU signals.
 
 ### Vulkan call to host GPU
 

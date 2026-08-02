@@ -50,7 +50,7 @@ void skin_winsys_run_ui_update(SkinGenericFunction f, void* data, bool wait) {
 }
 ```
 
-`runOnUiThread` is a Qt signal connected to `slot_runOnUiThread` through an ordinary (non-blocking) connection (`emulator-qt-window.cpp:750`). Because the signal is emitted from the QEMU thread but the slot executes on the Qt thread, Qt queues the call. The optional `QSemaphore` is how the caller blocks: the slot releases the semaphore when the lambda returns (`emulator-qt-window.cpp:3389`), so the QEMU thread can `acquire()` and know the UI work is done. The long comment in `emulator-qt-window.h` (lines 156 to 172) documents this pattern: every cross-thread signal in that header carries an optional `QSemaphore*` for exactly this reason.
+`runOnUiThread` is a Qt signal connected to `slot_runOnUiThread` through an ordinary (non-blocking) connection (`emulator-qt-window.cpp:750`). Because the signal is emitted from the QEMU thread but the slot executes on the Qt thread, Qt queues the call. The optional `QSemaphore` is how the caller blocks: the slot releases the semaphore when the lambda returns (`emulator-qt-window.cpp:3389`), so the QEMU thread can `acquire()` and know the UI work is done. The long comment in `emulator-qt-window.h` (lines 152 to 172) documents this pattern: every cross-thread signal in that header carries an optional `QSemaphore*` for exactly this reason.
 
 UI-thread handoff for a core-initiated update
 
@@ -82,15 +82,15 @@ The major UI objects are:
 Top-level Qt widgets and their ownership
 
 ```mermaid
-flowchart TD
-    Container["EmulatorContainer<br/>(QScrollArea)"]
+flowchart LR
     Window["EmulatorQtWindow<br/>(device window)"]
+    Container["EmulatorContainer<br/>(QScrollArea)"]
     Tool["ToolWindow<br/>(toolbar)"]
     Ext["ExtendedWindow<br/>(extended controls)"]
     VS["VirtualSceneControlWindow"]
     TP["TouchpadWindow"]
 
-    Container --> Window
+    Window --> Container
     Window --> Tool
     Tool --> Ext
     Tool --> VS
@@ -282,7 +282,7 @@ static const QAndroidUserEventAgent sQAndroidUserEventAgent = {
 };
 ```
 
-`sendKey` ultimately constructs a QEMU `InputEvent` of kind `INPUT_EVENT_KIND_KEY` and enqueues it on the active console (`qemu-user-event-agent-impl.c:32` to `:53`). `sendMouseEvent` calls `kbd_mouse_event` for relative motion or `kbd_mouse_event_absolute` for absolute, choosing based on the device driver mode and feature flags (`qemu-user-event-agent-impl.c:112`). Touch and pen events go through `android_virtio_send_touch_as_mt` / `android_virtio_send_pen_as_mt` into the virtio multi-touch device (`qemu-user-event-agent-impl.c:103`, `:157`). From there the events are exactly what the virtual input devices deliver to the guest kernel.
+`sendKey` (`user_event_key`, lines 64–74) sets the down-flag by OR-ing bit 0x400 into the code and then delegates to `sendKeyCode` (`user_event_keycode`, lines 32–53), which constructs a QEMU `InputEvent` of kind `INPUT_EVENT_KIND_KEY` and enqueues it on the active console. `sendMouseEvent` calls `kbd_mouse_event` for relative motion or `kbd_mouse_event_absolute` for absolute, choosing based on the device driver mode and feature flags (`qemu-user-event-agent-impl.c:112`). Touch and pen events go through `android_virtio_send_touch_as_mt` / `android_virtio_send_pen_as_mt` into the virtio multi-touch device (`qemu-user-event-agent-impl.c:103`, `:157`). From there the events are exactly what the virtual input devices deliver to the guest kernel.
 
 End-to-end input pipeline, click to guest
 

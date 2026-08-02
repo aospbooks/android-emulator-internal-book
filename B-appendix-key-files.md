@@ -10,10 +10,11 @@ The emulator is not one repository. It is a superproject that stitches together 
 
 Every path in this appendix is rooted at one of the superproject's top-level directories. Knowing which directory a file lives under already tells you a lot about what it is and which build produces it.
 
-The five roots that matter for this book are these.
+The six roots that matter for this book are these.
 
 - `external/qemu/` is the QEMU fork. It contains both upstream QEMU (`hw/`, `vl.c`, `cpus.c`) and a large `android/` subtree of emulator-specific code that upstream QEMU has never seen. The `android-qemu2-glue/` directory bridges the two.
-- `hardware/google/aemu/` and `hardware/google/gfxstream/` are standalone CMake/Bazel libraries. `aemu` is the base utility and host-common layer; `gfxstream` is the graphics streaming renderer. Both are vendored into AOSP and built independently as well as inside the emulator.
+- `hardware/google/aemu/` is the base utility and host-common layer: a standalone CMake/Bazel library vendored into AOSP and built independently as well as inside the emulator.
+- `hardware/google/gfxstream/` is the graphics streaming renderer: also a standalone library that ships alongside `aemu`.
 - `device/generic/` holds guest-side code that compiles into the Android system image: `goldfish-opengl` (the guest GPU driver stack) and `vulkan-cereal` (a guest mirror of the gfxstream encoder).
 - `device/google/cuttlefish/` is the entire Cuttlefish virtual device — host launchers, guest HALs, and the orchestration that runs Android on crosvm rather than QEMU.
 - `tools/` holds cross-cutting host tools, most importantly `netsim` (the radio simulator) and `rootcanal` (the Bluetooth controller model).
@@ -22,7 +23,7 @@ When a chapter cites `external/qemu/android/android-emu/android/console.cpp`, th
 
 ### B.1.1 The directory layering at a glance
 
-The diagram below shows how the top-level source roots stack from the build system at the bottom up to the user-facing UI, with the guest image as a separate column that the host talks to over pipes and sockets.
+The diagram below shows how the top-level source roots flow from the build system at the top down through the QEMU fork, glue layer, and android-emu core, out to the host-side renderer, control plane, and Qt UI, with the guest image as a separate column that the host talks to over pipes and sockets.
 
 #### Top-level source roots and how they layer
 
@@ -55,8 +56,9 @@ flowchart TB
     CORE --> UI
     GFX <--> GOPENGL
     CORE <--> HAL
-    GRPC --> NETSIM
-    CORE --> RC
+    GLUE --> NETSIM
+    GRPC --> RC
+    NETSIM --> RC
 ```
 
 ---
@@ -113,11 +115,11 @@ The emulator is configured and built by a Python orchestration layer that drives
 |---|---|
 | `external/qemu/android/android-emu/android/android.h` | Declares `AndroidConsoleAgents` and the `android_emulation_setup()` / `android_ports_setup()` entry points that bind the host services. |
 | `external/qemu/android/android-emu/android/opengles.cpp` | `android_initOpenglesEmulation()` and `android_startOpenglesRenderer()` — the host-side bring-up of the gfxstream renderer. |
-| `external/qemu/android/android-emu/android/hw-sensors.cpp` | The sensor port: maps the host `QAndroidSensorsAgent` onto the guest sensor HAL over a pipe. |
+| `external/qemu/android/android-emu/android/hw-sensors.cpp` | Implements the qemud "sensors" service that forwards emulated sensor values to the guest sensor HAL over the qemud serial-line transport. |
 | `external/qemu/android/android-emu/android/main-common.c` | Shared command-line front-end logic used by the launcher before QEMU starts. |
 | `external/qemu/android/android-emu/android/process_setup.cpp` | Early process initialization (crash handler, logging, environment) common to all entry points. |
 | `hardware/google/aemu/host-common/include/host-common/AndroidPipe.h` | The `AndroidPipe` base interface for goldfish-pipe services; implemented in `hardware/google/aemu/host-common/AndroidPipe.cpp`. |
-| `external/qemu/android/android-emu/android/emulation/AdbGuestPipe.cpp` | The guest end of the ADB-over-pipe transport. |
+| `external/qemu/android/android-emu/android/emulation/AdbGuestPipe.cpp` | Host-side goldfish-pipe service handler that bridges the guest adbd connection to the host ADB server. |
 | `external/qemu/android/android-emu/android/emulation/AdbVsockPipe.cpp` | The vsock-based ADB transport used on newer images. |
 | `external/qemu/android/android-emu/android/emulation/address_space_graphics.cpp` | Address-space device context that carries gfxstream's ring buffers. |
 | `external/qemu/android/android-emu/android/emulation/MultiDisplay.cpp` | Host-side multi-display state and geometry. |
@@ -191,7 +193,7 @@ Media support spans capture (camera, microphone), playback, and screen recording
 
 ## B.8 Connectivity: Networking, Bluetooth, and Telephony
 
-Connectivity covers the guest's network stack, its radios (Wi-Fi, Bluetooth, cellular), and GPS. The emulator increasingly delegates radio behaviour to two standalone tools: `netsim` for Wi-Fi/UWB and `rootcanal` for Bluetooth.
+Connectivity covers the guest's network stack, its radios (Wi-Fi, Bluetooth, cellular), and GPS. The emulator increasingly delegates radio behaviour to `netsim` for Wi-Fi, BLE, and UWB (netsim embeds rootcanal as its Bluetooth controller model), while `rootcanal` also backs the gRPC `EmulatedBluetoothService` directly.
 
 | File / Directory | Purpose |
 |---|---|

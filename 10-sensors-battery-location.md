@@ -145,7 +145,7 @@ sequenceDiagram
     participant PM as PhysicalModel
     HAL->>SVC: list-sensors
     SVC-->>HAL: bitmask of available sensors
-    HAL->>SVC: set:accelerometer:1
+    HAL->>SVC: set:acceleration:1
     HAL->>SVC: set-delay:50
     loop every delay_ms (>=10ms)
         SVC->>PM: serializeSensorValue
@@ -249,7 +249,9 @@ flowchart LR
     IM --> DER
     DER --> ACC
     AE --> ACC
+    IM --> ACC
     DER --> GYR
+    IM --> GYR
     AE --> MAG
     IM --> MAG
 ```
@@ -414,7 +416,7 @@ flowchart LR
 
 ## 10.6 Location: NMEA Over a Serial Line
 
-Location is the third transport. The guest GPS HAL reads a serial character device, and the host writes it the same NMEA-0183 sentences a hardware receiver would emit. The host code lives in `external/qemu/android/emu/gps/src/android/gps.cpp`, which keeps the last fix in a handful of file-scope variables initialized to the Googleplex:
+Location is the third transport. The guest GPS HAL reads a serial character device, and the host writes it the same NMEA-0183 sentences a hardware receiver would emit. The host code lives in `external/qemu/android/emu/gps/src/android/gps.cpp`, which keeps the last fix in a handful of file-scope variables initialized to a fixed point in Mendocino County, California:
 
 ```cpp
 // Source: external/qemu/android/emu/gps/src/android/gps.cpp
@@ -526,7 +528,7 @@ flowchart TB
 
 The physical-parameter list reaches well beyond an inertial measurement unit. Three hinge angles (`HINGE_ANGLE0..2`), three rollable percentages (`ROLLABLE0..2`), and a `POSTURE` parameter let the model describe folding and rolling form factors, and `HEART_RATE`, `WRIST_TILT`, and `RGBC_LIGHT` cover wearables.
 
-Folding is mediated by a `FoldableModel` inside the physical model. Setting a hinge angle through `setHingeAngle` recomputes the discrete posture via `calculatePosture`, which compares each hinge against the `AnglesToPosture` ranges configured for the device (the `struct AnglesToPosture` and `FoldablePostures` enum live in `hw-sensors.h`). The posture enum runs `POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, and `POSTURE_TENT`.
+Folding is mediated by a `FoldableModel` inside the physical model. Setting a hinge angle through `setHingeAngle` recomputes the discrete posture via `calculatePosture`, which compares each hinge against the `AnglesToPosture` ranges configured for the device (the `struct AnglesToPosture` and `FoldablePostures` enum live in `hw-sensors.h`). The posture enum runs `POSTURE_UNKNOWN` (0), `POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, and `POSTURE_TENT`.
 
 Diagram: hinge angle driving the discrete foldable posture state
 
@@ -576,7 +578,7 @@ typedef struct QAndroidPhysicalStateAgent {
 } QAndroidPhysicalStateAgent;
 ```
 
-`onTargetStateChanged` fires when someone sets a new target; `onPhysicalStateChanging` and `onPhysicalStateStabilized` bracket the interval during which the interpolated trajectory is actually in motion. The header notes that target callbacks happen on the caller's thread while sensor-state callbacks may arrive on an arbitrary thread. An agent registers via `android_physical_agent_set`, which forwards to `physicalModel_setPhysicalStateAgent`.
+`onTargetStateChanged` fires when someone sets a new target; `onPhysicalStateChanging` and `onPhysicalStateStabilized` bracket the interval during which the interpolated trajectory is actually in motion. The physical model header (`PhysicalModel.h`) notes that target callbacks happen on the caller's thread while sensor-state callbacks may arrive on an arbitrary thread. An agent registers via `android_physical_agent_set`, which forwards to `physicalModel_setPhysicalStateAgent`.
 
 For testing and reproducibility the model can record its exact trajectory. `android_physical_model_record_ground_truth(filename)` and `android_physical_model_stop_recording()` write the model's ground-truth motion to a file, exposed in the console as the `physics record-gt` and `physics stop` commands:
 
@@ -611,7 +613,7 @@ The sensor identity is its own small set of constants in `device/google/cuttlefi
 
 These commands assume a running AVD whose console port is the usual `5554`. The console authentication token is in `~/.emulator_console_auth_token`; `telnet` and `auth <token>` once, then issue commands.
 
-- Read the live accelerometer: connect to the console and run `sensor get acceleration`. With the device upright you should see roughly `0 9.81 0`, matching the default gravity vector in `AmbientEnvironment.h`.
+- Read the live accelerometer: connect to the console and run `sensor get acceleration`. With the device upright you should see roughly `0 9.81 0` — the negation of `kDefaultGravity = (0, -9.81, 0)` in `AmbientEnvironment.h`, because the accelerometer reports specific force: `conj(R) * (accel - gravity)` evaluates to `(0, +9.81, 0)` for a stationary upright device.
 - Override a sensor: `sensor set acceleration 0:0:9.81` then `sensor get acceleration` to confirm. Run `sensor status` first to see which sensors the AVD actually has.
 - Watch the physics model animate: from the extended-controls "Virtual sensors" UI drag the rotation, then in the console repeatedly run `sensor get gyroscope` while it moves — you will see non-zero angular velocity that decays back to zero, the derivative of the interpolated trajectory.
 - Drive the battery: `power display` to dump current state, then `power capacity 15`, `power ac off`, and `power status discharging`. The guest's battery icon updates because `goldfish_battery_set_prop` raised the change IRQ.

@@ -43,8 +43,8 @@ flowchart TB
   subgraph HOST["Host process (your machine)"]
     QEMU["QEMU fork + android-qemu2-glue"]
     AEMU["android-emu core library"]
-    GFX["gfxstream host renderer"]
     UI["Qt UI / WebRTC front end"]
+    GFX["gfxstream host renderer"]
   end
   subgraph GUEST["Guest VM"]
     KERNEL["Goldfish kernel"]
@@ -56,7 +56,8 @@ flowchart TB
   AEMU -->|"sensors, battery, modem"| QEMU
   AND -->|"GPU command stream"| GFX
   GFX --> HGPU
-  UI -->|"control + frames"| AEMU
+  GFX -->|"frames"| UI
+  UI -->|"control"| AEMU
 ```
 
 The guest talks to the host across a small number of well-defined transports: virtio devices, a fast shared-memory pipe (`/dev/goldfish_pipe`, described in `external/qemu/android/docs/ANDROID-QEMU-PIPE.TXT`), and an ADB connection. Everything you do from the host — rotating the device, dropping a GPS fix, hanging up a call — is the host side of one of those transports being poked by a control agent.
@@ -65,7 +66,7 @@ The guest talks to the host across a small number of well-defined transports: vi
 
 QEMU is a mature, portable machine emulator with binary translation (TCG) for cross-architecture guests and hypervisor backends (KVM on Linux, Hypervisor.framework on macOS, WHPX on Windows) for same-architecture guests. The emulator wants all of that. What QEMU does not provide out of the box is an Android device: a board with the right set of virtual peripherals, a transport for the Android-specific control surface, and the hooks needed to stream a GPU.
 
-The fork lives at `external/qemu` and is described in the design doc as a QEMU 2.x base, "very lightly patched" at the engine level but extended heavily with new code that does not touch QEMU internals. The Android-specific virtual board is the "ranchu" machine — for ARM it is defined in `external/qemu/hw/arm/ranchu.c`, which advertises itself to the guest with `compatible = "ranchu"` in the device tree and inherits its peripherals from the older 32-bit "goldfish" board.
+The fork lives at `external/qemu` and is described in the design doc as a QEMU 2.x base, "very lightly patched" at the engine level but extended heavily with new code that does not touch QEMU internals. For ARM and MIPS guests, the Android-specific virtual board is the "ranchu" machine — for ARM it is defined in `external/qemu/hw/arm/ranchu.c`, which advertises itself to the guest with `compatible = "ranchu"` in the device tree and inherits its peripherals from the older 32-bit "goldfish" board. For x86/x86_64 guests — the most common development target — the fork instead extends the standard QEMU PC boards (`hw/i386/pc_piix.c` and `hw/i386/pc_q35.c`) by adding goldfish devices (goldfish_battery, goldfish_pipe, and others) directly inside the standard PC machine init, with no separate "ranchu" machine type.
 
 The ranchu board and the goldfish device family
 
@@ -223,6 +224,7 @@ sRenderLib->setRenderer(emuglConfig_get_current_renderer());
 The gfxstream guest-to-host graphics stream
 
 ```mermaid
+%%{init: {'theme':'default','themeVariables':{'width':'1400'}}}%%
 sequenceDiagram
   participant App as Guest app
   participant Enc as Guest encoder (GLESv2_enc)
@@ -258,9 +260,10 @@ flowchart TB
     BROWSER["Browser"]
     TELNET["telnet client"]
   end
+  WRTC["WebRTC video bridge<br/>(separate process)"]
   subgraph FRONT["Front ends"]
     GRPC["gRPC EmulatorController"]
-    WRTC["WebRTC video bridge"]
+    WRTCBRIDGE["WebRtcBridge<br/>(emulator side)"]
     CONSOLE["telnet console :5554"]
     QT["Qt desktop UI"]
   end
@@ -272,7 +275,8 @@ flowchart TB
   GRPC --> VTABLE
   CONSOLE --> VTABLE
   QT --> VTABLE
-  WRTC --> VTABLE
+  WRTC -->|"socket/shared memory"| WRTCBRIDGE
+  WRTCBRIDGE --> VTABLE
 ```
 
 The Qt UI is Chapter 22; WebRTC and the embedded emulator are Chapter 23; the console and gRPC control plane are Chapter 8.
@@ -313,7 +317,7 @@ The contrast matters because the two products are often confused. If you are an 
 The book is organized bottom to top: each part builds on the layer below it, mirroring the layer cake from Section 1.4. Here is how the parts map onto the architecture you have just met.
 
 1. Part I — Getting Started: what the emulator is (this chapter), how the source is laid out and built (Chapter 2), and how to run it (Chapter 3).
-2. Part II — QEMU and Virtualization: the QEMU fork (Chapter 4), CPU acceleration with KVM, Hypervisor.framework, WHPX, and TCG (Chapter 5), and the virtio and goldfish virtual hardware (Chapter 6).
+2. Part II — QEMU and Virtualization: the QEMU fork (Chapter 4), hypervisor backends (KVM, Hypervisor.framework, WHPX) and the TCG binary-translation fallback (Chapter 5), and the virtio and goldfish virtual hardware (Chapter 6).
 3. Part III — Core Emulation: the `android-emu` architecture and the agent vtable (Chapter 7), the console and gRPC control plane (Chapter 8), snapshots and Quickboot (Chapter 9), and sensors, battery, and location (Chapter 10).
 4. Part IV — Graphics: the graphics architecture (Chapter 11), guest GPU drivers (Chapter 12), host rendering (Chapter 13), and the gfxstream protocol (Chapter 14).
 5. Parts V through VII — Media and Display, Connectivity, and UI and Streaming: audio, camera, multi-display, networking, Bluetooth, ADB, telephony, the Qt UI, and WebRTC.
@@ -340,7 +344,7 @@ You can confirm the architecture described in this chapter on your own machine.
 - The Android Emulator boots a real, unmodified Android system image inside a forked QEMU virtual machine; it is not a framework reimplementation, not stock QEMU, and not Cuttlefish.
 - The host process is split into layers: the QEMU engine plus `android-qemu2-glue`, the `android-emu` core on top of the `aemu` base library, the gfxstream graphics path, the gRPC and telnet control plane, and the Qt and WebRTC front ends.
 - The decoupling between layers is made concrete by the `AndroidConsoleAgents` vtable in `external/qemu/android/emu/agents/include/android/console.h`: the core calls `getConsoleAgents()`, and the glue injects QEMU-backed implementations at startup.
-- The emulator forks QEMU to add an Android-specific board ("ranchu"), a fast guest-host pipe (`goldfish_pipe`), and the linkage against `android-emu`, while keeping the QEMU engine itself lightly patched.
+- The emulator forks QEMU to add Android-specific boards (the "ranchu" machine for ARM/MIPS guests; standard QEMU PC boards extended with goldfish devices for x86/x86_64 guests), a fast guest-host pipe (`goldfish_pipe`), and the linkage against `android-emu`, while keeping the QEMU engine itself lightly patched.
 - A tiny launcher (`main-emulator.cpp`) resolves the AVD and `exec`s the architecture-specific `qemu-system-*` engine binary, which then runs the QEMU main loop and the injected agents in one address space.
 - Graphics are virtualized by gfxstream: the guest serializes GL/Vulkan calls into a command stream that the host renderer replays on the real GPU.
 - Compared to a plain VM, the emulator adds Android-specific hardware emulation, GPU streaming, and a control plane; compared to Cuttlefish, it uses a different VMM (forked QEMU versus crosvm) and an almost entirely separate host codebase.

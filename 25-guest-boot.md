@@ -57,8 +57,6 @@ flowchart TD
         UBP["getUserspaceBootProperties"]
         BC["createRamdiskWithBootconfig"]
         QEMU["embedded QEMU / ranchu machine"]
-        BP["boot-properties qemud service"]
-        MP["QemuMiscPipe service"]
     end
     subgraph GUEST["Guest VM"]
         KERN["goldfish/ranchu kernel"]
@@ -66,6 +64,8 @@ flowchart TD
         QPROPS["qemu-props daemon"]
         FW["Android framework"]
     end
+    BP["boot-properties qemud service (host)"]
+    MP["QemuMiscPipe service (host)"]
 
     MAIN --> KP
     MAIN --> UBP
@@ -78,7 +78,7 @@ flowchart TD
     QPROPS -->|"list over qemud"| BP
     INIT --> FW
     FW -->|"bootcomplete"| MP
-    MP -->|"set_guest_boot_completed"| HOST
+    MP -->|"set_guest_boot_completed"| MAIN
 ```
 
 ---
@@ -116,9 +116,12 @@ The packed version drives several decisions in `emulator_getKernelParameters`. T
 if (kernelVersion >= KERNEL_VERSION_5_4_0) {
     params.add("8250.nr_uarts=1");  // disabled by default for security reasons
 }
-...
-if (kernelVersion < KERNEL_VERSION_5_4_0) {
-    params.add("no-kvmclock");
+const bool isX86ish = !strcmp(targetArch, "x86") || !strcmp(targetArch, "x86_64");
+if (isX86ish) {
+    params.add("clocksource=pit");
+    if (kernelVersion < KERNEL_VERSION_5_4_0) {
+        params.add("no-kvmclock");
+    }
 }
 ```
 
@@ -294,8 +297,9 @@ flowchart TD
     APPEND["-append cmdline"]
 
     GUBP --> LIST --> FLAG
-    FLAG -->|"yes"| RAM --> INITRD
-    FLAG -->|"yes"| TOKEN --> APPEND
+    FLAG -->|"yes"| RAM
+    RAM --> INITRD
+    RAM --> TOKEN --> APPEND
     FLAG -->|"no"| INLINE --> APPEND
 ```
 
@@ -574,7 +578,7 @@ static void bootCompleteFunction() {
 }
 ```
 
-The boot time is measured against `s_reset_request_uptime_ms`, which `signal_system_reset_was_requested()` stamps at each (re)boot, so the number is correct even after a reboot inside the guest. After flipping the flag the host also drops a `bootcompleted.ini` marker file in the AVD directory. Then, through adb, it tunes the booted system: it raises the screen-off timeout and the logcat buffer to 2M, enables auto-rotate on non-automotive devices, installs device-skin overlays for the AVD's hardware, configures foldable hinge/posture geometry, and applies any pending language/country/locale changes (restarting zygote if needed). If the AVD was launched purely to time a boot (`test_quitAfterBootTimeOut`), it shuts the VM down instead.
+The boot time is measured against `s_reset_request_uptime_ms`, which `signal_system_reset_was_requested()` stamps at each (re)boot, so the number is correct even after a reboot inside the guest. Before flipping the flag the host drops a `bootcompleted.ini` marker file in the AVD directory. Then, through adb, it tunes the booted system: it raises the screen-off timeout and the logcat buffer to 2M, enables auto-rotate on non-automotive devices, installs device-skin overlays for the AVD's hardware, configures foldable hinge/posture geometry, and applies any pending language/country/locale changes (restarting zygote if needed). If the AVD was launched purely to time a boot (`test_quitAfterBootTimeOut`), it shuts the VM down instead.
 
 ### 25.9.3 The fallback path for old images
 
@@ -607,7 +611,7 @@ sequenceDiagram
     participant FW as Guest framework
     participant MP as QemuMiscPipe
     participant ST as Host settings
-    participant ADB as AdbInterface
+    participant ADB as ADB
     FW->>MP: write bootcomplete
     MP->>MP: spawn bootCompleteFunction
     MP-->>FW: OK
@@ -643,7 +647,8 @@ sequenceDiagram
     participant K as Kernel
     participant I as init
     participant P as qemu-props
-    participant H as Host services
+    participant F as Framework
+    participant H as Host
     L->>L: parse kernel version, build cmdline
     L->>L: rewrite ramdisk with bootconfig
     L->>Q: kernel + initrd + append
@@ -652,7 +657,8 @@ sequenceDiagram
     I->>P: start qemu-props daemon
     P->>H: qemud list boot-properties
     H-->>P: property list + NUL
-    I->>H: framework writes bootcomplete
+    I->>F: start framework
+    F->>H: write bootcomplete
     H->>H: set_guest_boot_completed, adb tuning
 ```
 

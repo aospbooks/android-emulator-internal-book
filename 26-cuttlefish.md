@@ -197,12 +197,12 @@ flowchart TB
   CS --> SE["secure_env"]
   CS --> MODEM["modem_simulator"]
   RUN --> PM["ProcessMonitor"]
-  PM -->|"fork + supervise"| CROSVM
-  PM -->|"fork + supervise"| STREAM
-  PM -->|"fork + supervise"| RC
-  PM -->|"fork + supervise"| KLM
-  PM -->|"fork + supervise"| SE
-  PM -->|"fork + supervise"| MODEM
+  PM -->|"fork"| CROSVM
+  PM -->|"fork"| STREAM
+  PM -->|"fork"| RC
+  PM -->|"fork"| KLM
+  PM -->|"fork"| SE
+  PM -->|"fork"| MODEM
 ```
 
 ## 26.4 crosvm: Building the VMM Command Line
@@ -467,7 +467,7 @@ Cuttlefish renders guest graphics with gfxstream, the same host renderer the emu
 
 ### 26.7.1 Configuring the GPU device
 
-`ConfigureGpu` in `crosvm_manager.cpp` builds a JSON parameter blob describing the virtio-gpu backend and its context types, keyed on the configured GPU mode.
+`BuildVhostUserGpu` in `crosvm_manager.cpp` builds a JSON parameter blob describing the virtio-gpu backend and its context types, keyed on the configured GPU mode.
 
 ```cpp
 // Source: device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp
@@ -549,7 +549,7 @@ rootcanal.AddParameter("--hci_port=", config_.rootcanal_hci_port());
 rootcanal.AddParameter("--link_port=", config_.rootcanal_link_port());
 ```
 
-`RootCanalBinary()` resolves to the host package's `rootcanal` (`device/google/cuttlefish/host/libs/config/known_paths.cpp`). The guest's HCI traffic reaches it through the `/dev/hvc5` Bluetooth console port and the `socket_vsock_proxy` relays from 26.5.
+`RootCanalBinary()` resolves to the host package's `rootcanal` (`device/google/cuttlefish/host/libs/config/known_paths.cpp`). The guest's HCI traffic can reach RootCanal via one of two independent host-side mechanisms: either through `/dev/hvc5` (the bt_fifo), where a `BluetoothConnector` (`TcpConnector`) binary relays the HCI stream directly to RootCanal's HCI TCP port; or through a vsock connection, where the `socket_vsock_proxy` (`hci_vsock_proxy`) in `root_canal.cpp` bridges vsock to that same TCP port. The `socket_vsock_proxy` relays described in 26.5 also serve the test, link, and link-BLE RootCanal ports independently of the hvc5 path.
 
 ### 26.8.2 The modem simulator
 
@@ -600,12 +600,13 @@ flowchart LR
     GPU["gfxstream GPU process"]
     STR["webrtc streamer"]
     SIG["sig_server / operator"]
+    CROSVM["crosvm virtio-input"]
   end
   Browser["Browser client"]
   GPU -->|"Wayland frames"| STR
   STR -->|"video track"| Browser
   Browser -->|"input events"| STR
-  STR -->|"vhost-user input fds"| CROSVM["crosvm virtio-input"]
+  STR -->|"touch/keyboard fds"| CROSVM
   STR <-->|"signaling"| SIG
   Browser <-->|"signaling"| SIG
 ```
@@ -636,8 +637,8 @@ flowchart TB
   PM --> MODEM["modem_simulator"]
   PM --> STR["webrtc streamer"]
   CROSVM -->|"virtio-vsock / virtio-console"| GUEST["Android guest"]
-  GPUP -->|"vhost-user gpu"| CROSVM
-  STR -->|"frames + input"| CROSVM
+  CROSVM -->|"vhost-user gpu"| GPUP
+  STR -->|"input"| CROSVM
   RC -->|"vsock proxy"| CROSVM
   Browser["Browser"] <--> STR
 ```

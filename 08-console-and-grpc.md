@@ -254,7 +254,7 @@ ScopedFd fd(HANDLE_EINTR(android_open(
         user_read_only)));
 ```
 
-If the file already exists, it is read back and trimmed; the contents become the expected token. Three status values flow out of this: a missing-or-unreadable file yields `CONSOLE_AUTH_STATUS_ERROR` (the console is disabled entirely), an empty token string yields `CONSOLE_AUTH_STATUS_DISABLED` (no auth required), and any non-empty token yields `CONSOLE_AUTH_STATUS_REQUIRED`. Emptying the file is the supported way to turn console auth off.
+If the file already exists, it is read back and trimmed; the contents become the expected token. Three status values flow out of this: a file that cannot be created *and* cannot be read — for example, a permission error on the containing directory — yields `CONSOLE_AUTH_STATUS_ERROR` (the console is disabled entirely). On a normal system a missing file is simply created fresh with a random token on first use, yielding `CONSOLE_AUTH_STATUS_REQUIRED`. An empty token string yields `CONSOLE_AUTH_STATUS_DISABLED` (no auth required), and any non-empty token yields `CONSOLE_AUTH_STATUS_REQUIRED`. Emptying the file is the supported way to turn console auth off.
 
 ### 8.4.2 Constant-time comparison
 
@@ -385,13 +385,14 @@ sequenceDiagram
     participant I as EmulatorControllerImpl
     participant L as Emulator main looper
     participant A as QAndroidBatteryAgent
-    C->>S: setBattery(BatteryState)
-    S->>I: setBattery handler
-    I->>L: runOnMainLooper(lambda)
-    L->>A: setChargeLevel, setStatus, ...
-    A-->>L: state mutated
+    C->>S: getBattery(Empty)
+    S->>I: getBattery handler
+    I->>L: runOnMainLooperAndWaitForCompletion(lambda)
+    L->>A: hasBattery, chargeLevel, status, ...
+    A-->>L: fills reply fields
+    L-->>I: completed
     I-->>S: Status::OK
-    S-->>C: Empty reply
+    S-->>C: BatteryState reply
 ```
 
 ---
@@ -465,6 +466,7 @@ flowchart TB
     SVC --> BLD --> CRED
     CRED -->|"token/jwt, no tls"| LOCAL
     CRED -->|"tls cert+key"| TLS
+    CRED -->|"no token or jwt"| REG
     LOCAL --> AUTH
     TLS --> AUTH
     AUTH --> REG --> INT --> START
@@ -683,10 +685,12 @@ Exercise a few console subsystems (after `auth`):
 Find the live gRPC port and token from the discovery file:
 
 ```bash
-# Discovery files live under the user config root, in avd/running
-find "$HOME" -path '*avd/running/pid_*.ini' 2>/dev/null
+# Discovery files live under avd/running inside the user config root.
+# On Linux with systemd the root is /run/user/<uid>; on macOS it is
+# ~/Library/Caches/TemporaryItems; the $HOME fallback covers ~/.android.
+find /run/user/$(id -u) "$HOME" -path '*avd/running/pid_*.ini' 2>/dev/null
 # Inspect one to see grpc.port and grpc.token
-cat "$(find "$HOME" -path '*avd/running/pid_*.ini' 2>/dev/null | head -1)"
+cat "$(find /run/user/$(id -u) "$HOME" -path '*avd/running/pid_*.ini' 2>/dev/null | head -1)"
 ```
 
 Call the gRPC API with `grpcurl`, presenting the bearer token from the discovery file. `getStatus` returns the device snapshot assembled in section 8.5.2:

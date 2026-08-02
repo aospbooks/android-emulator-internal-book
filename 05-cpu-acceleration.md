@@ -176,7 +176,7 @@ AndroidCpuAcceleration androidCpuAcceleration_getStatus(char** status_p) {
 
 ### 5.3.1 emulator-check accel
 
-The `emulator-check` binary at `external/qemu/android/emulator-check/main-emulator-check.cpp` wraps that same call behind the `accel` subcommand. Its handler is a four-line function that returns the status code as the process exit code and the status string as text:
+The `emulator-check` binary at `external/qemu/android/emulator-check/main-emulator-check.cpp` wraps that same call behind the `accel` subcommand. Its handler is a five-statement function that returns the status code as the process exit code and the status string as text:
 
 ```cpp
 // Source: external/qemu/android/emulator-check/main-emulator-check.cpp
@@ -540,6 +540,7 @@ case QEMU_OPTION_enable_hvf:
     break;
 #endif
 case QEMU_OPTION_enable_whpx:
+    olist = qemu_find_opts("machine");
     qemu_opts_parse_noisily(olist, "accel=whpx", false);
     break;
 ```
@@ -551,14 +552,15 @@ flowchart TD
     FLAG["emulator passes -enable-kvm"] --> VL["vl.c rewrites to accel=kvm"]
     VL --> CONF["configure_accelerator()"]
     CONF --> FIND["accel_find('kvm') -> AccelClass"]
-    FIND --> INIT["accel_init_machine -> kvm_init"]
-    INIT --> ALLOW["kvm_allowed = true"]
-    ALLOW --> QV["qemu_init_vcpu()"]
+    FIND --> ALLOW["kvm_allowed = true"]
+    ALLOW --> INIT["kvm_init called inside accel_init_machine"]
+    INIT --> QV["qemu_init_vcpu()"]
     QV --> DISP{"kvm_enabled()?"}
     DISP -->|Yes| KT["qemu_kvm_start_vcpu -> kvm_cpu_exec loop"]
     DISP -->|hvf_enabled| HT["qemu_hvf_start_vcpu"]
-    DISP -->|whpx_enabled| WT["qemu_whpx_start_vcpu"]
+    DISP -->|aehd_enabled| AT["qemu_aehd_start_vcpu"]
     DISP -->|tcg_enabled| TT["qemu_tcg_init_vcpu"]
+    DISP -->|whpx_enabled| WT["qemu_whpx_start_vcpu"]
 ```
 
 ---
@@ -606,11 +608,11 @@ In `external/qemu/android-qemu2-glue/main.cpp`, the x86 path calls `handleCpuAcc
 
 ### 5.9.3 Per-CPU threads
 
-Once QEMU knows which accelerator is active, `qemu_init_vcpu` in `external/qemu/cpus.c` spawns one thread per virtual CPU and routes it to the right run function based on which `*_enabled()` predicate is true — `qemu_kvm_cpu_thread_fn`, `qemu_hvf_cpu_thread_fn`, `qemu_whpx_cpu_thread_fn`, `qemu_aehd_cpu_thread_fn`, or `qemu_tcg_cpu_thread_fn`. Each thread is named after its accelerator (for example "CPU 0/KVM"), which is what you see if you inspect emulator threads in a debugger.
+Once QEMU knows which accelerator is active, `qemu_init_vcpu` in `external/qemu/cpus.c` spawns one thread per virtual CPU and routes it to the right start function based on which `*_enabled()` predicate is true — `qemu_kvm_start_vcpu`, `qemu_hvf_start_vcpu`, `qemu_whpx_start_vcpu`, `qemu_aehd_start_vcpu`, or `qemu_tcg_init_vcpu`. Each thread is named after its accelerator (for example "CPU 0/KVM"), which is what you see if you inspect emulator threads in a debugger.
 
 ### 5.9.4 SMP limits
 
-The same glue path also constrains how many cores the AVD gets. If `hasModernX86VirtualizationFeatures()` returns false, multicore guests slow down, so the glue forces `hw_cpu_ncore` to 1. On macOS, hosts with fewer than 6 logical cores are pinned to a single virtual core, and no AVD ever gets more than 6 cores:
+The same glue path also constrains how many cores the AVD gets, but only for x86 and x86_64 targets. For those targets, if `hasModernX86VirtualizationFeatures()` returns false, multicore guests slow down, so the glue forces `hw_cpu_ncore` to 1. On macOS with an x86_64 target build, hosts with fewer than 6 logical cores are also pinned to a single virtual core, and no AVD ever gets more than 6 cores. Arm64 target builds are not subject to either limit:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/main.cpp
@@ -653,7 +655,7 @@ const TargetInfo kTarget = {
 };
 ```
 
-The `-cpu` value reveals the acceleration story. For an arm64 guest on an arm64 host the model is `host` (on Linux) or `cortex-a53` (on Apple) — a real CPU passed through. For an arm64 guest on an x86_64 host the model is `cortex-a57`, a synthetic model that only TCG can emulate. For x86_64 guests the model is the custom `android64`.
+The `-cpu` value reveals the acceleration story. For an arm64 guest on an arm64 Linux host the model is `host`, which exposes the real host CPU's full feature set to the guest. For an arm64 guest on Apple Silicon the model is `cortex-a53`, a fixed synthetic Cortex-A53 model presented to the guest regardless of the M-series chip's actual capabilities; HVF still provides hardware acceleration, but the CPU model visible to the guest is a defined ARM type rather than the host's own identity. For an arm64 guest on an x86_64 host the model is `cortex-a57`, a synthetic model that only TCG can emulate. For x86_64 guests the model is the custom `android64`.
 
 ### 5.10.2 The accelerated combinations
 

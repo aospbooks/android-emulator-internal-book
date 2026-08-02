@@ -1,6 +1,6 @@
 # Chapter 15: Audio
 
-The guest Android system thinks it is talking to a real sound card. It writes PCM samples into a hardware buffer, the "card" raises an interrupt when that buffer drains, and the guest refills it. None of that hardware exists. On the emulator host there is a chain that starts at an emulated MMIO or virtio device, flows through QEMU's mixing engine, and ends at a platform backend that hands bytes to PulseAudio, CoreAudio, WinWave, or — when nobody is listening — a clock-driven null sink. The same engine fans the playback stream out to capturers that feed screen recording, WebRTC streaming, and the gRPC `streamAudio` endpoint, and it accepts injected samples from `injectAudio` so a test can play a WAV file straight into the guest microphone.
+The guest Android system thinks it is talking to a real sound card. It writes PCM samples into a hardware buffer, the "card" raises an interrupt when that buffer drains, and the guest refills it. None of that hardware exists. On the emulator host there is a chain that starts at an emulated MMIO or virtio device, flows through QEMU's mixing engine, and ends at a platform backend that hands bytes to PulseAudio, CoreAudio, winaudio, or — when nobody is listening — a clock-driven null sink. The same engine fans the playback stream out to capturers that feed screen recording, WebRTC streaming, and the gRPC `streamAudio` endpoint, and it accepts injected samples from `injectAudio` so a test can play a WAV file straight into the guest microphone.
 
 This chapter follows that chain in both directions. We start with the two audio devices the guest can see — the legacy `goldfish_audio` MMIO card and the modern `virtio-snd` PCI card — then descend into QEMU's `AUD_*` API and the `SWVoice`/`HWVoice` mixing model, the host backend drivers and how one gets picked, and finally the android-emu control plane: the `AudioOutputEngine`/`AudioCaptureEngine` abstraction, the capture-tap and microphone-forwarder glue, and the gRPC streaming surface.
 
@@ -212,15 +212,17 @@ flowchart TD
         H1["virtio_snd_handle_ctl"]
         H2["virtio_snd_handle_tx"]
         H3["virtio_snd_handle_rx"]
-        RING["per-stream PCM ring buffer"]
+        RING_TX["TX hpcm_buf<br/>(per TX stream)"]
+        RING_RX["RX hpcm_buf<br/>(per RX stream)"]
     end
     VOICE["AUD_open_out / AUD_open_in"]
     CTL --> H1
     H1 -->|"opens voice"| VOICE
-    TXG --> H2 --> RING
-    RING -->|"AUD_write in stream_out_cb"| VOICE
-    VOICE -->|"AUD_read in stream_in_cb"| RING
-    RING --> H3 --> RXG
+    TXG --> H2 --> RING_TX
+    RING_TX -->|"AUD_write in stream_out_cb"| VOICE
+    VOICE -->|"AUD_read in stream_in_cb"| RING_RX
+    RXG -->|"empty RX descs"| H3
+    RING_RX -->|"hpcm_to_gpcm via timer"| RXG
 ```
 
 ## 15.4 The AUD_* API and the Voice Model
@@ -269,7 +271,7 @@ The mixing model from emulated card down to a host backend:
 flowchart TD
     DEV["Emulated card<br/>(goldfish or virtio-snd)"] -->|"AUD_write()"| SW["SWVoiceOut<br/>conv + resample"]
     SW -->|"mix into"| HW["HWVoiceOut<br/>stereo circular buffer"]
-    HW -->|"clip()"| BE["Backend buffer<br/>(pulse / coreaudio / winwave)"]
+    HW -->|"clip()"| BE["Backend buffer<br/>(pulse / coreaudio / winaudio)"]
     HW -.->|"AUD_add_capture tap"| CAP["CaptureVoiceOut<br/>listeners"]
     TIMER["audio_timer @ 100 Hz"] -.->|"pulse"| HW
     TIMER -.->|"callback(free)"| DEV
@@ -458,7 +460,7 @@ if (!aos.good()) {
 }
 ```
 
-When the client closes the stream the handler does not drop the tail of the buffer; it writes silence for up to `audioQueueTime` (300 ms) to flush the queued samples into the guest before tearing down the input path. The sampling rate is capped at 48 kHz, matching Android's practical ceiling. The mirror handler, `streamAudio`, fixes a source frame of 512 samples and a 30 ms wait, defaulting an unset rate to 44100 Hz before constructing the output stream.
+When the client closes the stream the handler does not drop the tail of the buffer; it writes silence for up to `audioQueueTime` (300 ms) to flush the queued samples into the guest before tearing down the input path. The sampling rate is capped at 48 kHz, matching Android's practical ceiling. The mirror handler, `streamAudio`, uses a 30 ms frame window (at 44100 Hz this yields 1320 samples per channel) and a 30 ms read timeout, defaulting an unset rate to 44100 Hz before constructing the output stream. The constant `kSrcNumSamples = 512` appears in the handler as a documentary note about QEMU's internal audio block size but is not used to compute the gRPC frame.
 
 End-to-end gRPC audio out and in:
 
@@ -467,8 +469,8 @@ sequenceDiagram
     participant Client as gRPC client
     participant Svc as EmulatorService
     participant Stream as QemuAudio Stream
-    participant Eng as AudioCaptureEngine
     participant AUD as QEMU AUD layer
+    participant Eng as AudioCaptureEngine
     Client->>Svc: streamAudio(AudioFormat)
     Svc->>Stream: new QemuAudioOutputStream
     Stream->>Eng: start output capturer
@@ -526,7 +528,7 @@ Read the model itself. `external/qemu/android/docs/AUDIO.TXT` is the canonical d
 - `goldfish_audio` is a single MMIO register block with two ping-pong output buffers and buffer-empty/full interrupts; it opens its host voice at a fixed 44.1 kHz stereo S16 and an 8 kHz mono microphone.
 - `virtio-snd` uses four virtqueues (control, event, TX, RX), opens host voices on demand at the guest-requested format, and inserts a `+2,-2` silence meander when the guest under-runs rather than stalling the host clock.
 - Both devices talk to QEMU's `AUD_*` API, which models emulated `SWVoice` objects mixing into shared `HWVoice` stereo buffers, all pulsed by a 100 Hz `audio_timer` on the virtual clock.
-- Host backends (`alsa`, `pa`, `coreaudio`, `dsound`, `winaudio`, `sdl`, `spice`, `wav`, `none`, `fwd`) are priority-ordered; `set_audio_drv()` lets the emulator override `QEMU_AUDIO_DRV` in-process, and `none` is a fully supported timer-driven sink.
+- Host backends (`alsa`, `oss`, `pa`, `coreaudio`, `dsound`, `winaudio`, `sdl`, `spice`, `wav`, `none`, `fwd`) are priority-ordered; `set_audio_drv()` lets the emulator override `QEMU_AUDIO_DRV` in-process, and `none` is a fully supported timer-driven sink.
 - The android-emu control plane exposes `AudioOutputEngine` for playback, an `AudioCapturer`/`AudioCaptureEngine` output tap via `AUD_add_capture`, and a microphone forwarder (the `fwd` driver) that swaps the active input voice for injection.
 - Two gRPC RPCs surface this to clients: `streamAudio` server-streams mixed output frames, and `injectAudio` client-streams PCM into the single guest microphone, flushing with silence on close.
 

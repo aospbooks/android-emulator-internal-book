@@ -10,12 +10,14 @@ Use the sidebar to browse chapters organized bottom-to-top through the emulator 
 
 ## Architecture Overview
 
-The Android Emulator is a host program that runs an unmodified Android system image inside a virtual machine. A forked QEMU provides the CPU and device model; the `android-emu` layer adds the Android-specific machine, sensors, snapshots, and a control plane; graphics commands are streamed from the guest to a host renderer; and a Qt window or a WebRTC stream presents the result.
+The Android Emulator is a host program that runs an unmodified Android system image inside a virtual machine. A forked QEMU provides the CPU and device model, including the Android-specific ranchu machine and virtio devices; the `android-emu` layer adds sensors, snapshots, and a control plane; graphics commands are streamed from the guest to a host renderer; and a Qt window or a WebRTC stream presents the result.
 
 ```mermaid
 graph TB
-    subgraph HOST["Host process (emulator binary)"]
-        UI["Qt UI / WebRTC stream"]
+    subgraph HOST["Host machine"]
+        QTUI["Qt UI"]
+        WEBRTCBRIDGE["WebRTC videobridge"]
+        FISHTANK["Fishtank Qt UI"]
         GRPC["gRPC + console<br/>control plane"]
         ANDROIDEMU["android-emu core<br/>(sensors, snapshots, pipes)"]
         RENDER["Host renderer<br/>(gfxstream + ANGLE/mesa)"]
@@ -28,15 +30,19 @@ graph TB
         GFRAME["Android framework"]
     end
 
-    UI --> GRPC
+    QTUI --> ANDROIDEMU
+    FISHTANK --> GRPC
     GRPC --> ANDROIDEMU
     ANDROIDEMU --> QEMU
     QEMU --> ACCEL
     ACCEL --> GKERNEL
     GKERNEL --> GHAL
     GHAL --> GFRAME
-    GHAL -->|"rendering commands"| RENDER
-    RENDER --> UI
+    GHAL -->|"rendering commands"| QEMU
+    QEMU -->|"goldfish_pipe / virtio-gpu"| RENDER
+    RENDER --> QTUI
+    RENDER --> WEBRTCBRIDGE
+    RENDER --> FISHTANK
 ```
 
 ## Support This Project

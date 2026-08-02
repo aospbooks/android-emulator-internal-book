@@ -20,7 +20,7 @@ Both front ends ultimately talk to the same control plane. Mouse, touch, and key
 
 The WebRTC subsystem is built from three cooperating areas.
 
-1. `external/qemu/android/android-webrtc/android-webrtc/android/emulation/control/` holds the gRPC service implementations (`RtcService.cpp`, `RtcServiceV2.cpp`) and the `RtcBridge` abstraction they call into.
+1. `external/qemu/android/android-webrtc/android-webrtc/android/emulation/control/` holds the gRPC service implementations (`RtcService.cpp`, `RtcServiceV2.cpp`); they program against the `RtcBridge` interface defined in `external/qemu/android/android-emu/android/emulation/control/RtcBridge.h`.
 2. `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/` holds the in-process WebRTC engine: `Switchboard`, `Participant`, `RtcConnection`, and the media `capture/` sources.
 3. `external/qemu/android/android-webrtc/videobridge/` holds the legacy *standalone* video bridge, a separate executable kept for backward compatibility.
 
@@ -228,8 +228,7 @@ flowchart TB
     CONN --> MAP
     ACC --> MAP
     MAP --> FACT
-    NEXT --> Q
-    FACT -->|"send(id, json)"| Q
+    MAP -->|"send(id, json)"| Q
 ```
 
 ---
@@ -293,7 +292,7 @@ The Switchboard's `rtcConnectionClosed` likewise posts the actual teardown of a 
 
 ## 23.6 The Participant and the JSEP State Machine
 
-A `Participant` represents one peer connection — one connected client. Its class comment in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.h:101` summarizes its three duties: create the audio and video streams, do ICE network discovery, and exchange offers/answers with the remote client. It is also the `PeerConnectionObserver`, so WebRTC calls back into it for every state change and ICE candidate.
+A `Participant` represents one peer connection — one connected client. Its class comment in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.h:93` summarizes its three duties: create the audio and video streams, do ICE network discovery, and exchange offers/answers with the remote client. It is also the `PeerConnectionObserver`, so WebRTC calls back into it for every state change and ICE candidate.
 
 ### 23.6.1 Initialize, then offer
 
@@ -368,7 +367,7 @@ if (renderer.get()) {
 }
 ```
 
-The capture loop waits up to 125 ms for the next frame event, so even a static screen produces a frame roughly eight times a second; that periodic refresh is also how the loop notices the client has gone away on shutdown.
+The capture loop waits up to 125 ms for the next frame event; if no event arrives (timeout), no frame is emitted and the loop simply rechecks whether capture is still active -- this is what lets the loop notice shutdown without blocking indefinitely. Frames are produced only when the renderer fires a FrameBufferChangeEvent.
 
 ### 23.7.2 Screenshot to I420
 

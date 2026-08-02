@@ -37,7 +37,7 @@ typedef enum CameraSourceType {
 } CameraSourceType;
 ```
 
-All of the file-backed and scene sources (everything except `kWebcam`) share one backend: the virtual scene renderer. The constructor routes them all through `virtualscenecameraSetup`, varying only the device name string ("environment", "videofile", "imagefile", "image360", optionally suffixed with a filename). Only `kWebcam` uses the host capture path.
+All of the file-backed and scene sources (everything except `kWebcam`) share one backend: the virtual scene renderer. The constructor routes them all through `virtualscenecameraSetup`, varying only the device name string ("environment", "videoplayback", "videofile", "imagefile", "image360", optionally suffixed with a filename). Only `kWebcam` uses the host capture path.
 
 ### 16.1.2 Telling the Guest Which Cameras Are Fake
 
@@ -56,10 +56,10 @@ Camera source resolution at boot
 flowchart TD
     HW["hw_camera_back / hw_camera_front"] --> CTOR["CameraService ctor"]
     CTOR --> Q{"value prefix?"}
-    Q -->|"emulated / environment"| VS["virtualscenecameraSetup"]
-    Q -->|"videofile / imagefile / image360"| VS
+    Q -->|"virtualscene / environment / videoplayback<br/>videofile / imagefile / image360"| VS["virtualscenecameraSetup"]
     Q -->|"webcam{N}"| WC["webcamSetup"]
-    Q -->|"none"| SKIP["no CameraInfo"]
+    Q -->|"emulated"| SKIP["no CameraInfo"]
+    Q -->|"none"| SKIP
     VS --> CI["CameraInfo + virtualscene vtbl"]
     WC --> ENUM["camera_enumerate_devices"]
     ENUM --> CI2["CameraInfo + capture vtbl"]
@@ -183,7 +183,7 @@ enum class CameraClientProtocol : int {
 };
 ```
 
-The selection is policy-driven, not negotiated: if the `Minigbm` feature flag is on, the client is `MINIGBM`; otherwise, if the AVD API level is above 29 (Android 10), it is `GAS`; otherwise it falls back to `SERIAL` (`camera-service.cpp:1795`). Each protocol gets its own client class, all created in `CameraService::cameraClientCreate` (`camera-service.cpp:1807`) after resolving the camera by name and calling its vtable `open`.
+The selection is policy-driven, not negotiated: if the `Minigbm` feature flag is on, the client is `MINIGBM`; otherwise, if the AVD API level is above 29 (Android 11, API 30 and above; Android 10 is API 29 and uses SERIAL), it is `GAS`; otherwise it falls back to `SERIAL` (`camera-service.cpp:1795`). Each protocol gets its own client class, all created in `CameraService::cameraClientCreate` (`camera-service.cpp:1807`) after resolving the camera by name and calling its vtable `open`.
 
 ### 16.4.1 SERIAL — Copy Pixels Through the Pipe
 
@@ -193,7 +193,7 @@ Note that the start path validates that a conversion path exists *before* captur
 
 ### 16.4.2 GAS — Write Into Shared Guest Memory
 
-`GasCameraClient` (`camera-service.cpp:1328`) eliminates the copy. "GAS" is the goldfish address space: a region of memory shared between guest and host. The guest's `capture` query carries an `offset=` into that region; the host translates it to a host pointer and uses it directly as the conversion target framebuffer.
+`GasCameraClient` (`camera-service.cpp:1328`) eliminates the copy. "GAS" is the goldfish address space: a region of memory shared between guest and host. The guest's `frame` query carries an `offset=` into that region; the host translates it to a host pointer and uses it directly as the conversion target framebuffer.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-service.cpp
@@ -337,7 +337,7 @@ stateDiagram-v2
     Configured --> Mapped : VIDIOC_REQBUFS mmap
     Mapped --> Streaming : VIDIOC_STREAMON
     Streaming --> Streaming : DQBUF convert QBUF
-    Streaming --> Retry : DQBUF EAGAIN
+    Streaming --> Retry : EAGAIN
     Retry --> Streaming : poll again
     Streaming --> Stopped : VIDIOC_STREAMOFF
     Stopped --> [*] : camera_device_close

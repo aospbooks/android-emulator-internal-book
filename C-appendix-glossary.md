@@ -20,7 +20,7 @@ flowchart TB
     ENUM --> WHPX["WHPX<br/>Windows Hypervisor Platform"]
     ENUM --> AEHD["AEHD<br/>Windows, Google driver"]
     ENUM --> NONE["CPU_ACCELERATOR_NONE<br/>no hardware accelerator"]
-    KVM --> HW["Hardware virtualization (VT-x / AMD-V / EL2)"]
+    KVM --> HW["Hardware virtualization<br/>(VT-x / AMD-V / EL2)"]
     HVF --> HW
     WHPX --> HW
     AEHD --> HW
@@ -35,7 +35,7 @@ flowchart LR
     APP["Guest app / GL / Vulkan call"]
     APP --> ENC["gfxstream guest encoder<br/>GLESv2_enc, renderControl_enc"]
     ENC --> TRANSPORT["Transport: qemu_pipe or virtio-gpu"]
-    TRANSPORT --> DEC["gfxstream host decoder<br/>renderControl_dec"]
+    TRANSPORT --> DEC["gfxstream host decoder<br/>gles2_dec, renderControl_dec"]
     DEC --> RC["RenderControl + ColorBuffer"]
     RC --> BACKEND["Host backend: native GL/Vulkan, ANGLE, or SwiftShader"]
 ```
@@ -82,11 +82,11 @@ flowchart TB
 
 **Address space device** — A goldfish PCI device, implemented in `external/qemu/hw/pci/goldfish_address_space.c`, that lets the host hand the guest large regions of host memory by mapping them into the guest's physical address space. It is the high-throughput transport that gfxstream uses for buffers too large to copy through a pipe; service implementations register via `goldfish_address_space_set_service_ops`. The device deliberately enforces a singleton — creating a second one calls `qemu_abort("FATAL: Two address space devices created")`.
 
-**ANGLE** — "Almost Native Graphics Layer Engine," vendored at `external/angle`, a translator that implements OpenGL ES on top of another graphics API. In the emulator it appears as the `swangle` GPU mode (SwiftShader-backed ANGLE), selected in `external/qemu/android/android-ui/modules/aemu-gl-init/src/android/opengl/emugl_config.cpp` where `swangle` maps to `SELECTED_RENDERER_ANGLE_INDIRECT`. It is the default GLES path on hosts without a usable native driver.
+**ANGLE** — "Almost Native Graphics Layer Engine," vendored at `external/angle`, a translator that implements OpenGL ES on top of another graphics API. In the emulator it appears as the `swangle` GPU mode (SwiftShader-backed ANGLE), selected in `external/qemu/android/android-ui/modules/aemu-gl-init/src/android/opengl/emugl_config.cpp` where `swangle` maps to `SELECTED_RENDERER_ANGLE_INDIRECT`. It is the default GLES path on Linux and macOS hosts without a usable native driver; on Windows, SwiftShader is used instead because swangle is not supported there.
 
 **AVD** — Android Virtual Device, the on-disk configuration that describes one emulated device: its system image, hardware profile, and writable state. The header `external/qemu/android/emu/avd/include/android/avd/info.h` opens by defining it as "An Android Virtual Device (AVD for short)," and the `AvdInfo` structure parsed there is what the launcher consults to decide which kernel, board, and images to boot.
 
-**Color buffer** — A host-side handle for a rendered image (a texture or framebuffer) in gfxstream, implemented by the `ColorBuffer` class in `hardware/google/gfxstream/host/color_buffer.cpp`. Each color buffer is backed by either a GL texture (`color_buffer_gl.h`) or a Vulkan image (`color_buffer_vk.h`); the guest refers to color buffers by integer id, and the host composes and posts them to the display. The guest-side gralloc handle ultimately names one of these color buffers.
+**Color buffer** — A host-side handle for a rendered image (a texture or framebuffer) in gfxstream, implemented by the `ColorBuffer` class in `hardware/google/gfxstream/host/color_buffer.cpp`. Each color buffer is backed by a GL texture (`gl/color_buffer_gl.h`), a Vulkan image (`vulkan/color_buffer_vk.h`), or both when both GL and Vulkan emulation are active; the guest refers to color buffers by integer id, and the host composes and posts them to the display. The guest-side gralloc handle ultimately names one of these color buffers.
 
 **crosvm** — The Chrome OS Virtual Machine Monitor, a Rust VMM. It is the hypervisor monitor used by Cuttlefish rather than by the QEMU-based Android Emulator; Cuttlefish selects and launches it through `device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.h` and the `crosvm_binary()` accessor in `device/google/cuttlefish/host/libs/config/cuttlefish_config.cpp`. Unlike the emulator's forked QEMU, crosvm exposes only virtio devices.
 
@@ -94,7 +94,7 @@ flowchart TB
 
 **Device tree** — A flattened data structure (FDT) that describes the virtual hardware to the guest kernel at boot. The ranchu board builds one in `external/qemu/hw/arm/ranchu.c`, where `create_fdt` calls `create_device_tree` and the board comment states plainly: "We create a device tree to pass to the kernel." Device tree is how the ARM and MIPS boards advertise their virtio and goldfish devices to Linux, replacing the hard-coded board descriptions used on x86.
 
-**gfxstream** — Graphics Streaming Kit (formerly "Vulkan Cereal"), the rendering stack at `hardware/google/gfxstream`. Its README describes it as "a collection of code generators and libraries for streaming rendering APIs from one place to another," specifically from a VM guest to the host. The guest side encodes GL/Vulkan/RenderControl calls (the `*_enc` directories under `hardware/google/gfxstream/guest`), and the host side decodes and replays them against a real driver (the `*_dec` directories under `hardware/google/gfxstream/host`).
+**gfxstream** — Graphics Streaming Kit (formerly "Vulkan Cereal"), the rendering stack at `hardware/google/gfxstream`. Its README describes it as "a collection of code generators and libraries for streaming rendering APIs from one place to another," specifically from a VM guest to the host. The guest side encodes GL and RenderControl calls (the `*_enc` directories under `hardware/google/gfxstream/guest`), and the host side decodes and replays them against a real driver (the `*_dec` directories under `hardware/google/gfxstream/host`).
 
 **goldfish** — The original Android virtual hardware platform: a set of QEMU devices (timer, battery, pipe, framebuffer, and more) prefixed `goldfish_`, such as `external/qemu/hw/timer/goldfish_timer.c`. The kernel docs `external/qemu/android/docs/ANDROID-KERNEL.TXT` describe it as "the legacy virtual board" that supports obsolete goldfish-specific NAND and eMMC devices. Many goldfish devices (notably the pipe and address space device) survive into the modern ranchu board.
 
@@ -108,7 +108,7 @@ flowchart TB
 
 **netsim** — A network simulation tool at `tools/netsim`, described in its README as "a network simulation tool for multi-device use cases" that offers "radio level control and HCI tracing." It simulates the radio layer (Wi-Fi, Bluetooth, UWB) shared between multiple virtual devices and embeds RootCanal for Bluetooth; the implementation under `tools/netsim` is primarily Rust.
 
-**qemu_pipe** — The guest-visible name of the goldfish pipe, a fast shared-memory channel between guest and host. The device source `external/qemu/hw/misc/goldfish_pipe.c` says it is the "virtual pipe device (originally called goldfish_pipe and latterly qemu_pipe)" that "allows the android running under the emulator to open a fast connection to the host" for adb and OpenGL ES pass-through. New pipe services register through `goldfish_pipe_add_type()`.
+**qemu_pipe** — The guest-visible name of the goldfish pipe, a fast shared-memory channel between guest and host. The device source `external/qemu/hw/misc/goldfish_pipe.c` says it is the "virtual pipe device (originally called goldfish_pipe and latterly qemu_pipe)" that "allows the android running under the emulator to open a fast connection to the host" for adb and OpenGL ES pass-through. New pipe services register through `goldfish_pipe_set_service_ops()`.
 
 **Quickboot** — The emulator feature that boots a device by restoring a previously saved snapshot instead of doing a cold boot, implemented in `external/qemu/android/android-emu/android/snapshot/Quickboot.cpp` (and `Quickboot.h`). Quickboot is the default-snapshot mechanism layered on top of the general snapshot system; it saves on exit and restores on the next launch so the device appears to resume rather than reboot.
 

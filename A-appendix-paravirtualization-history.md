@@ -36,7 +36,7 @@ flowchart TB
 
 Paravirtualization as a practical x86 technique was born from the XenoServers project at the University of Cambridge Computer Laboratory, begun in 1999 under Ian Pratt. The motivating question, pursued with his PhD student Keir Fraser, was deceptively simple: rather than fooling a guest kernel into thinking it runs on bare metal, what if you *told* it that it was virtualized and gave it a cleaner, virtualization-friendly interface to work against?
 
-The team — collaborating with researchers at Intel and Microsoft — took Linux and Windows XP and stripped out the instructions and behaviors that were slow or impossible to virtualize on the x86 of the era, replacing them with hypercalls. The result was `Xen`, whose first public release landed in October 2003, accompanied by the landmark SOSP (Symposium on Operating Systems Principles) 2003 paper *Xen and the Art of Virtualization*. Context made it matter: pre-2006 x86 had no hardware virtualization support, and several privileged instructions did not trap cleanly, so full virtualization on x86 required heavy techniques such as binary translation. Paravirtualization sidestepped all of that by changing the guest.
+The team — collaborating with researchers at Intel and Microsoft — took Linux and Windows XP and stripped out the instructions and behaviors that were slow or impossible to virtualize on the x86 of the era, replacing them with hypercalls. The result was `Xen`, whose first public release landed in October 2003, accompanied by the landmark SOSP (Symposium on Operating Systems Principles) 2003 paper *Xen and the Art of Virtualization*. Context made it matter: the x86 of that era had no hardware virtualization support, and several privileged instructions did not trap cleanly, so full virtualization on x86 required heavy techniques such as binary translation. Paravirtualization sidestepped all of that by changing the guest.
 
 Xen introduced vocabulary still in use: a privileged control domain (`Dom0`) that owns the hardware and management stack, and unprivileged guest domains (`DomU`). The model proved commercially decisive — Amazon Web Services ran on Xen from its beginnings, making PV one of the quiet engines of the early public cloud.
 
@@ -56,7 +56,7 @@ It is worth opening the box on `virtio`, because the same data structure underli
 
 What made `virtio` portable rather than merely tidy was a deliberate separation of three concerns that earlier paravirtual device models had fused. Russell's 2008 paper draws the line explicitly between the *driver* (a Linux-internal abstraction — an operations structure a generic block or net driver calls), the *transport* (the ring mechanism that actually moves buffers), and *configuration* (how a device is discovered and its features negotiated). Fuse those, as Xen's early model did, and a driver is welded to one hypervisor's probing scheme; separate them, and the same driver rides any transport that implements the ring. That decoupling is why a single set of Linux drivers could serve the eight different virtualization systems Linux already carried in 2008 — Xen, KVM, VMware's VMI, IBM's System p and System z, User Mode Linux, `lguest`, and the legacy iSeries — each of which had been shipping its own duplicate block, network, and console drivers that no one enjoyed maintaining.
 
-A virtqueue in its original "split" layout is three rings in memory the guest allocates, each writable by only one side. The **descriptor table** holds the buffers — each descriptor is an address, a length, some flags, and an optional link to a next descriptor, so one request can chain several memory segments. The **available ring** is where the driver publishes the heads of the descriptor chains it is offering. The **used ring** is where the device publishes the chains it has finished with. Because each ring has exactly one writer, the two sides never contend for a lock on the shared structures.
+A virtqueue in its original "split" layout is three shared data structures the guest allocates, each writable by only one side. The **descriptor table** holds the buffers — each descriptor is an address, a length, some flags, and an optional link to a next descriptor, so one request can chain several memory segments. The **available ring** is where the driver publishes the heads of the descriptor chains it is offering. The **used ring** is where the device publishes the chains it has finished with. Because each ring has exactly one writer, the two sides never contend for a lock on the shared structures.
 
 #### The split virtqueue: three single-writer rings in shared memory
 
@@ -138,7 +138,7 @@ flowchart TB
     HW["x86-64 + VT-x / AMD-V"]
     VSC <-- "VMBus" --> VSP
     VSP --> PDD
-    CHILD -- "hypercall" --> HV
+    GOS -- "hypercall" --> HV
     ROOT -- "hypercall" --> HV
     HV --> HW
 ```
@@ -217,7 +217,7 @@ flowchart TB
     end
     QEMU["QEMU (Android fork)<br/>virtio device back-ends · Qt UI · ADB"]
     ACC["Hardware hypervisor (accelerator)<br/>KVM · HVF · WHPX · AEHD"]
-    HW["Host OS + CPU<br/>Intel VT-x / AMD-V"]
+    HW["Host OS + CPU<br/>Intel VT-x / AMD-V · ARM64 virt exts"]
     GUEST -- "virtio / pipe" --> QEMU
     QEMU --> ACC
     ACC --> HW
@@ -303,7 +303,7 @@ The diagram in §A.2 shows this arc visually; the table records the precise mile
 |---|---|
 | 1999 | XenoServers project begins at Cambridge (Pratt, Fraser) |
 | 2003 | Xen 1.0 released; *Xen and the Art of Virtualization* (SOSP) |
-| 2006 | Intel VT-x / AMD-V ship; VMware VMI paravirt interface (Ottawa Linux Symposium) |
+| 2005–06 | Intel VT-x ships (2005), AMD-V follows (2006); VMware VMI paravirt interface (Ottawa Linux Symposium, 2006) |
 | 2007 | KVM merged into Linux 2.6.20; lguest and Xen DomU support land in 2.6.23 |
 | 2008 | virtio merged in Linux 2.6.24; virtio "de-facto standard" paper |
 | 2008 | Microsoft Hyper-V ships; enlightened I/O over VMBus (VSP/VSC) |
@@ -313,7 +313,7 @@ The diagram in §A.2 shows this arc visually; the table records the precise mile
 | ~2015 | Android Emulator's ranchu board moves to virtio devices (qemu2) |
 | 2016 | virtio-gpu gains 3D via virgl; gfxstream ported onto virtio-gpu by 2018 |
 | 2019 | virtio 1.1 adds packed virtqueues (cache- and hardware-friendly) |
-| 2021 | virtio-gpu context types (Linux 5.16); rutabaga multiplexes virgl/Venus/gfxstream |
+| 2022 | virtio-gpu context types (Linux 5.16); rutabaga multiplexes virgl/Venus/gfxstream |
 | ~2020 | Google develops pKVM / AVF in the open |
 | 2022–23 | AVF + pKVM first ship (Android 13); Microdroid 2× faster in Android 14 |
 | 2023 | Intel discontinues HAXM; emulator moves to AEHD / WHPX on Windows |

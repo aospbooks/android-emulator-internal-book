@@ -12,15 +12,17 @@ The emulator does not put the guest on the host's real network segment. Instead 
 
 The defining property of user-mode networking is that the guest's packets never reach a host kernel network interface as packets. libslirp parses the Ethernet/IP/TCP headers itself and, when the guest opens a TCP connection, libslirp opens an ordinary host socket on the guest's behalf. The host kernel sees a normal `connect()` from the emulator process — no `CAP_NET_ADMIN`, no TAP device, no bridge. This is why the emulator can do networking with zero setup and zero privileges, and it is the mode every AVD uses unless you explicitly pass `-net-tap`.
 
-### 18.1.1 The two slirp clients in the tree
+### 18.1.1 The three slirp components in the tree
 
-There are two distinct slirp source bases in play, and it helps to keep them separate:
+There are three distinct slirp components in play, and it helps to keep them separate:
 
-1. `external/libslirp/src/` is the upstream library: the actual TCP/IP state machine (`slirp.c`, `tcp_input.c`, `socket.c`, `bootp.c`, `tftp.c`).
+1. `external/qemu/slirp/` is the bundled slirp library — a copy of an older libslirp — that the main QEMU user-mode networking stack uses directly. Its public API is declared in `external/qemu/slirp/libslirp.h`, and its primary entry point is `slirp_init` (`external/qemu/slirp/slirp.c:556`).
 
-2. `external/qemu/net/slirp.c` is QEMU's adapter. It owns the `SlirpState` struct, registers the QEMU `NetClientInfo`, and calls into libslirp through the public API declared in `external/libslirp/src/libslirp.h`.
+2. `external/libslirp/src/` is the standalone upstream library: the actual TCP/IP state machine (`slirp.c`, `tcp_input.c`, `socket.c`, `bootp.c`, `tftp.c`). This version is used by the Wi-Fi and netsim paths; its modern entry point is `slirp_new` (`external/libslirp/src/slirp.c:600`), which accepts a `SlirpCb` callback table.
 
-The library is deliberately host-agnostic. It never calls `send()` itself; instead the embedder supplies a `SlirpCb` callback table and an opaque pointer, and libslirp calls back whenever it has a frame to deliver to the guest. The public entry point is `slirp_new` (`external/libslirp/src/slirp.c:600`), with a legacy `slirp_init` wrapper kept for compatibility (`external/libslirp/src/slirp.c:740`).
+3. `external/qemu/net/slirp.c` is QEMU's adapter for the main networking path. It owns the `SlirpState` struct, registers the QEMU `NetClientInfo`, and wraps the bundled library through `#include "slirp/libslirp.h"`.
+
+Both libraries are deliberately host-agnostic — they never call `send()` themselves, instead calling back through registered function pointers when they have a frame to deliver to the guest. The standalone library exposes this as a `SlirpCb` callback struct passed to `slirp_new`; the netsim Wi-Fi driver (`external/qemu/android-qemu2-glue/netsim/libslirp_driver.cpp`) declares such a struct and uses it.
 
 ### 18.1.2 The packet path in QEMU's glue
 
@@ -36,9 +38,9 @@ static NetClientInfo net_slirp_info = {
 };
 ```
 
-A guest-to-host frame arrives at `net_slirp_receive`, which (after optional traffic shaping) calls `net_slirp_receive_raw` and from there `slirp_input(s->slirp, buf, size)` — handing the raw Ethernet frame to the library (`external/qemu/net/slirp.c:145`). The reverse direction is `slirp_output`: when libslirp has assembled a frame for the guest it invokes this callback, which ultimately calls `qemu_send_packet(&s->nc, pkt, pkt_len)` to inject the frame into the guest's NIC (`external/qemu/net/slirp.c:123`).
+A guest-to-host frame arrives at `net_slirp_receive`, which (after optional traffic shaping) calls `net_slirp_receive_raw` and from there `slirp_input(s->slirp, buf, size)` — handing the raw Ethernet frame to the library (`external/qemu/net/slirp.c:145`). The reverse direction is `slirp_output`: when libslirp has assembled a frame for the guest it invokes this callback, which ultimately calls `qemu_send_packet(&s->nc, pkt, pkt_len)` to inject the frame into the guest's NIC (`external/qemu/net/slirp.c:129`).
 
-Between those two functions sit two optional hooks the emulator splices in: a recv callback (`s->recv_cb`, used when Wi-Fi or netsim wants to intercept the stream) and a pair of traffic shapers (`s->shaper_out` / `s->shaper_in`) used to emulate cellular bandwidth and latency. Both are visible directly in `slirp_output`:
+Between those two functions sit two optional hooks the emulator splices in: a recv callback (`s->recv_cb`, used when Wi-Fi or netsim wants to intercept the stream) and a pair of traffic shapers (`s->shaper_out` / `s->shaper_in`) used to emulate cellular bandwidth and latency. `s->recv_cb` and `s->shaper_out` are visible in `slirp_output`; `s->shaper_in` is the symmetric hook in `net_slirp_receive` (line 151), which shapes guest-to-host traffic:
 
 ```c
 // Source: external/qemu/net/slirp.c
@@ -121,7 +123,7 @@ if (so->so_faddr.s_addr == s->vhost_addr.s_addr ||
 
 So a guest process connecting to `10.0.2.2:8080` ends up connected to `127.0.0.1:8080` on the host — this is the canonical way to reach a server running on your development machine. Outbound connections to ordinary public addresses are translated transparently: libslirp opens a host socket toward the real destination and shuttles bytes between the host socket and the guest's emulated TCP connection, so the guest never needs a route to the outside world.
 
-When `restricted` mode is enabled, the guest is confined to the virtual services (DHCP, DNS, TFTP) and cannot reach arbitrary hosts. `net_slirp_init` logs which mode is active and passes `restricted` straight through to `slirp_init` (`external/qemu/net/slirp.c:405`).
+When `restricted` mode is enabled, the guest is confined to the virtual services (DHCP, DNS, TFTP) and cannot reach arbitrary hosts. `net_slirp_init` logs which mode is active and passes `restricted` straight through to `slirp_init` (`external/qemu/net/slirp.c:409`).
 
 NAT topology of the virtual router
 
@@ -144,6 +146,7 @@ flowchart TB
     G -->|"to 10.0.2.2"| GW --> LB
     G -->|"to 10.0.2.3:53"| DNS --> RESOLV
     G -->|"DHCP DISCOVER"| DHCP
+    G -.->|"TFTP RRQ"| TFTP
     G -->|"any other IP"| GW --> EXT
 ```
 
@@ -160,7 +163,7 @@ When the guest's DHCP client broadcasts a `DHCPDISCOVER`, libslirp's BOOTP/DHCP 
 paddr->s_addr = slirp->vdhcp_startaddr.s_addr + htonl(i);
 ```
 
-Because the emulator only ever has one guest on the segment, `i` is effectively `0` and the guest always receives `10.0.2.15`. The DHCP reply also carries the gateway (`10.0.2.2`), the DNS server (`10.0.2.3`), and the netmask, so the guest's routing table is fully populated from the lease. The DHCP server can be suppressed via `disable_dhcp` in the `SlirpConfig` (`external/libslirp/src/slirp.c`).
+Because the emulator only ever has one guest on the segment, `i` is effectively `0` and the guest always receives `10.0.2.15`. The DHCP reply also carries the gateway (`10.0.2.2`), the DNS server (`10.0.2.3`), and the netmask, so the guest's routing table is fully populated from the lease.
 
 ### 18.3.2 The built-in TFTP server
 
@@ -182,28 +185,26 @@ DNS is where the Android emulator's slirp diverges most from stock QEMU. The gue
 
 ### 18.4.1 Mapping virtual DNS addresses to host resolvers
 
-The translation happens in `sotranslate_out4` in `external/libslirp/src/socket.c`. The emulator can hand libslirp a list of host DNS servers, and the library maps `10.0.2.3` to the first, `10.0.2.4` to the second, and so on:
+The translation in the main QEMU networking path happens in `slirp_translate_guest_dns` at `external/qemu/slirp/slirp.c:421`. The emulator can hand the bundled slirp a list of host DNS servers, and the function maps `10.0.2.3` to the first, `10.0.2.4` to the second, and so on using index arithmetic:
 
 ```c
-// Source: external/libslirp/src/socket.c
-/* Mapping guest virtual DNS IPs (10.0.2.3, 10.0.2.4, etc.) to host DNS servers */
-if (s->host_dns_count > 0) {
-    int n, ipv4_dns_count = 0;
-    for (n = 0; n < s->host_dns_count; ++n) {
-        if (s->host_dns[n].ss_family != AF_INET) {
-            continue;
-        }
-        if (faddr == dns_base + ipv4_dns_count) {
-            dns_index = n;
-            break;
-        }
-        ipv4_dns_count++;
-        ...
+// Source: external/qemu/slirp/slirp.c
+if (slirp->host_dns_count > 0) {
+    /* Use custom DNS servers. */
+    uint32_t dns_base = ntohl(slirp->vnameserver_addr.s_addr);
+    uint32_t guest = ntohl(guest_ip->sin_addr.s_addr);
+    int port = ntohs(guest_ip->sin_port);
+    dns_index = (int)(guest - dns_base);
+    if (dns_index < 0 || dns_index >= slirp->host_dns_count) {
+        fprintf(stderr, "CANNOT TRANSLATE guest DNS ip\n");
+        return -1;
     }
+    reset_host_ip(host_ip, &slirp->host_dns[dns_index], port);
+    return 0;
 }
 ```
 
-The same logic exists for IPv6 in `sotranslate_out6`, mapping the `vnameserver_addr6` base across the host's IPv6 resolvers (`external/libslirp/src/socket.c:1008`). Note the guard `if (so->so_fport != htons(53))` — only port 53 traffic to the virtual DNS address is rewritten; anything else is rejected. If no explicit host DNS list was supplied, libslirp falls back to `get_dns_addr` to discover the host's resolver.
+An IPv6 twin, `slirp_translate_guest_dns6` at `external/qemu/slirp/slirp.c:452`, applies the same approach for IPv6 resolvers. If no explicit host DNS list was supplied, both functions fall back to `get_dns_addr` to discover the host's resolver.
 
 ### 18.4.2 Where the host DNS list comes from
 
@@ -231,7 +232,7 @@ sequenceDiagram
     participant Slirp as libslirp
     participant Host as Host resolver
     App->>Slirp: UDP to 10.0.2.3:53
-    Note over Slirp: sotranslate_out4 maps<br/>10.0.2.3 to host_dns[0]
+    Note over Slirp: slirp_translate_guest_dns<br/>maps 10.0.2.3 to host_dns[0]
     Slirp->>Host: forward query to real DNS server
     Host-->>Slirp: DNS response
     Slirp-->>App: response from 10.0.2.3:53
@@ -275,7 +276,7 @@ static bool slirpRedir(bool isUdp, int hostPort, int guestPort) {
 }
 ```
 
-`slirp_add_hostfwd` is the libslirp public API (`external/libslirp/src/libslirp.h:254`). Internally, QEMU's `slirp_hostfwd` parses the textual spec and calls the same `slirp_add_hostfwd` (`external/qemu/net/slirp.c:684`); the human-facing `hostfwd=` netdev option and the QMP `hmp_hostfwd_add` path (`external/qemu/net/slirp.c:812`) all converge there. There is an IPv6 twin, `slirp_add_ipv6_hostfwd`, reached through `slirpRedirIpv6`.
+`slirp_add_hostfwd` is the libslirp public API (`external/libslirp/src/libslirp.h:254`). Internally, QEMU's `slirp_hostfwd` parses the textual spec and calls the same `slirp_add_hostfwd` (`external/qemu/net/slirp.c:684`); the human-facing `hostfwd=` netdev option and the HMP `hmp_hostfwd_add` path (`external/qemu/net/slirp.c:812`) all converge there. There is an IPv6 twin, `slirp_add_ipv6_hostfwd`, reached through `slirpRedirIpv6`.
 
 The most visible everyday use of this machinery is adb: the emulator automatically forwards a host console/adb port to the guest's adb daemon, which is why `adb connect localhost:<port>` reaches a guest that has no host-visible IP of its own.
 
@@ -411,7 +412,7 @@ if (frame->isData()) {
 }
 ```
 
-The decision tree mirrors how a real AP behaves: management and control frames and the EAPoL handshake go to `hostapd` over the socket pair; data frames addressed to the BSSID and flagged "to distribution system" are bridged out to the Internet through the slirp NIC; and frames addressed elsewhere are forwarded to a peer VM. The `WifiService::Builder` in `external/qemu/android-qemu2-glue/emulation/WifiService.cpp` constructs all of this, initializing a dedicated slirp stack with the same `10.0.2.x` addresses and a fixed BSSID:
+The decision tree mirrors how a real AP behaves: EAPoL data frames and management/control frames addressed to the BSSID, broadcast, or multicast go to `hostapd` over the socket pair; broadcast and multicast management frames are also forwarded to peer VMs via `sendToRemoteVM`; management frames addressed to a unicast non-BSSID MAC go only to `sendToRemoteVM`, bypassing `hostapd` entirely; and data frames addressed to the BSSID and flagged "to distribution system" are bridged out to the Internet through the slirp NIC. The `WifiService::Builder` in `external/qemu/android-qemu2-glue/emulation/WifiService.cpp` constructs all of this, initializing a dedicated slirp stack with the same `10.0.2.x` addresses and a fixed BSSID:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/emulation/WifiService.cpp
@@ -440,7 +441,7 @@ flowchart TB
     end
     WLAN -->|"HWSIM_CMD_FRAME"| VW
     VW --> FWD
-    FWD -->|"mgmt / EAPoL"| HAPD
+    FWD -->|"EAPoL + mgmt to BSSID/bcast"| HAPD
     FWD -->|"data to BSSID, ToDS"| SL
     SL --> NET["Internet"]
     FWD -.->|"HWSIM_CMD_TX_INFO_FRAME ACK"| VW
@@ -584,8 +585,9 @@ Hands-on with the emulator's networking, using a running AVD:
 | File | Purpose |
 |------|---------|
 | `external/qemu/net/slirp.c` | QEMU glue around libslirp; `10.0.2.x` defaults, hostfwd, custom DNS |
-| `external/libslirp/src/slirp.c` | libslirp core; `slirp_new` and the TCP/IP state machine |
-| `external/libslirp/src/socket.c` | NAT address translation and virtual-DNS-to-host-resolver mapping |
+| `external/qemu/slirp/slirp.c` | Bundled slirp core (main networking path); `slirp_init`, DNS translation via `slirp_translate_guest_dns` |
+| `external/libslirp/src/slirp.c` | Standalone libslirp core (Wi-Fi/netsim path); `slirp_new` and the TCP/IP state machine |
+| `external/libslirp/src/socket.c` | NAT address translation in the standalone library (Wi-Fi/netsim path) |
 | `external/libslirp/src/bootp.c` | Built-in DHCP/BOOTP server that leases `10.0.2.15` |
 | `external/qemu/android-qemu2-glue/qemu-net-agent-impl.c` | Network agent: `slirpRedir`, `slirpUnredir`, SSID blocking |
 | `external/qemu/android/android-emu/android/console.cpp` | Console `redir` and `network speed`/`delay` command handlers |

@@ -12,13 +12,13 @@ The emulator's tests fall into three tiers, each with a different cost, scope, a
 
 The bottom tier is the largest: googletest/gmock unit tests that link against a single library, run in milliseconds, and never start a VM. There are dozens of `*_unittest.cpp` files under `external/qemu/android/android-emu/` alone, plus a parallel set in `hardware/google/gfxstream/`. They are compiled into per-component test executables, registered with CMake's `add_test`, and run by `ctest`.
 
-The middle tier is the gfxstream rendering tests. These still use googletest, but they pull in a software GPU (SwiftShader for both GLES and Vulkan) and an off-screen window, so they exercise the real rendering pipeline without hardware. They live in `hardware/google/gfxstream/host/tests/` and are registered with CMake's `gtest_discover_tests`.
+The middle tier is the gfxstream rendering tests. These still use googletest, but they pull in a software GPU (SwiftShader for both GLES and Vulkan) and an off-screen window, so they exercise the real rendering pipeline without hardware. They are registered in `hardware/google/gfxstream/host/CMakeLists.txt`, with source files spread across `host/` (e.g. `frame_buffer_unittest.cpp`, `vsync_thread_unittest.cpp`), `host/tests/` (GLES and GLSnapshot suites), `host/features/`, and `host/vulkan/`; they are registered with CMake's `gtest_discover_tests`.
 
 The top tier is the host-side end-to-end suite under `external/adt-infra/pytest/test_embedded/`. These tests launch an actual `emulator` process against a downloaded system image, wait for boot, then assert on guest behavior through ADB shell commands, the telnet console, gRPC, and Mobly RPC. They are slow (a single boot test can take minutes) and gate presubmit through named test suites.
 
 ### 27.1.1 Three rings, one orchestrator
 
-What ties the rings together is `external/qemu/android/build/python/aemu/cmake.py`, the Python entry point invoked by `external/qemu/android/rebuild.sh`. It assembles a list of `BuildTask` objects — compile, then `CTestTask`, then `IntegrationTestTask` — so the same command that builds the emulator also runs its tests.
+What ties the rings together is `external/qemu/android/build/python/cmake.py`, the Python entry point invoked by `external/qemu/android/rebuild.sh`. That file is a thin wrapper that imports and calls `external/qemu/android/build/python/aemu/cmake.py`, where `get_tasks()` assembles a list of `BuildTask` objects — compile, then `CTestTask`, then `IntegrationTestTask` — so the same command that builds the emulator also runs its tests.
 
 The test pyramid, from cheapest to most expensive
 
@@ -27,9 +27,9 @@ flowchart TB
   subgraph UNIT["Unit tests (ctest)"]
     U1["android-emu_unittests"]
     U2["android-emu-base_unittests"]
-    U3["gfxstream_backend_unittests"]
   end
   subgraph RENDER["Rendering tests (ctest + SwiftShader)"]
+    R0["gfxstream_backend_unittests"]
     R1["OpenglRender_unittests"]
     R2["OpenglRender_snapshot_unittests"]
   end
@@ -485,7 +485,7 @@ flowchart LR
 
 ## 27.9 Build-Tooling Integration and Coverage
 
-All of the above is orchestrated by the Python build system, so tests are not a separate step you remember to run — they are tasks in the build graph. `external/qemu/android/rebuild.sh` finds the bundled Python interpreter and hands off to `build/python/cmake.py`, which assembles the task list including `CTestTask`, `EmugenTestTask`, `GenEntriesTestTask`, `CoverageReportTask`, and `IntegrationTestTask`. The `--test_jobs` argument (defaulting to the host CPU count) controls test parallelism, and `run_tests` is automatically disabled when cross-compiling.
+All of the above is orchestrated by the Python build system, so tests are not a separate step you remember to run — they are tasks in the build graph. `external/qemu/android/rebuild.sh` finds the bundled Python interpreter and hands off to `build/python/cmake.py`, a thin wrapper that imports `aemu/cmake.py` where `get_tasks()` assembles the task list including `CTestTask`, `EmugenTestTask`, `GenEntriesTestTask`, `CoverageReportTask`, and `IntegrationTestTask`. The `--test_jobs` argument (defaulting to the host CPU count) controls test parallelism, and `run_tests` is automatically disabled when cross-compiling.
 
 ### 27.9.1 Code coverage
 
@@ -533,7 +533,7 @@ flowchart TB
   CM --> CFG
   CFG --> CT
   CT --> COV
-  CFG --> ZIP
+  COV --> ZIP
   CM --> IT
 ```
 
@@ -597,7 +597,7 @@ python3 external/adt-infra/pytest/test_embedded/run_tests.py \
 - Unit tests stay hermetic through `TestSystem`/`TestTempDir` (a fake filesystem and environment) and through mock console agents injected by a custom `main` in the `android-emu-test-launcher`.
 - gmock mocks like `MockAndroidVmOperations` derive their method signatures from the real agent structs via `decltype`, so the interface and its mock cannot silently drift apart.
 - `android_add_test` in `android.cmake` registers each test with `add_test`, emits per-test JUnit XML, builds at `-O0`, and applies uniform ASan, coverage, timeout, and Qt-path properties.
-- `CTestTask` runs everything under `ctest` with a 180-second per-test timeout, sets up a SwiftShader software GPU for graphics tests, and reruns failures with full output for diagnosability.
+- `CTestTask` runs everything under `ctest` with a 600-second per-test timeout (the `TIMEOUT` property set by `android_add_default_test_properties` overrides the 180 s `--timeout` default), sets up a SwiftShader software GPU for graphics tests, and reruns failures with full output for diagnosability.
 - gfxstream tests render real frames against SwiftShader (deterministic and headless) and include a large GL-snapshot save/restore suite gated by `ENABLE_VKCEREAL_TESTS`.
 - The pytest e2e suite boots AVDs described by JSON suite configs, selects tests by marker (`-m adb`, `-m graphics`, etc.), and asserts on guest behavior through ADB, the console, and gRPC.
 - Mobly Bundled Snippets expose guest Android APIs as `@Rpc` methods so host Python tests can drive real framework calls and verify results over logcat or UiAutomator.

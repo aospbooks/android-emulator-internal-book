@@ -129,11 +129,13 @@ Platform constraints then override the choice: on Windows `swangle`/`llvmpipe` a
 
 ### 13.2.2 Wiring the backend into the translator
 
-For everything except `host`, gfxstream's GLES translator must be told to run on top of a host `libEGL` rather than the native windowing GL. `emuglConfig_setupEnv()` communicates this with environment variables:
+For everything except `host`, gfxstream's GLES translator must be told to run on top of a host `libEGL` rather than the native windowing GL. `emuglConfig_setupEnv()` communicates this with environment variables. All three software backends — `swiftshader`, `llvmpipe`, and `swangle` — trigger EGL-on-EGL mode:
 
 ```cpp
 // Source: external/qemu/android/android-ui/modules/aemu-gl-init/src/android/opengl/emugl_config.cpp
-if (... !strcmp(config->gles_backend, "swangle")) {
+if (!strcmp(config->gles_backend, "swiftshader") ||
+    !strcmp(config->gles_backend, "llvmpipe") ||
+    !strcmp(config->gles_backend, "swangle")) {
     system->envSet("ANDROID_EGL_ON_EGL", "1");
     return;
 }
@@ -208,12 +210,13 @@ sequenceDiagram
   participant GL as GLES decoders
   participant RC as renderControl decoder
   participant FB as FrameBuffer
+  participant HDRV as Host GL driver
   CH->>RT: bytes
   loop until no progress
     RT->>VK: decode(buf)
     VK->>FB: VkEmulation ops
     RT->>GL: decode(buf)
-    GL->>FB: GLES via translator
+    GL->>HDRV: GLES via translator
     RT->>RC: decode(buf)
     RC->>FB: createColorBuffer / post / getGLString
   end
@@ -269,7 +272,7 @@ flowchart TB
   EGLINFO -->|"false, -gpu host"| NATIVE["createHostInstance:<br/>GLX / WGL / CGL"]
   EGLINFO -->|"true, EGL on EGL"| OSEGL["getEgl2EglHostInstance:<br/>host libEGL"]
   NATIVE --> DGL["Desktop GL driver"]
-  OSEGL --> AS["ANGLE or SwiftShader libEGL"]
+  OSEGL --> AS["ANGLE, SwiftShader, or llvmpipe libEGL"]
 ```
 
 ## 13.5 ANGLE, SwiftShader, mesa: The GLES Substrates
@@ -294,7 +297,7 @@ if (gpuVendor == gfxstream::host::GpuVendor::kIntel) {
 
 ANGLE (`external/angle/`) is "Almost Native Graphics Layer Engine." Its job is to implement OpenGL ES on top of a *different* host API. Per its README, it can translate ES 2.0/3.0/3.1 to Vulkan, desktop GL, Direct3D 9/11, and Metal. In the emulator it is loaded as the host `libEGL`/`libGLESv2` that the translator runs on top of (the EGL-on-EGL path).
 
-`swangle` specifically means "ANGLE backed by SwiftShader's Vulkan" — software all the way down, used when there is no usable host GPU. ANGLE's Vulkan backend renders into SwiftShader's `vk_swiftshader` ICD. The translator's EGL-on-EGL display can also explicitly request ANGLE platform types:
+`swangle` specifically means "ANGLE backed by SwiftShader's Vulkan" — software all the way down, used when there is no usable host GPU. ANGLE's Vulkan backend renders into SwiftShader's `vk_swiftshader` ICD. The translator's EGL-on-EGL display can also explicitly request ANGLE platform types, though this code path is only activated when the `ANDROID_EMUGL_EXPERIMENTAL_FAST_PATH=1` environment variable is set; in the normal swangle case the condition is false and the code falls through to `mDisplay = mDispatcher.eglGetDisplay(EGL_DEFAULT_DISPLAY)`:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/gl/glestranslator/egl/egl_os_api_egl.cpp
@@ -469,7 +472,7 @@ bool invalidateForVk();
 
 ### 13.8.1 Composition
 
-Before display, multiple `ColorBuffer` layers (from SurfaceFlinger's HWC layers, Chapter 17) may be composited into a single target. The host has two compositors implementing the same `Compositor` interface: `CompositorGl` (`gl/compositor_gl.cpp`), which uses `TextureDraw` to blit textured quads, and `CompositorVk` (`vulkan/compositor_vk.cpp`), which uses a Vulkan graphics pipeline with bundled SPIR-V shaders (`compositor.vert`/`compositor.frag`). The renderer picks the compositor that matches the display backend.
+Before display, multiple `ColorBuffer` layers (from SurfaceFlinger's HWC layers, Chapter 17) may be composited into a single target. The host has two compositors implementing the same `Compositor` interface: `CompositorGl` (`gl/compositor_gl.cpp`), which uses `TextureDraw` to blit textured quads, and `CompositorVk` (`vulkan/compositor_vk.cpp`), which uses a Vulkan graphics pipeline with GLSL shaders (`compositor.vert`/`compositor.frag`) pre-compiled to SPIR-V and embedded in the generated headers `compositor_vertex_shader.h`/`compositor_fragment_shader.h`. The renderer picks the compositor that matches the display backend.
 
 ## 13.9 Posting: From ColorBuffer to Screen and Encoder
 
@@ -507,7 +510,7 @@ using OnPostCallback = void (*)(void* context, uint32_t displayId,
 
 ### 13.9.2 Readback
 
-Reading pixels back from a GPU is the slowest part of the pipeline, so the renderer maintains a `ReadbackWorker` and a dedicated readback thread. `setPostCallback()` allocates a CPU buffer per display and starts the readback thread:
+Reading pixels back from a GPU is the slowest part of the pipeline, so the renderer maintains a `ReadbackWorker` whose `doNextReadback()` is called on the render thread, inline inside `postImpl()`. `setPostCallback()` allocates a CPU buffer per display and enqueues setup commands to `m_readbackThread` (a WorkerThread that handles Init, AddRecordDisplay, DelRecordDisplay, and GetPixels commands, but not per-frame readback):
 
 ```cpp
 // Source: hardware/google/gfxstream/host/frame_buffer.cpp
@@ -527,16 +530,17 @@ sequenceDiagram
   participant FB as FrameBuffer
   participant PW as PostWorker thread
   participant DISP as DisplayGl / DisplayVk
-  participant RBT as Readback thread
   participant CB as OnPostCallback
   RC->>FB: post(colorBuffer)
   FB->>PW: enqueue PostCmd Post
-  PW->>DISP: postImpl, blit or present
-  DISP-->>PW: presented to sub-window
-  FB->>RBT: readback request
-  RBT->>RBT: glReadPixels via PBO or VkImage readback
-  RBT->>CB: pixels (RGBA)
-  CB-->>CB: window / recorder / WebRTC encoder
+  par PostWorker presents async
+    PW->>DISP: postImpl, blit or present
+    DISP-->>PW: presented to sub-window
+  and readback on render thread
+    FB->>FB: doNextReadback via ReadbackWorker
+    FB->>CB: pixels (RGBA)
+    CB-->>CB: window / recorder / WebRTC encoder
+  end
 ```
 
 ## 13.10 Try It
@@ -605,7 +609,7 @@ grep -n "getPossibleLoaderPathBasenames\|deviceTypeScoreTable\|useMoltenVK" \
 - ANGLE translates GLES to Vulkan/D3D/Metal/desktop-GL; `swangle` means ANGLE over SwiftShader's Vulkan; SwiftShader and mesa lavapipe/llvmpipe are the CPU-only fallbacks; virglrenderer is the alternative virtio-gpu renderer that Android does not use.
 - `rcGetGLString` synthesizes the GL vendor/renderer/version and extension strings the guest sees, augmenting the host's real strings with gfxstream's pipe extensions and gating GPU-only extensions on `SELECTED_RENDERER_HOST`.
 - Vulkan is forwarded, not translated: the decoder remaps handles and memory and calls a real host driver via a dlopen'd loader; physical-device scoring prefers discrete GPUs; on macOS MoltenVK (a Metal-backed portability ICD) is selected via `ANDROID_EMU_VK_ICD=moltenvk`.
-- Rendered pixels live in `ColorBuffer` objects that may have GL and/or Vulkan backings with explicit flush/invalidate between them; a `PostWorker` thread either blits/presents the final buffer into the on-screen sub-window or reads it back through a `ReadbackWorker` and delivers RGBA bytes to an `OnPostCallback` for recording and WebRTC.
+- Rendered pixels live in `ColorBuffer` objects that may have GL and/or Vulkan backings with explicit flush/invalidate between them; a `PostWorker` thread blits/presents the final buffer into the on-screen sub-window, while per-frame pixel readback is handled by `ReadbackWorker::doNextReadback()` called on the render thread inside `postImpl()`, delivering RGBA bytes to an `OnPostCallback` for recording and WebRTC.
 
 ### Key Source Files
 

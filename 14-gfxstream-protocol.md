@@ -220,11 +220,11 @@ sequenceDiagram
     participant Enc as Generated _enc function
     participant CK as ChecksumCalculator
     participant Stream as IOStream
-    App->>Enc: rcUpdateColorBuffer(cb, ..., pixels)
+    App->>Enc: rcCompose(bufferSize, buffer)
     Enc->>Enc: totalSize = 8 + scalars + 4 + dataLen + checksum
     Enc->>Stream: alloc(totalSize)
     Enc->>Enc: write opcode, packet_len, scalars
-    Enc->>Enc: write dataLen, then pixel bytes
+    Enc->>Enc: write dataLen, then buffer bytes
     Enc->>CK: addBuffer(buf, written)
     Enc->>CK: writeChecksum(ptr)
     Enc->>Stream: readback(retval)
@@ -351,7 +351,9 @@ stateDiagram-v2
     Querying --> Off : no checksum prefix found
     Querying --> Selecting : prefix found, clamp version
     Selecting --> On : rcSelectChecksumHelper then setVersion
-    On --> On : addBuffer then writeChecksum per packet
+    note right of On
+        addBuffer then writeChecksum per packet
+    end note
     On --> [*] : connection closed
 ```
 
@@ -530,7 +532,7 @@ The same pattern picks the native-sync version (`ANDROID_EMU_native_sync_v2/v3/v
 
 ### 14.7.2 Color Buffers and Posting
 
-The render-control nouns map directly onto host renderer objects. `rcCreateColorBuffer(width, height, internalFormat)` returns a handle to a host render target; `rcCreateWindowSurface`, `rcCreateContext`, and `rcMakeCurrent` set up the EGL state; `rcSetWindowColorBuffer` then `rcFlushWindowColorBuffer` move a rendered frame toward the display; and `rcFBPost(colorBuffer)` tells the host to present a buffer on screen. The async variants (`rcMakeCurrentAsync`, `rcFlushWindowColorBufferAsync`) carry the `flushOnEncode` attribute so they post their bytes immediately without waiting for a reply — important because posting a frame should not stall the guest's render loop.
+The render-control nouns map directly onto host renderer objects. `rcCreateColorBuffer(width, height, internalFormat)` returns a handle to a host render target; `rcCreateWindowSurface`, `rcCreateContext`, and `rcMakeCurrent` set up the EGL state; `rcSetWindowColorBuffer` then `rcFlushWindowColorBuffer` move a rendered frame toward the display; and `rcFBPost(colorBuffer)` tells the host to present a buffer on screen. The two async variants avoid blocking on a reply by different mechanisms. `rcMakeCurrentAsync` carries the `flushOnEncode` attribute, which causes the generated encoder to call `stream->flush()` immediately after encoding the call — important because a context switch should not stall the guest's render loop. `rcFlushWindowColorBufferAsync` is fire-and-forget by a different path: its `void` return type means the encoder never calls `readback`, so it leaves its bytes in the buffer without blocking, relying on a later call or explicit flush to commit them to the host.
 
 ### 14.7.3 The Closing Handshake
 
@@ -631,6 +633,11 @@ The core of the loop hands the same buffer to the Vulkan decoder, then GLESv1, t
 // Source: hardware/google/gfxstream/host/render_thread.cpp
 last = tInfo->m_vkInfo->m_vkDec.decode(readBuf.buf(), readBuf.validData(), ioStream, ...);
 ...
+last = tInfo->m_glInfo->m_glDec.decode(readBuf.buf(), readBuf.validData(), ioStream, &checksumCalc);
+if (last > 0) {
+    progress = true;
+    readBuf.consume(last);
+}
 last = tInfo->m_glInfo->m_gl2Dec.decode(readBuf.buf(), readBuf.validData(), ioStream, &checksumCalc);
 ...
 last = tInfo->m_rcDec.decode(readBuf.buf(), readBuf.validData(), ioStream, &checksumCalc);

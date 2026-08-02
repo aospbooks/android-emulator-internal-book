@@ -54,7 +54,10 @@ On ranchu the entire address layout is a single table in `external/qemu/hw/arm/r
 // Source: external/qemu/hw/arm/ranchu.c
 static const MemMapEntry memmap[] = {
     [RANCHU_FLASH]            = { 0,          0x8000000 },
+    [RANCHU_CPUPERIPHS]       = { 0x8000000,  0x20000 },
+    /* GIC distributor and CPU interfaces sit inside the CPU peripheral space */
     [RANCHU_GIC_DIST]         = { 0x8000000,  0x10000 },
+    [RANCHU_GIC_CPU]          = { 0x8010000,  0x10000 },
     [RANCHU_UART]             = { 0x9000000,  0x1000 },
     [RANCHU_GOLDFISH_FB]      = { 0x9010000,  0x100 },
     [RANCHU_GOLDFISH_BATTERY] = { 0x9020000,  0x1000 },
@@ -87,11 +90,11 @@ On x86 the goldfish addresses cannot live in the dynamic ranchu table because th
 #define GOLDFISH_RTC_IOMEM_BASE       0xff016000
 ```
 
-The same header also describes the `goldfish_address_space` PCI device — a memory-sharing device used by the graphics path — with vendor ID `0x607D`, device ID `0xF153`, on PCI slot 11 (`external/qemu/include/hw/acpi/goldfish_defs.h:64`). Notice that x86 has a `goldfish_rtc` and a `goldfish_rotary` that the ranchu table does not need, because ARM gets its real-time clock and wall-clock time from the ARM architected timer and a virtio path instead.
+The same header also describes the `goldfish_address_space` PCI device — a memory-sharing device used by the graphics path — with vendor ID `0x607D`, device ID `0xF153`, on PCI slot 11 (`external/qemu/include/hw/acpi/goldfish_defs.h:65`). Notice that x86 has a `goldfish_rtc` and a `goldfish_rotary` that the ranchu table does not need, because ARM gets its real-time clock and wall-clock time from the ARM architected timer and a virtio path instead.
 
 ### 6.2.3 Building the device tree
 
-On ARM the kernel learns the memory map from a flattened device tree (FDT) that QEMU builds at boot. `ranchu_init()` calls `create_fdt()` (`external/qemu/hw/arm/ranchu.c:143`), then each device-creation helper adds its own node. `create_simple_device()` adds one `reg` tuple and one `interrupts` entry plus a `compatible` string so the kernel can bind the matching driver (`external/qemu/hw/arm/ranchu.c:413`). For example, the pipe device is created with two NUL-separated compatible strings, `"google,android-pipe"` and `"generic,android-pipe"` (`external/qemu/hw/arm/ranchu.c:562`).
+On ARM the kernel learns the memory map from a flattened device tree (FDT) that QEMU builds at boot. `ranchu_init()` calls `create_fdt()` (`external/qemu/hw/arm/ranchu.c:515`), then each device-creation helper adds its own node. `create_simple_device()` adds one `reg` tuple and one `interrupts` entry plus a `compatible` string so the kernel can bind the matching driver (`external/qemu/hw/arm/ranchu.c:413`). For example, the pipe device is created with two NUL-separated compatible strings, `"google,android-pipe"` and `"generic,android-pipe"` (`external/qemu/hw/arm/ranchu.c:562`).
 
 The virtio transports are added in a deliberately reversed loop. `create_virtio_devices()` first instantiates all 32 transports in forward address order so command-line devices land at the lowest addresses, then walks them in reverse to emit the FDT nodes so the finished tree lists them lowest-address-first — the order the comment at `external/qemu/hw/arm/ranchu.c:440` documents.
 
@@ -128,15 +131,15 @@ Each goldfish device is a small block of registers. The guest driver writes a co
 
 ### 6.3.1 goldfish_battery
 
-The battery model lives in `external/qemu/hw/misc/goldfish_battery.c`. Its register map is an enum at the top of the file: `BATTERY_AC_ONLINE`, `BATTERY_STATUS`, `BATTERY_HEALTH`, `BATTERY_CAPACITY`, `BATTERY_VOLTAGE`, `BATTERY_TEMP`, and more (`external/qemu/hw/misc/goldfish_battery.c:22`). When the host UI changes the simulated charge level or AC state, the model updates these registers and asserts the interrupt; the guest's power supply driver reads them back and reports them up to the framework. A `BATTERY_INT_STATUS` register reports which fields changed and `BATTERY_INT_ENABLE` gates the interrupt.
+The battery model lives in `external/qemu/hw/misc/goldfish_battery.c`. Its register map is an enum at the top of the file: `BATTERY_AC_ONLINE`, `BATTERY_STATUS`, `BATTERY_HEALTH`, `BATTERY_CAPACITY`, `BATTERY_VOLTAGE`, `BATTERY_TEMP`, and more (`external/qemu/hw/misc/goldfish_battery.c:23`). When the host UI changes the simulated charge level or AC state, the model updates these registers and asserts the interrupt; the guest's power supply driver reads them back and reports them up to the framework. A `BATTERY_INT_STATUS` register reports which fields changed and `BATTERY_INT_ENABLE` gates the interrupt.
 
 ### 6.3.2 goldfish_events
 
-`external/qemu/hw/input/goldfish_events.c` is the legacy input device — it feeds keyboard, touchscreen, and button events into the guest as Linux `input_event` records. The QEMU type name is `"goldfish-events"` (`external/qemu/hw/input/goldfish_events.c:435`), and at realize time it registers itself with QEMU's input subsystem through `qemu_input_handler_register()` and `qemu_add_mouse_event_handler()` (`external/qemu/hw/input/goldfish_events.c:709`). It carries an Android-specific keycode table (`hw/input/android_keycodes.h`) and maps multitouch axes — the file defines `MTS_TOUCH_AXIS_RANGE_MAX`, `MTS_PRESSURE_RANGE_MAX`, and friends near the top. The board advertises it with compatible string `"google,goldfish-events-keypad"` (`external/qemu/hw/arm/ranchu.c:560`).
+`external/qemu/hw/input/goldfish_events.c` is the legacy input device — it feeds keyboard, touchscreen, and button events into the guest as Linux `input_event` records. The QEMU type name is `"goldfish-events"` (`external/qemu/hw/input/goldfish_events.c:435`), and at instance-init time (`goldfish_evdev_init`) it registers itself with QEMU's input subsystem through `qemu_input_handler_register()` and `qemu_add_mouse_event_handler()` (`external/qemu/hw/input/goldfish_events.c:709`). It carries an Android-specific keycode table (`hw/input/android_keycodes.h`) and maps multitouch axes — the file defines `MTS_TOUCH_AXIS_RANGE_MAX`, `MTS_PRESSURE_RANGE_MAX`, and friends near the top. The board advertises it with compatible string `"google,goldfish-events-keypad"` (`external/qemu/hw/arm/ranchu.c:560`).
 
-### 6.3.3 goldfish_rtc and goldfish_timer
+### 6.3.3 goldfish_rtc
 
-`external/qemu/hw/timer/goldfish_timer.c` actually defines two devices. The timer half exposes `TIMER_TIME_LOW`/`TIMER_TIME_HIGH` for reading the current nanosecond clock and `TIMER_ALARM_LOW`/`TIMER_ALARM_HIGH` plus `TIMER_IRQ_ENABLED` for scheduling alarm interrupts (`external/qemu/hw/timer/goldfish_timer.c:20`). The RTC half is registered under the type name `"goldfish_rtc"` (`external/qemu/hw/timer/goldfish_timer.c:51`) and provides the wall-clock time. The RTC has its own save/load versioning — `GOLDFISH_RTC_SAVE_VERSION` — so its state survives a snapshot. On x86 this device is instantiated at `GOLDFISH_RTC_IOMEM_BASE`; on ranchu the guest gets time from the ARM architected timer instead, which is why ranchu's memmap has no RTC entry.
+`external/qemu/hw/timer/goldfish_timer.c` defines one device, `goldfish_rtc`, which combines both timer and RTC functionality in a single set of MMIO registers. Its register enum exposes `TIMER_TIME_LOW`/`TIMER_TIME_HIGH` for reading the current nanosecond clock and `TIMER_ALARM_LOW`/`TIMER_ALARM_HIGH` plus `TIMER_IRQ_ENABLED` for scheduling alarm interrupts (`external/qemu/hw/timer/goldfish_timer.c:20`). The device is registered under the type name `"goldfish_rtc"` (`external/qemu/hw/timer/goldfish_timer.c:51`) and provides the wall-clock time. It has its own save/load versioning — `GOLDFISH_RTC_SAVE_VERSION` — so its state survives a snapshot. On x86 this device is instantiated at `GOLDFISH_RTC_IOMEM_BASE`; on ranchu the guest gets time from the ARM architected timer instead, which is why ranchu's memmap has no RTC entry.
 
 ### 6.3.4 goldfish_sync
 
@@ -171,7 +174,7 @@ The single most load-bearing piece of emulator hardware is the pipe. The guest o
 
 The device model is `external/qemu/hw/misc/goldfish_pipe.c`. Its register layout is a `PipeRegs` enum that must match the guest kernel driver byte-for-byte — the comment points at `drivers/platform/goldfish/goldfish_pipe*` in the goldfish kernel (`external/qemu/hw/misc/goldfish_pipe.c:88`). The guest issues commands from a `PipeCmd` enum: `PIPE_CMD_OPEN`, `PIPE_CMD_CLOSE`, `PIPE_CMD_POLL`, `PIPE_CMD_WRITE`, `PIPE_CMD_READ`, the `WAKE_ON_*` variants, and the DMA commands `PIPE_CMD_DMA_MAPHOST`/`PIPE_CMD_DMA_UNMAPHOST` (`external/qemu/hw/misc/goldfish_pipe.c:126`). The device is at protocol version 2 and accepts driver versions up to 4 (`external/qemu/hw/misc/goldfish_pipe.c:149`).
 
-When the guest writes a `PIPE_CMD_READ` or `PIPE_CMD_WRITE`, the device translates the guest physical address into a host pointer with `map_guest_buffer()` (`external/qemu/hw/misc/goldfish_pipe.c:629`) and hands the buffer to the host service. The device raises and lowers its interrupt with `qemu_set_irq(dev->ps->irq, ...)` as host data becomes available or is consumed (`external/qemu/hw/misc/goldfish_pipe.c:479` and `:703`).
+When the guest writes a `PIPE_CMD_READ` or `PIPE_CMD_WRITE`, the device translates the guest physical address into a host pointer with `map_guest_buffer()` (`external/qemu/hw/misc/goldfish_pipe.c:629`) and hands the buffer to the host service. The device raises its interrupt with `qemu_set_irq(dev->ps->irq, ...)` as host data becomes available (`external/qemu/hw/misc/goldfish_pipe.c:479`) and lowers it during normal read handling once the wanted-pipe list is exhausted (`external/qemu/hw/misc/goldfish_pipe.c:1345` and `:1365`).
 
 ### 6.4.2 The service-ops indirection
 
@@ -193,7 +196,7 @@ The roster of pipe services is installed in `android_emulation_setup()` in `exte
 - `android_init_opengles_pipe()` — the GLES/Vulkan command stream (`qemu-setup.cpp:431`). Its receive mode is set to virtio-gpu, android, or fuchsia depending on feature flags (`qemu-setup.cpp:433`).
 - `android_init_clipboard_pipe()` and `android_init_logcat_pipe()` — clipboard sync and log streaming (`qemu-setup.cpp:441`).
 - `android_init_multi_display_pipe()`, `android_init_qemu_misc_pipe()`, and the fake-camera sensor pipe (`qemu-setup.cpp:460`).
-- The adb service, registered through `android_adb_service_init()` under the name `"qemud:adb"` — the `AdbGuestPipe::Service` constructor passes exactly that string to its base (`external/qemu/android/android-emu/android/emulation/AdbGuestPipe.h:90`).
+- The adb pipe service is registered through `android_adb_service_init()` under the name `"qemud:adb"` (the `AdbGuestPipe::Service` constructor passes exactly that string to its base — `external/qemu/android/android-emu/android/emulation/AdbGuestPipe.h:90`), but this call is made from `setup_console_and_adb_ports()` at `qemu-setup.cpp:343`, inside `android_ports_setup()`, not from `android_emulation_setup()`.
 
 ### Diagram: opening a named pipe service end to end
 
@@ -282,13 +285,13 @@ flowchart TB
         GPIPE["goldfish_pipe"]
         VVSOCK["virtio-vsock"]
     end
-    GUESTADBD["Guest adbd<br/>(vsock port 5555)"]
+    GUESTADBD["Guest adbd"]
     HOSTADB --> PIPE
     HOSTADB --> VSOCK
     PIPE --> GPIPE
     VSOCK --> VVSOCK
     GPIPE --> GUESTADBD
-    VVSOCK --> GUESTADBD
+    VVSOCK -->|"vsock port 5555"| GUESTADBD
 ```
 
 ## 6.7 Sharing virtio with crosvm and Cuttlefish
@@ -305,12 +308,12 @@ The practical consequence: a guest GL or Vulkan command stream is rendered by id
 
 ```mermaid
 flowchart TB
-    subgraph RENDER["Shared host renderer"]
+    subgraph RENDER["Shared host renderer (gfxstream)"]
+        QFRONT["virtio_gpu_frontend.cpp"]
         GFX["libgfxstream_backend<br/>stream_renderer_* API"]
     end
     subgraph QEMU["Android Emulator (QEMU)"]
         QGPU["virtio-gpu-3d.c"]
-        QFRONT["virtio_gpu_frontend.cpp"]
     end
     subgraph CROSVM["Cuttlefish (crosvm)"]
         RUT["rutabaga gpu"]
@@ -322,7 +325,7 @@ flowchart TB
 
 ## 6.8 The goldfish_address_space PCI Device
 
-One device bridges the goldfish and virtio worlds: `goldfish_address_space`, defined in `external/qemu/hw/pci/goldfish_address_space.c`. Unlike the other goldfish devices it is a true PCI device (vendor `0x607D`, device `0xF153`, slot 11 — see `external/qemu/include/hw/acpi/goldfish_defs.h:64`). Its job is to hand the guest large, host-shared memory regions on demand — used by the graphics pipeline to give the guest direct windows into host-allocated buffers instead of copying through the pipe.
+One device bridges the goldfish and virtio worlds: `goldfish_address_space`, defined in `external/qemu/hw/pci/goldfish_address_space.c`. Unlike the other goldfish devices it is a true PCI device (vendor `0x607D`, device `0xF153`, slot 11 — see `external/qemu/include/hw/acpi/goldfish_defs.h:65`). Its job is to hand the guest large, host-shared memory regions on demand — used by the graphics pipeline to give the guest direct windows into host-allocated buffers instead of copying through the pipe.
 
 Like the pipe, it works through a service-ops indirection. The device defines a default `goldfish_address_space_null_ops` and exposes `goldfish_address_space_set_service_ops()` so the host graphics layer can install real save/load and allocation callbacks (`external/qemu/hw/pci/goldfish_address_space.c`). Its area BAR is sized at 16 GB on most hosts but trimmed on Apple Silicon, which exposes only 36 bits of physical address space (`external/qemu/include/hw/acpi/goldfish_defs.h:78`). This device is the reason the x86 memory map reserves a PCI slot specifically for goldfish, and it is the host-shared-memory substrate underneath the GLES/Vulkan fast path.
 

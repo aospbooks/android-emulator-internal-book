@@ -55,12 +55,14 @@ flowchart TB
         EVT["goldfish-events"]
         PIPE["goldfish_pipe"]
         SYNC["goldfish_sync"]
+        DT["device tree<br/>(compatible strings)"]
         RANCHU --> FB
         RANCHU --> AUD
         RANCHU --> BAT
         RANCHU --> EVT
         RANCHU --> PIPE
         RANCHU --> SYNC
+        RANCHU --> DT
     end
     subgraph GUEST["Guest Android (system image)"]
         KERN["Goldfish kernel drivers"]
@@ -69,7 +71,7 @@ flowchart TB
         KERN --> NODES
         NODES --> HAL
     end
-    RANCHU -->|"device tree (compatible strings)"| KERN
+    DT --> KERN
     FB -.MMIO + IRQ.-> KERN
     PIPE -.MMIO + IRQ.-> KERN
 ```
@@ -83,17 +85,22 @@ Before any HAL runs, the emulator has to assemble a disk for the guest. The cano
 ```c
 // Source: external/qemu/android/emu/avd/include/android/avd/info.h
 #define  AVD_IMAGE_LIST \
+    _AVD_IMG(KERNEL,"kernel-qemu","kernel") \
     _AVD_IMG(KERNELRANCHU,"kernel-ranchu","kernel") \
+    _AVD_IMG(KERNELRANCHU64,"kernel-ranchu-64","kernel") \
     _AVD_IMG(RAMDISK,"ramdisk.img","ramdisk") \
+    _AVD_IMG(USERRAMDISK,"ramdisk-qemu.img","user ramdisk") \
     _AVD_IMG(INITSYSTEM,"system.img","init system") \
     _AVD_IMG(INITVENDOR,"vendor.img","init vendor") \
     _AVD_IMG(INITDATA,"userdata.img","init data") \
+    _AVD_IMG(INITZIP,"data","init data zip") \
     _AVD_IMG(USERSYSTEM,"system-qemu.img","user system") \
     _AVD_IMG(USERVENDOR,"vendor-qemu.img","user vendor") \
     _AVD_IMG(USERDATA,"userdata-qemu.img", "user data") \
     _AVD_IMG(CACHE,"cache.img","cache") \
     _AVD_IMG(SDCARD,"sdcard.img","SD Card") \
     _AVD_IMG(ENCRYPTIONKEY,"encryptionkey.img","Encryption Key") \
+    _AVD_IMG(SNAPSHOTS,"snapshots.img","snapshots") \
     _AVD_IMG(VERIFIEDBOOTPARAMS, "VerifiedBootParams.textproto","Verified Boot Parameters") \
 ```
 
@@ -117,7 +124,7 @@ The formats are ordinary Android partition formats: the system and vendor partit
 Partition derivation across boots
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph SDK["SDK system-image package (read-only)"]
         IS["system.img"]
         IV["vendor.img"]
@@ -267,7 +274,7 @@ The service is launched by init from `hwc3.rc` as `vendor.hwcomposer-3 /vendor/b
 - **HostFrameComposer** offloads composition to the host GPU. `HostFrameComposer.cpp` builds a `ComposeDevice` describing the layers and calls render-control entry points such as `rcCreateDisplayById`, `rcSetDisplayPoseDpi`, and the compose calls on `rcEnc` — exactly the same `HostConnection`/`rcEnc` channel gralloc uses.
 - **GuestFrameComposer** and **ClientFrameComposer** fall back to CPU composition inside the guest when host composition is unavailable.
 
-Display detection and modes go through DRM (`DrmClient`, `DrmConnector`, `DrmCrtc`, `DrmMode` in the same directory), because the modern guest kernel exposes the goldfish framebuffer as a virtio-gpu/DRM device. The composer's vsync is driven by a `VsyncThread`, and presentation fences are coordinated through the goldfish sync device (Section 24.6).
+Display detection and modes go through DRM (`DrmClient`, `DrmConnector`, `DrmCrtc`, `DrmMode` in the same directory); the DrmClient opens a separate virtio-gpu DRM device via `OpenVirtioGpuDrmFd()` rather than the legacy goldfish_fb MMIO device. The composer's vsync is driven by a `VsyncThread`, and presentation fences are coordinated through the goldfish sync device (Section 24.6).
 
 Graphics HAL color-buffer flow
 
@@ -318,9 +325,9 @@ The conversation is symmetric and trivial for the guest HAL:
 
 1. On startup the HAL sends `list-sensors` and gets back a bitmap of which sensors this AVD has (`hw-sensors.cpp` handles the 12-byte `list-sensors` message near line 480).
 2. The HAL enables sensors it wants with `set:accelerometer:1`, and sets the polling interval with `set-delay:<ms>`.
-3. The host then pushes `acceleration:x:y:z` and friends on a timer (default 200ms), so the HAL just reads lines and forwards them to the framework.
+3. The host then pushes `acceleration:x:y:z` and friends on a timer (default 800ms), so the HAL just reads lines and forwards them to the framework.
 
-There is one piece of cleverness: a `wake` command. The host sends `wake` straight back to the HAL whenever it needs to unblock a blocking read on the HAL's read thread, so the HAL can stay a simple read-loop without condition variables. The connect callback marks the client as framed (`qemud_client_set_framing(client, 1)`), so the multiplexer prepends a length to each message and the HAL reads whole lines atomically.
+There is one piece of cleverness: a `wake` command. The HAL sends `wake` to the host whenever it needs to unblock its own blocking read thread; the host immediately echoes `wake` back. This ping-pong lets the HAL stay a simple read-loop without condition variables. The connect callback marks the client as framed (`qemud_client_set_framing(client, 1)`), so the multiplexer prepends a length to each message and the HAL reads whole lines atomically.
 
 The values the host streams come from the UI's virtual sensor controls, the accelerometer model, recorded sensor sessions (`android/sensor_replay/`), or mock providers — but the HAL neither knows nor cares where they originated.
 
@@ -372,29 +379,27 @@ Direct-MMIO HAL data paths
 
 ```mermaid
 flowchart TB
-    subgraph GUEST["Guest kernel + HAL"]
-        IDRV["evdev driver"]
-        ADRV["audio driver"]
-        BDRV["power-supply driver"]
-        SDRV["sync driver"]
-    end
     subgraph HOST["Emulator host"]
+        UIIN["ui/input layer"]
         GEV["goldfish_events"]
         GAU["goldfish_audio"]
-        GBA["goldfish_battery"]
-        GSY["goldfish_sync"]
-        UIIN["ui/input layer"]
         AUOUT["host audio backend"]
         BATUI["battery / power UI"]
+        GBA["goldfish_battery"]
         GPU["host GPU fences"]
+        GSY["goldfish_sync"]
+        UIIN --> GEV
+        GAU --> AUOUT
+        BATUI --> GBA
+        GPU --> GSY
     end
-    UIIN --> GEV
+    IDRV["evdev driver (guest)"]
+    ADRV["audio driver (guest)"]
+    BDRV["power-supply driver (guest)"]
+    SDRV["sync driver (guest)"]
     GEV -->|"MMIO + IRQ"| IDRV
     ADRV -->|"MMIO buffers"| GAU
-    GAU --> AUOUT
-    BATUI --> GBA
     GBA -->|"MMIO + IRQ"| BDRV
-    GPU --> GSY
     GSY -->|"signal timeline"| SDRV
 ```
 
@@ -444,11 +449,11 @@ if (goldfish_address_space_ping(mHandle, &pingInfo) == false) {
 }
 ```
 
-Because the region is shared host/guest memory, the guest never copies frame data across a pipe: it writes the compressed input into the mapped region, pings `DecodeImage`, and reads decoded YUV (or a host color-buffer handle) back from the same region after `GetImage`. The implementation (`goldfish_media_utils.cpp`) subdivides the ~32 MB shared region into 32 base lots of 2 MB each, handed out by `getMemorySlot` / `returnMemorySlot` so multiple decoder instances can share the region; a single decoder can grab a larger contiguous span (the slot search assigns 32M, 16M, 8M, 4M, 2M, or 1M depending on concurrency).
+Because the region is shared host/guest memory, the guest never copies frame data across a pipe: it writes the compressed input into the mapped region, pings `DecodeImage`, and reads decoded YUV (or a host color-buffer handle) back from the same region after `GetImage`. The implementation (`goldfish_media_utils.cpp`) subdivides the ~32 MB shared region into 32 base lots of 1 MB each, handed out by `getMemorySlot` / `returnMemorySlot` so multiple decoder instances can share the region; a single decoder can grab a larger contiguous span (the slot search assigns 32M, 16M, 8M, 4M, 2M, or 1M depending on concurrency).
 
 ### 24.7.3 The address-space device
 
-The transport underneath both the codecs and the DMA-capable gralloc path is `external/qemu/hw/pci/goldfish_address_space.c`, a PCI device that hands out host-physical memory the guest can map directly. It is a pluggable dispatcher: host subsystems register `GoldfishAddressSpaceOps` and claim a *subdevice type* (the media transport above uses the `Media` subdevice), so a single device multiplexes graphics DMA, media, and other zero-copy consumers:
+The transport underneath both the codecs and the DMA-capable gralloc path is `external/qemu/hw/pci/goldfish_address_space.c`, a PCI device that hands out host-physical memory the guest can map directly. `GoldfishAddressSpaceOps` carries only snapshot load/save hooks: the `load` and `save` callbacks that `goldfish_address_space_set_service_ops` installs. Subdevice-type multiplexing — Graphics, Media, and other zero-copy consumers — is handled at the host-common address-space layer, where the `ping` metadata field selects which context handles each connection:
 
 ```c
 // Source: external/qemu/hw/pci/goldfish_address_space.c
