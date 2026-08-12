@@ -142,7 +142,7 @@ Build system → QEMU machine & CPU acceleration → virtual hardware → androi
 
 ## Mermaid Diagrams
 
-Place a descriptive heading before every mermaid block — it helps readers navigate and becomes the figure caption if you ever generate PDF.
+Caption every mermaid block with an italic line directly after its closing fence: `*Figure N-M: Description*`, where N is the chapter number and M is the diagram's 1-based position within the chapter. Do not put `### Diagram:` or `#### Figure` headings above diagrams — the caption below is the only label. When inserting or removing a diagram, renumber the later captions in that chapter.
 
 For syntax rules (quoting, special characters, parse errors), read `references/mermaid-syntax.md`. The short version: quote any node label containing `()`, `<br/>`, or `|`.
 
@@ -205,7 +205,7 @@ Services are started in four phases:
 | `## 5.1 Title` in chapter 5 | `## 3.1 Title` (wrong chapter) | Readers use the number to locate content |
 | `# Chapter 5: Title` | `# Chapter 5 -- Title` or `# Chapter 5 — Title` | Pick `:`, stick with it (em-dash creeps in from autocomplete) |
 | Summary as the last `##` section | Any section after `## Summary` | Readers stop at Summary; trailing sections get lost |
-| Heading before each mermaid block | Two mermaid blocks in a row | Each diagram needs its own context |
+| `*Figure N-M: Description*` after each mermaid block | `### Diagram:` heading above the block, or no caption | Captions sit under the figure; headings above clutter the TOC |
 | ` ```go ` for `.go` files | ` ```java ` for Go code | Wrong syntax highlighting, misleads readers |
 | `NODE["text(stuff)"]` | `NODE[text(stuff)]` | Unquoted parens break Mermaid parser |
 | `Idle --> Running : start` | `Idle --> Running : start()` | Parens in stateDiagram-v2 transition labels are a hard parse error — strip them, don't quote |

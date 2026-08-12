@@ -31,8 +31,6 @@ struct QFrameBuffer {
 
 A `QFrameBuffer` is shared between exactly one *producer* (which updates the pixels from emulated VRAM) and one or more *clients* (which display them). The producer signals work with `qframebuffer_update()` / `qframebuffer_rotate()`; clients react through their `fb_update` / `fb_rotate` callbacks. This is the seam that lets the same hardware emulation feed an SDL window, a Qt window, or a screen recorder without recompiling.
 
-### Diagram: The single-display frame path
-
 ```mermaid
 flowchart LR
     HW["Guest HW<br/>framebuffer"] -->|"graphic_hw_update()"| DS["DisplayState<br/>+ DisplaySurface"]
@@ -43,6 +41,8 @@ flowchart LR
     GUI -->|"emulator_window_refresh /<br/>qframebuffer_check_updates()"| PC["producer check<br/>callback"]
     PC -->|"graphic_hw_update(NULL)"| HW
 ```
+
+*Figure 17-1: The single-display frame path*
 
 The glue that wires QEMU's listener model to the `QFrameBuffer` lives in `external/qemu/android-qemu2-glue/display.cpp`. Its top comment captures the whole relationship in one line: `DisplayState <--> QFrameBuffer <--> QEmulator/SDL`.
 
@@ -123,8 +123,6 @@ When a feature needs to grow or shrink the host window — adding a secondary di
 
 The Qt implementations of these hooks live in `external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/window-agent-impl.cpp`; each forwards to `EmulatorQtWindow` (often via `runOnUiThread`, because UI mutation must happen on the Qt thread).
 
-### Diagram: Skin, layout, and the window agent
-
 ```mermaid
 flowchart TB
     SKIN["Skin file<br/>(SkinFile / SkinLayout)"] --> LAYOUT["Active SkinLayout<br/>size + orientation"]
@@ -134,6 +132,8 @@ flowchart TB
     WA --> QT["EmulatorQtWindow<br/>(Qt UI thread)"]
     QT --> WIN["Host OS window(s)"]
 ```
+
+*Figure 17-2: Skin, layout, and the window agent*
 
 ## 17.4 MultiDisplay: The Coordinator
 
@@ -174,8 +174,6 @@ Display 0 is the primary Android display. Ids 1–3 are user-configurable second
 
 `MultiDisplay` is also an `EventNotificationSupport<DisplayChangeEvent>`: every mutation (`createDisplay`, `setDisplayPose`, `destroyDisplay`, `notifyDisplayChanges`) fires a `DisplayChangeEvent` with one of `DisplayAdded`, `DisplayRemoved`, `DisplayChanged`, or `DisplayTransactionCompleted` so that the UI and gRPC subscribers can react.
 
-### Diagram: MultiDisplay state and its event fan-out
-
 ```mermaid
 flowchart LR
     subgraph MDS["MultiDisplay singleton"]
@@ -188,6 +186,8 @@ flowchart LR
     EV --> SUBB["gRPC notification<br/>stream"]
     EV --> SUBC["screen recorder"]
 ```
+
+*Figure 17-3: MultiDisplay state and its event fan-out*
 
 ## 17.5 The Multi-Display Agent: One Singleton, Many Callers
 
@@ -228,8 +228,6 @@ The implementation in `external/qemu/android-qemu2-glue/qemu-multi-display-agent
 
 The singleton itself is constructed by `android_init_multi_display()` (bottom of `MultiDisplay.cpp`), called from `external/qemu/android-qemu2-glue/main.cpp` with the window, record, and VM agents wired in. The host renderer also receives this agent: `android_startOpenglesRenderer()` in `hardware/google/aemu/host-common/include/host-common/opengles.h` takes a `const QAndroidMultiDisplayAgent*` so gfxstream can query and update display geometry as it composes color buffers.
 
-### Diagram: who calls the multi-display agent
-
 ```mermaid
 flowchart TB
     GRPC["gRPC EmulatorService"] --> AG["QAndroidMultiDisplayAgent<br/>(C function pointers)"]
@@ -238,6 +236,8 @@ flowchart TB
     GFX["gfxstream renderer"] --> AG
     AG -->|"MultiDisplay::getInstance()"| MD["MultiDisplay<br/>(C++ singleton)"]
 ```
+
+*Figure 17-4: Who calls the multi-display agent*
 
 ## 17.6 Adding a Display: setMultiDisplay End to End
 
@@ -259,8 +259,6 @@ if (rotation != SKIN_ROTATION_0) {
 
 From there the path forks on whether *hot-plug* display is enabled (Minigbm feature plus `-hotplug-multi-display` or the `hw.hotplug_multi_display` config). With hot-plug, the work is delegated directly to the VM operations agent (`mVmAgent->setDisplay(id, w, h, dpi)` to add, or zeros to remove). Without hot-plug, the classic path runs: `createDisplay()` reserves the id, `setDisplayPose()` records geometry, the multidisplay guest service is (re)started over adb, and the change is pushed to the guest through `MultiDisplayPipe`.
 
-### Diagram: setMultiDisplay decision flow
-
 ```mermaid
 flowchart TB
     START["setMultiDisplay(id, ...)"] --> GATE{"feature on,<br/>not folded,<br/>not resizable?"}
@@ -275,6 +273,8 @@ flowchart TB
     CR --> PIPE["MultiDisplayPipe.send(ADD)"]
     DEL --> PIPE2["MultiDisplayPipe.send(DEL)"]
 ```
+
+*Figure 17-5: SetMultiDisplay decision flow*
 
 ### 17.6.1 Parameter validation
 
@@ -308,8 +308,6 @@ const uint8_t MultiDisplayPipe::MAX_DISPLAYS = 10;
 
 The flow is bidirectional. When the guest service starts it sends `QUERY`; the host replies with one `ADD` message per host-configured display (skipping ids ≥ `s_displayIdInternalBegin`, which the guest created itself). When the guest later allocates a host color buffer for a display, it sends `BIND` carrying the display id and color buffer id, and the host records the mapping with `setDisplayColorBuffer()`. The guest service is launched over adb by `startDisplayPipe()`, which broadcasts an intent to `com.android.emulator.multidisplay/.MultiDisplayServiceReceiver` (with a flavor- and API-dependent `--user 0`). The pipe also participates in snapshots: `onSave`/`onLoad` delegate to `MultiDisplay::onSave`/`onLoad`, which serialize the entire display map big-endian.
 
-### Diagram: host and guest multidisplay handshake
-
 ```mermaid
 sequenceDiagram
     participant Host as MultiDisplay host
@@ -324,6 +322,8 @@ sequenceDiagram
     Host->>Pipe: ADD or DEL on later changes
     Pipe->>Guest: ADD or DEL id,...
 ```
+
+*Figure 17-6: Host and guest multidisplay handshake*
 
 The link between a guest-allocated color buffer and a host display is what lets the renderer post the right pixels to the right panel. `getColorBufferDisplay()` and `getDisplayColorBuffer()` translate between the two; the host renderer's `OnPostFunc` callback (declared in `opengles.h`) carries a `displayId` precisely so each composed frame can be routed to its display's window region.
 
@@ -353,8 +353,6 @@ if ((*x - pos_x) < w && (*y - pos_y) < h) {
 }
 ```
 
-### Diagram: rotation state and combined-size recompute
-
 ```mermaid
 stateDiagram-v2
     [*] --> R0
@@ -369,6 +367,8 @@ stateDiagram-v2
     Recompute --> Resize : setUIDisplayRegion
     Resize --> [*]
 ```
+
+*Figure 17-7: Rotation state and combined-size recompute*
 
 The end-user rotate path starts in the telnet console: `do_rotate_90_clockwise()` in `external/qemu/android/android-emu/android/console.cpp` calls the emulator agent's `rotate90Clockwise()` (and explicitly refuses for XR devices). That changes the active `SkinLayout`, whose new `orientation` is then read back by `MultiDisplay` on the next pose update.
 
@@ -416,8 +416,6 @@ if (android_foldable_is_folded() && second_display_exists) {
 
 Input translation for pixel fold is correspondingly simple: when folded (and not driving a remote gRPC UI), `translateCoordination()` routes events to display id 6; otherwise to the primary display 0. A separate class of foldable, the *folded-area* device, is configured through `hw.displayRegion.0.N.*` sub-regions rather than separate displays; when any folded area is configured, `setMultiDisplay()` and `loadConfig()` bail out early, because the two mechanisms are not compatible. Resizable AVDs (phone / unfolded / tablet presets, enum in `external/qemu/android/android-emu/android/emulation/resizable_display_config.h`) likewise disable secondary-display creation.
 
-### Diagram: pixel-fold display selection
-
 ```mermaid
 flowchart TB
     EV["Host input / frame"] --> PF{"pixel fold?"}
@@ -426,6 +424,8 @@ flowchart TB
     FOLD -->|"yes"| D6["secondary display 6<br/>(outer panel)"]
     FOLD -->|"no"| D0["primary display 0<br/>(inner panel)"]
 ```
+
+*Figure 17-8: Pixel-fold display selection*
 
 ## 17.11 The Control Surfaces: gRPC and the Displays Page
 

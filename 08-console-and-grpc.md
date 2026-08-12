@@ -49,8 +49,6 @@ That is why the first emulator answers on console port 5554 and ADB 5555, the se
 
 The diagram below shows the two control surfaces and how they converge on the agent layer that talks to QEMU and the guest.
 
-#### Figure 8-1: Console and gRPC converging on the shared agent layer
-
 ```mermaid
 flowchart TB
     subgraph CLIENTS["External clients"]
@@ -78,6 +76,8 @@ flowchart TB
     AGENTS --> QEMU
     QEMU --> GUEST
 ```
+
+*Figure 8-1: Console and gRPC converging on the shared agent layer*
 
 ---
 
@@ -185,8 +185,6 @@ The `kill` command (`do_kill`) is the bluntest: it stops any active screen recor
 
 The diagram traces a single line of console input from socket bytes to an agent call.
 
-#### Figure 8-2: Console line dispatch and sub-command recursion
-
 ```mermaid
 flowchart TB
     READ["control_client_read<br/>(LoopIo callback)"]
@@ -206,6 +204,8 @@ flowchart TB
     HASH -->|no| SUB --> FIND
     HASH -->|yes| CALL --> OK
 ```
+
+*Figure 8-2: Console line dispatch and sub-command recursion*
 
 ---
 
@@ -278,8 +278,6 @@ client->commands = main_commands;
 
 The diagram below shows the state of a console client across the authentication boundary.
 
-#### Figure 8-3: Console authentication state machine
-
 ```mermaid
 stateDiagram-v2
     [*] --> Connected
@@ -291,6 +289,8 @@ stateDiagram-v2
     PreAuth --> PreAuth : auth token mismatch, write KO
     FullAccess --> [*] : quit or kill
 ```
+
+*Figure 8-3: Console authentication state machine*
 
 ---
 
@@ -376,8 +376,6 @@ Status getStatus(ServerContext* context, const Empty* request,
 
 The `EmulatorStatus` message carries `booted`, `uptime`, a `heartbeat` counter, the `VmConfiguration`, and `guestConfig`/`platformConfig` string maps. Studio polls this to decide when an embedded device is ready and to display device metadata.
 
-#### Figure 8-4: A unary gRPC call from client to agent and back
-
 ```mermaid
 sequenceDiagram
     participant C as gRPC client
@@ -394,6 +392,8 @@ sequenceDiagram
     I-->>S: Status::OK
     S-->>C: BatteryState reply
 ```
+
+*Figure 8-4: A unary gRPC call from client to agent and back*
 
 ---
 
@@ -449,8 +449,6 @@ The interceptor creators installed here cross-cut every RPC. There are four, all
 
 These run for every method on every registered service, so logging, metrics, and idle-shutdown are uniform across the API.
 
-#### Figure 8-5: gRPC server assembly in Builder::build
-
 ```mermaid
 flowchart TB
     SVC["Service factories<br/>(emulator, snapshot, adb, ...)"]
@@ -471,6 +469,8 @@ flowchart TB
     TLS --> AUTH
     AUTH --> REG --> INT --> START
 ```
+
+*Figure 8-5: GRPC server assembly in Builder::build*
 
 ---
 
@@ -562,8 +562,6 @@ builder.withJwtAuthDiscoveryDir(jwkDir, jwkLoadedFile);
 
 `JwtTokenAuth` (backed by Tink and a `JwkDirectoryObserver`) loads any `.jwk` public key dropped into that directory. A client that wants access generates a keypair, drops the public JWK in the directory, and signs short-lived JWTs whose `iss` is on the allow list and whose `exp` is unexpired. This lets a trusted local process mint its own credentials without the emulator ever handing out a long-lived secret.
 
-#### Figure 8-6: gRPC request authorization decision
-
 ```mermaid
 flowchart TB
     REQ["Incoming RPC with :path"]
@@ -588,6 +586,8 @@ flowchart TB
     VALID -->|yes| OKAUTH
 ```
 
+*Figure 8-6: GRPC request authorization decision*
+
 ---
 
 ## 8.8 Discovery: How Clients Find a Running Emulator
@@ -610,8 +610,6 @@ The discovery directory resolves under the user's local config root via `ConfigD
 
 This is the missing link between the two control planes: a console client that has authenticated can run `avd grpc` to print the live gRPC port, and any client can instead read `grpc.port` and `grpc.token` straight from the discovery file. That is exactly how Android Studio attaches to an embedded emulator — read the file, dial the gRPC port, present the bearer token.
 
-#### Figure 8-7: Discovery file as the rendezvous between emulator and clients
-
 ```mermaid
 flowchart LR
     subgraph EMU["Emulator process"]
@@ -630,6 +628,8 @@ flowchart LR
     STUDIO -->|"dial grpc.port + token"| EMU
     SCRIPT -->|"dial grpc.port + token"| EMU
 ```
+
+*Figure 8-7: Discovery file as the rendezvous between emulator and clients*
 
 ---
 

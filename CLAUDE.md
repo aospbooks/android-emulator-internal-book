@@ -30,7 +30,7 @@ docker compose up -d serve         # http://localhost:8001
 2. Section numbers: manual `## N.1`, `### N.1.2` matching filename
 3. No duplicate section numbers within a chapter (watch for this when inserting new sections)
 4. Mermaid: quote labels with `()`, `<br/>`, `|`; no `<br/>` in `participant` lines; **no parens in `stateDiagram-v2` transition labels** (`State1 --> State2 : foo()` breaks parsing — drop the parens)
-5. Descriptive heading before each mermaid block
+5. Every mermaid block gets an italic caption on the line after its closing fence: `*Figure N-M: Description*` (N = chapter number, M = 1-based diagram index within the chapter). No `### Diagram:`/`#### Figure` headings above diagrams
 6. Source refs: real emulator paths with line numbers, repo-relative (see Privacy & Path Rules)
 7. The body of every chapter ends with "Try It" then "Summary" — nothing else comes after Summary, **except** an optional final "Key Source Files" table, which may sit after Summary as a final reference.
 8. **Do not add epigraph blockquotes at the top of chapters.** The chapter goes straight into its introductory paragraph after the title.

@@ -21,8 +21,6 @@ The two families differ in how much the guest has to know in advance:
 
 virtio is the modern standard, so why keep goldfish at all? Because several emulator features have no clean virtio equivalent and predate the virtio versions that do exist. The `goldfish_pipe` transport (Section 6.4) carries the GLES/Vulkan command stream, adb, and sensor data through a custom fast path that the host services were built around years before virtio-gpu and virtio-vsock matured. `goldfish_sync` (Section 6.3.4) implements host-driven fence timelines for graphics that map awkwardly onto virtio. Rather than rewrite the entire host stack, the emulator keeps the goldfish devices for these legacy paths and uses virtio for the commodity devices (disk, net, sound) where the standard fits cleanly. The `goldfish_pipe.c` source even flags this tension in an "Open Questions" comment, noting that the pipes could in principle be rewritten on top of virtio (`external/qemu/hw/misc/goldfish_pipe.c:24`).
 
-### Diagram: the two device families seen by the Android guest
-
 ```mermaid
 flowchart TB
     subgraph GUEST["Android guest kernel"]
@@ -41,6 +39,8 @@ flowchart TB
     GMMIO --> SVC
     VTRANS --> SVC
 ```
+
+*Figure 6-1: The two device families seen by the Android guest*
 
 ## 6.2 The Memory Map and Device Tree
 
@@ -109,8 +109,6 @@ for (i = 0; i < NUM_VIRTIO_TRANSPORTS; i++) {
 
 There is a second, separate device tree blob used at the Android level. `external/qemu/android-qemu2-glue/dtb.cpp` builds a tiny DTB describing the Android `fstab` — a `/firmware/android/fstab/vendor` node with `compatible = "android,vendor"`, the vendor partition device path, `type = "ext4"`, and mount flags `"noatime,ro,errors=panic"` (`external/qemu/android-qemu2-glue/dtb.cpp:46`). This is how the first-stage init knows where to find and how to mount the vendor image; it is generated per-AVD by `createDtbFile()`.
 
-### Diagram: how the guest discovers devices at boot
-
 ```mermaid
 sequenceDiagram
     participant QEMU as QEMU board init
@@ -124,6 +122,8 @@ sequenceDiagram
     Drv->>Drv: map MMIO window at reg base
     Drv->>QEMU: probe (read magic / version register)
 ```
+
+*Figure 6-2: How the guest discovers devices at boot*
 
 ## 6.3 The Goldfish Legacy Devices
 
@@ -149,8 +149,6 @@ The battery model lives in `external/qemu/hw/misc/goldfish_battery.c`. Its regis
 
 The pipe device is important enough to get its own section — see Section 6.4. Briefly, it is the goldfish device at `0xa010000` on ranchu and `0xff001000` on x86 that multiplexes dozens of host services (graphics, adb, sensors, clipboard) over a single MMIO window.
 
-### Diagram: a goldfish device register transaction
-
 ```mermaid
 sequenceDiagram
     participant Drv as Guest driver
@@ -165,6 +163,8 @@ sequenceDiagram
     Model->>Drv: return changed-field mask
     Drv->>MMIO: read data registers (capacity, voltage)
 ```
+
+*Figure 6-3: A goldfish device register transaction*
 
 ## 6.4 The qemu_pipe Transport
 
@@ -198,8 +198,6 @@ The roster of pipe services is installed in `android_emulation_setup()` in `exte
 - `android_init_multi_display_pipe()`, `android_init_qemu_misc_pipe()`, and the fake-camera sensor pipe (`qemu-setup.cpp:460`).
 - The adb pipe service is registered through `android_adb_service_init()` under the name `"qemud:adb"` (the `AdbGuestPipe::Service` constructor passes exactly that string to its base — `external/qemu/android/android-emu/android/emulation/AdbGuestPipe.h:90`), but this call is made from `setup_console_and_adb_ports()` at `qemu-setup.cpp:343`, inside `android_ports_setup()`, not from `android_emulation_setup()`.
 
-### Diagram: opening a named pipe service end to end
-
 ```mermaid
 sequenceDiagram
     participant G as Guest process
@@ -219,6 +217,8 @@ sequenceDiagram
     Conn->>Svc: findServiceByName + create
     Svc->>G: pipe now bound to service
 ```
+
+*Figure 6-4: Opening a named pipe service end to end*
 
 ## 6.5 The virtio Devices
 
@@ -240,8 +240,6 @@ The block device, `external/qemu/hw/block/virtio-blk.c`, backs the guest's `/sys
 
 `external/qemu/hw/input/virtio-input.c` and its HID companion `virtio-input-hid.c` are the modern replacement for goldfish_events — they present standard `evdev` devices to the guest. `external/qemu/hw/audio/virtio-snd.c` is the virtio sound device, the modern counterpart to goldfish_audio. It implements the full virtio-sound control protocol: a union of request structures including `virtio_snd_query_info`, `virtio_snd_pcm_set_params`, and `virtio_snd_pcm_hdr` (`external/qemu/hw/audio/virtio-snd.c:73`), plus static tables describing the jacks, PCM streams, and channel maps it advertises (`external/qemu/hw/audio/virtio-snd.c:154`). Whether the guest gets goldfish_audio or virtio-snd depends on the system image and feature flags.
 
-### Diagram: a virtio block request through the virtqueue
-
 ```mermaid
 flowchart LR
     subgraph GUEST["Guest"]
@@ -262,6 +260,8 @@ flowchart LR
     RING --> BD
 ```
 
+*Figure 6-5: A virtio block request through the virtqueue*
+
 ## 6.6 vsock and the adb Path
 
 `vsock` (virtio socket) gives the host and guest a socket-like transport addressed by a context ID (CID) and a port, with no IP stack in between. The emulator uses it as a modern alternative to the goldfish-pipe-based adb path.
@@ -271,8 +271,6 @@ The device model is `external/qemu/hw/virtio/virtio-vsock.c`. It carries a `gues
 On the host side, `external/qemu/android/android-emu/android/emulation/AdbVsockPipe.cpp` bridges the guest's adb daemon to the host's adb server. It talks to the device through a small `virtio_vsock_device_ops_t` vtable of `open`, `send`, `ping`, and `close` callbacks. Until a real backend installs ops, an `empty_ops` set returns failure for everything (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.cpp:47`); the real backend swaps them in through `virtio_vsock_device_set_ops()` (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.cpp:60`). The bridge connects to the guest's adbd by opening a vsock stream to port 5555, the constant `kGuestAdbdPort` (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.h:34`), then shuttles bytes between that stream and the host adb socket (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.cpp:505`).
 
 So the emulator has **two** adb transports: the legacy `qemud:adb` pipe service (Section 6.4.4) and the newer virtio-vsock bridge. Which one is active depends on the guest image and feature configuration, but from the host adb server's point of view they look identical.
-
-### Diagram: the two adb transports
 
 ```mermaid
 flowchart TB
@@ -294,6 +292,8 @@ flowchart TB
     VVSOCK -->|"vsock port 5555"| GUESTADBD
 ```
 
+*Figure 6-6: The two adb transports*
+
 ## 6.7 Sharing virtio with crosvm and Cuttlefish
 
 The Android team ships two virtual devices: the QEMU-based emulator (this book's main subject) and the crosvm-based **Cuttlefish**. They are different VMMs written in different languages — QEMU in C, crosvm in Rust — yet they share the most complex piece of virtual hardware: the GPU renderer.
@@ -303,8 +303,6 @@ The shared seam is the **gfxstream** renderer, which lives in `hardware/google/g
 That API is exactly the interface crosvm expects from a virtio-gpu rendering backend. crosvm loads gfxstream through its `rutabaga` GPU abstraction and drives it with the same `stream_renderer_*` calls. The emulator's QEMU, meanwhile, wires its `virtio-gpu-3d.c` device to the same library. The frontend that translates virtio-gpu protocol commands into renderer calls is `hardware/google/gfxstream/host/virtio_gpu_frontend.cpp`, and the renderer is built as `libgfxstream_backend` so both VMMs can link or load it.
 
 The practical consequence: a guest GL or Vulkan command stream is rendered by identical host code whether it runs under the QEMU emulator or under crosvm-on-Cuttlefish. The goldfish devices (pipe, sync, battery) are emulator-only and have no crosvm counterpart, but the virtio half of the board — and the GPU renderer in particular — is genuinely shared.
-
-### Diagram: one renderer, two virtual machine monitors
 
 ```mermaid
 flowchart TB
@@ -322,6 +320,8 @@ flowchart TB
     QFRONT --> GFX
     RUT --> GFX
 ```
+
+*Figure 6-7: One renderer, two virtual machine monitors*
 
 ## 6.8 The goldfish_address_space PCI Device
 
