@@ -48,8 +48,8 @@ crosvm-based Cuttlefish virtual device:
 | VIII | 24 | System Images & the Goldfish HAL | ✗ |
 | VIII | 25 | Guest Boot | ✗ |
 | IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) | ✗ |
-| X | 27 | Testing | ✗ |
-| X | 28 | Debugging, Tracing & Crash Reporting | ✗ |
+| X | 27 | Testing | ✓ |
+| X | 28 | Debugging, Tracing & Crash Reporting | ✓ |
 | App. | A | Paravirtualization from Xen to Android | ✗ |
 | App. | B | Key Files Reference | ✗ |
 | App. | C | Glossary | ✗ |
