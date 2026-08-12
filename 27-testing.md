@@ -537,7 +537,87 @@ flowchart TB
   CM --> IT
 ```
 
-## 27.10 Try It
+## 27.10 emu-dev-cli: Chasing Flaky Tests and Running the Verifier
+
+Everything above is invoked either by hand or by the build orchestrator. A newer developer-facing wrapper sits on top of both: `emu-dev-cli`, a Python CLI under `hardware/google/aemu/tools/emu-dev-cli/`. It fetches prebuilt binaries, creates AVDs, launches them, and — the parts that belong in this chapter — chases a flaky CI test down to a local reproduction and drives the verifier suites. `src/__main__.py` is a plain `argparse` program whose top-level subcommands are registered one per module at lines 69 to 79 — `crash`, `create`, `cts`, `docs`, `fetch-build`, `flakiness`, `init`, `launch`, `source-directory`, and `update`, plus the installer's own. It ships as a small C++ launcher (`src/launcher.cpp`) that locates the compiled Python beside itself, so the Bazel `cc_binary` at `BUILD.bazel:37` produces one installable executable that carries the `py_binary` backend as data.
+
+### 27.10.1 The flakiness suite
+
+`emu-dev-cli flakiness` is a closed loop over Android Test Hub (ATH), Buganizer, and local Bazel. Six subcommands are registered in `src/commands/flakiness/parser.py`.
+
+1. `list` (`parser.py:60`) aggregates ATH invocations over a time window into per-test failure rates, filtered by `--min-flake-rate`.
+2. `history` (`parser.py:307`) prints the chronological pass/fail record for one test target with its build and invocation ids.
+3. `fetch-logs` (`parser.py:132`) downloads the `LOGCAT`, `HOST_LOG`, `PERFETTO`, or `THREAD_DUMP` artifacts for an invocation id into a local sandbox directory.
+4. `reproduce` (`parser.py:371`) stress-runs the target locally under Bazel.
+5. `triage` (`parser.py:186`) deduplicates against open Buganizer issues and generates a root-cause report.
+6. `fix` (`parser.py:416`) verifies a candidate patch over repeated stress iterations and optionally uploads a Gerrit CL.
+
+The CI matrix the queries run against is a five-entry list, and each entry carries the Bazel config flags that reproduce that bot locally:
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/lib/ath_api.py
+SUPPORTED_TARGET_PLATFORMS: List[str] = [
+    "emulator_linux_x64",
+    "emulator_linux_x64_asan",
+    "emulator_linux_x64_tsan",
+    "emulator_windows_x64",
+    "emulator_mac_aarch64",
+]
+
+TARGET_BAZEL_CONFIG_MAP: Dict[str, List[str]] = {
+    "emulator_linux_x64": [],
+    "emulator_linux_x64_asan": ["--config=asan"],
+    "emulator_linux_x64_tsan": ["--config=tsan"],
+    ...
+}
+```
+
+That map is the whole point of the local-reproduction step: a test that only flakes under TSAN has to be rerun under TSAN. `get_bazel_flags_for_target` (`ath_api.py:100`) composes the target name, the sanitizer config, and the repetition count into one `bazel test` argument list.
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/lib/ath_api.py
+config_flags = TARGET_BAZEL_CONFIG_MAP[target]
+flags.extend(config_flags)
+if effective_iterations > 1:
+    flags.append(f"--runs_per_test={effective_iterations}")
+else:
+    flags.append("--runs_per_test=1")
+```
+
+`--runs_per_test=N` is ctest's `--repeat` equivalent in Bazel: it runs the same test N times in one invocation and fails if any run fails, which is how an intermittent failure is converted into a deterministic one. The wall-clock budget scales with the sanitizer, because a TSAN binary is several times slower than a plain one: `calculate_stress_test_timeout` (`ath_api.py:130`) computes 180 seconds plus 12 seconds per iteration, multiplied by 3.5 for a TSAN target and 2.5 for ASAN, with a 300-second floor.
+
+`triage` (`src/commands/flakiness/triage.py`) is the step that decides whether a flake is already known. For each record returned by `query_ath_flaky_tests` it asks `BuganizerClient.find_existing_open_bug` whether component 1016880 already has an open issue naming that target; if so the record is marked `EXISTING_BUG_OPEN` and nothing is filed. Otherwise it writes a markdown report per test into the triage sandbox directory and files a bug only when `--auto-file` is passed. `fix` (`src/commands/flakiness/fix.py`) closes the loop from the other end: `resolve_test_target_for_bug` recovers the Bazel target out of the bug's `[Flaky Test] <target> failing on ...` title, runs the same stress command with a default of 50 iterations, and records a CL upload step only when that run passed (`fix.py:206`).
+
+### 27.10.2 ETS-Verifier and remote execution
+
+The `cts` subcommand originally installed the public `CtsVerifier.apk` over ADB and ran the per-module `pass_*.py` automation scripts discovered under `third_party/adt-infra/goldfish_test/xts/verifier/`. That direct path is still reachable with `--no-bazel`, but the default now resolves a Tradefed `ets-verifier` Bazel target instead:
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/cts.py
+if args.all or not args.module:
+    target = "@goldfish_test//xts:ets-verifier"
+else:
+    ...
+    target = f"@goldfish_test//xts:ets-verifier.{subname}"
+```
+
+`--module` is matched against the `run_*.sh` scripts in the verifier directory — exact name first, then `<name>_test`, then a substring match — so `--module vibrations` resolves without anyone maintaining a module list (`cts.py:325` to `:346`). Adding `--rbe` swaps the local run for Remote Build Execution:
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/cts.py
+cmd = [
+    bazel_bin, "test", "-c", "opt",
+    "--config=remote", "--sandbox_debug", "--nocache_test_results",
+    "--config=ants", "--config=sponge", "--flaky_test_attempts=8",
+    target
+]
+```
+
+Three details in that command line are worth reading. `--nocache_test_results` is there because a verifier module drives a real booted emulator, so a cached pass would assert nothing about the current build. `--flaky_test_attempts=8` concedes that UI automation against a booting device carries the same flake profile the pytest tier in 27.7 lives with. And `--config=ants` together with `--config=sponge` publishes the run to the same result services the CI bots report into, rather than leaving it local to the developer's machine.
+
+Two further flags support writing the automation rather than running it. `--test-builder-mode` runs `@goldfish_test//xts:cts-verifier-automation-dev` with `--dev_mode` and a per-module script name, an interactive session for building a module's automation; `--collect-tests` drives the same target with `--collect_tests` to scroll the CtsVerifier activity list on a live device and refresh the coverage matrix (`cts.py:302` to `:320`).
+
+## 27.11 Try It
 
 These commands assume you are at the superproject root, with the emulator already built into an output directory (commonly `objs/`). Replace `<out>` with your build directory.
 
@@ -602,6 +682,8 @@ python3 external/adt-infra/pytest/test_embedded/run_tests.py \
 - The pytest e2e suite boots AVDs described by JSON suite configs, selects tests by marker (`-m adb`, `-m graphics`, etc.), and asserts on guest behavior through ADB, the console, and gRPC.
 - Mobly Bundled Snippets expose guest Android APIs as `@Rpc` methods so host Python tests can drive real framework calls and verify results over logcat or UiAutomator.
 - Tests are tasks in the Python build graph driven by `rebuild.sh` and `cmake.py`, including coverage merging via `llvm-profdata`/`llvm-cov` from per-test `.profraw` files.
+- `emu-dev-cli flakiness` closes the loop on a flaky CI test: it aggregates Android Test Hub invocations into per-test failure rates, fetches the logs, reproduces locally with `--runs_per_test` plus the failing bot's sanitizer config, deduplicates against Buganizer component 1016880, and verifies a fix over 50 stress iterations before preparing a Gerrit CL.
+- `emu-dev-cli cts run-cts-verifier` resolves Tradefed `ets-verifier` Bazel targets by default; `--rbe` runs them on Remote Build Execution with `--nocache_test_results` and `--flaky_test_attempts=8`, and `--test-builder-mode` / `--collect-tests` exist for authoring new module automation rather than running it.
 
 ### Key Source Files
 
@@ -620,3 +702,6 @@ python3 external/adt-infra/pytest/test_embedded/run_tests.py \
 | external/adt-infra/pytest/test_embedded/cfg/emulator_linux_tests.json | Named e2e suites, AVD configs, and pytest marker selection |
 | external/adt-infra/pytest/test_embedded/tests/fixtures/mobly_fixtures.py | Installs the Mobly APK and exposes snippet controllers |
 | external/mobly-bundled-snippets/src/main/java/com/google/android/mobly/snippet/bundled/WifiManagerSnippet.java | Example `@Rpc` guest-API snippet driven from host tests |
+| hardware/google/aemu/tools/emu-dev-cli/src/lib/ath_api.py | Android Test Hub queries, target/sanitizer config map, stress-test flags and timeouts |
+| hardware/google/aemu/tools/emu-dev-cli/src/commands/flakiness/parser.py | `flakiness list/history/fetch-logs/reproduce/triage/fix` subcommand definitions |
+| hardware/google/aemu/tools/emu-dev-cli/src/commands/cts.py | ETS-Verifier target resolution, RBE execution, TestBuilder and label-collection modes |

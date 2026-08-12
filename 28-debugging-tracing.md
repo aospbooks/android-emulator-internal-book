@@ -753,7 +753,63 @@ The append-only message store ties this back to crash reporting: `crashhandler_a
 
 ---
 
-## 28.11 Try It
+## 28.11 Crash Triage with emu-dev-cli
+
+Everything so far produces artifacts: a minidump in the local database, a report on the collection server, an `ERRLOG` annotation buried inside it. Acting on one of those means the same manual sequence every time — symbolize the dump, check whether the crash is already filed, then rebuild the session that produced it. `emu-dev-cli crash`, a subcommand group of the developer CLI covered in section 27.10, automates that sequence. Five subcommands are registered in `hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/parser.py` (lines 46 to 58): `find-bug`, `file-bug`, `autofix`, `reproduce`, and `analyze`. Every one of them takes a *crash ID* rather than a Buganizer bug number; `parse_crash_id` in `src/commands/crash/utils.py` accepts either the bare id or a crash-server URL and keeps only the last path component.
+
+### 28.11.1 Symbolizing and deduplicating
+
+`find-bug` does the symbolication first and the search second. It downloads the crash metadata, and if `crashreport.txt` is not already present in the per-crash sandbox it runs CrashAdvisor to process the minidump — the same offline symbolization job section 28.7 describes for `crashreport -d`, driven by a tool instead of by hand. CrashAdvisor itself lives outside the `aemu` tree, at `hardware/generic/goldfish/emulator/crashreport/tool/advisor`, and `run_crashadvisor_bazel` (`src/commands/crash/advisor.py:155`) prefers an already-built binary, falling back to `bazel run` on the `@goldfish//emulator/crashreport/tool/advisor` target when there is none.
+
+The search that follows is two-tiered, and the tiers carry different confidence. A match on the dump's primary signature is reported as `HIGH (Signature Match)`; a match on just the faulting function name, extracted from the symbolized text by `extract_top_fault_frame`, is reported as `MEDIUM (Top Stack Frame Function)` and is only added when it names an issue the first tier did not already find (`src/commands/crash/find_bug.py:99` to `:140`). That distinction matters because the second tier is a substring query against open issues in the emulator component — useful for spotting a related bug, not trustworthy enough to auto-file against.
+
+### 28.11.2 Reproducing a crash locally under LLDB
+
+The most interesting subcommand is `reproduce`, because it reconstructs a crashing session out of the annotations sections 28.3 and 28.4 attached to the dump. `extract_reproduce_plan` reads `metadata.json` and pulls out the build id from the product version string, the build target from the reported OS and CPU architecture, and — the part that makes the reproduction faithful — the original command line out of the `commandline` breadcrumb in `productdata`, which is the same `command_line` annotation `crashhandler_init` attached at startup. The GPU mode, feature flags, and AVD switches the crashing session ran with therefore come back automatically.
+
+It also has to work out *which process* to debug when `--lldb` is passed. The `emulator` binary you launch is a launcher that re-execs the real engine (section 28.2.2), so attaching to it is useless; the crash happened inside `qemu-system-<arch>`. The plan resolves that name from the crash's architecture and OS and builds the debugger command around it:
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/reproduce.py
+if "arm64" in arch or "aarch64" in arch:
+    return f"qemu-system-aarch64{suffix}"
+...
+lldb_cmd = ["lldb", "-n", qemu_engine, "--wait-for"] if debugger == "lldb" else None
+```
+
+`--wait-for` is what makes this work without a race: LLDB waits for a *future* process with that name, so the tool can start the launcher first and let the debugger catch the engine at the moment the launcher spawns it. The launch side puts the emulator in its own process group so that tearing the session down after the debugger exits kills the whole tree rather than orphaning the engine:
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/reproduce.py
+emu_proc = subprocess.Popen(launch_cmd, **popen_kwargs)
+try:
+    subprocess.run(plan["lldb_command"], check=False)
+finally:
+    if emu_proc.poll() is None:
+        ...
+        pgid = os.getpgid(emu_proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+```
+
+With `--dry-run` or `--json` the command stops after building the plan and prints it, which is the fast way to see the exact build id, engine binary, and flag list a given crash implies without launching anything.
+
+### 28.11.3 From root cause to a patch
+
+`autofix` runs CrashAdvisor in `--auto-run` mode to produce an `rca_summary.md`, then parses a structured `actionability:` YAML block out of that markdown and refuses to proceed unless the analysis marked the crash fixable:
+
+```python
+# Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/autofix.py
+is_fixable = action_data.get("fixable", "false").lower() == "true"
+target_file = action_data.get("target_file", "unknown")
+target_func = action_data.get("target_function", "unknown")
+remediation = action_data.get("remediation_summary", "Refer to rca_summary.md")
+```
+
+The reported `target_file` is a tree-relative path, so it is resolved against the workspace registered through `emu-dev-cli source-directory` before anything is dispatched. `analyze` is the umbrella command: with no flags it runs `find-bug` for quick deduplication feedback and then starts an interactive root-cause session, and it forwards to `file-bug` or `autofix` when those flags are given. One detail there is worth borrowing regardless of the tool: before executing the generated `investigation_cmd.sh`, it checks `is_path_secure_user_owned` on both the sandbox directory and the script and refuses to run anything that is group- or world-writable (`src/commands/crash/analyze.py:74` to `:90`) — a script assembled from crash-server data is untrusted input.
+
+---
+
+## 28.12 Try It
 
 These commands assume you have an emulator build with the `emulator` launcher on your `PATH` and at least one AVD configured.
 
@@ -826,6 +882,8 @@ emulator -avd <your_avd> -crash-report-mode disabled
 - Breakpad is retained for offline work: `crashreport -d` uses Breakpad's `MinidumpProcessor` and `dump_syms`-produced symbols to print symbolized stacks plus the annotation bundle as JSON.
 - Perfetto tracing runs through a thin in-process shim with a single-branch fast path when disabled; `VPERFETTO_*` env vars name the host, guest, and combined trace files, and the shim concatenates host and guest traces into one timeline.
 - Graphics debugging stacks three layers: gfxstream log levels (`GFXSTREAM_LOG_LEVEL`), Perfetto `gfx` track events, and Vulkan validation layers wired up by `vkdebugenv.sh`.
+- `emu-dev-cli crash` automates triage from a crash ID: `find-bug` symbolizes through CrashAdvisor and searches Buganizer in a high-confidence signature tier plus a lower-confidence faulting-function tier, while `autofix` acts only on an `actionability:` block that marked the crash fixable.
+- `emu-dev-cli crash reproduce` rebuilds the crashing session from the dump's own annotations — build id, target platform, and the `command_line` breadcrumb — and attaches LLDB with `-n qemu-system-<arch> --wait-for`, which targets the re-exec'd engine rather than the launcher.
 
 ### Key Source Files
 
@@ -848,3 +906,6 @@ emulator -avd <your_avd> -crash-report-mode disabled
 | `hardware/google/gfxstream/common/logging/logging.cpp` | gfxstream host logger and fatal-to-abort path |
 | `hardware/google/gfxstream/host/render_lib_impl.cpp` | `GFXSTREAM_LOG_LEVEL`/`GFXSTREAM_LOG_VERBOSE` env parsing |
 | `external/qemu/android/vkdebugenv.sh` | Enables Vulkan validation and api_dump layers |
+| `hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/reproduce.py` | Rebuilds a crashing session from dump annotations and attaches LLDB to the QEMU engine |
+| `hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/find_bug.py` | Two-tier Buganizer deduplication from crash signature and faulting frame |
+| `hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/advisor.py` | Locates and runs the CrashAdvisor symbolization/RCA tool |

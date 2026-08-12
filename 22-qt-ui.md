@@ -471,6 +471,8 @@ flowchart LR
     Pane --> Ctrl --> Agent --> Core
 ```
 
+Which panes appear at all depends on the AVD flavor, and so does what one of them draws. The `ExtendedWindow` constructor drops the virtual-sensors and location buttons from the sidebar for XR and glasses AVDs, restoring them for a glasses AVD only when `ANDROID_EMU_ENABLE_VIRTUAL_SENSORS=1` or `ANDROID_EMU_ENABLE_STREETVIEW=1` is set in the environment, a temporary switch while those pages are brought up for the flavor (`extended-window.cpp:269` to `:292`). When the virtual-sensors pane does appear, the 3D device it renders follows the same flavor: `Device3DWidget::getModelBasePath` returns `:/glasses-model` when `android_is_glasses_mode()` is true and `:/phone-model` otherwise (`external/qemu/android/android-ui/modules/aemu-ext-pages/camera/src/android/skin/qt/device-3d-widget.cpp:888`). Everything the widget loads afterwards is that base path plus a fixed filename — `model.obj` through its Wavefront parser, then the diffuse, specular, and gloss maps — so the two model sets are registered under parallel resource prefixes in `resources.qrc:1051` and `:1057` and no rendering code changes. `android_is_glasses_mode()` is itself a one-line test of `avdInfo_getAvdFlavor(...) == AVD_GLASSES` (`external/qemu/android/android-emu/android/hw-sensors.cpp:1478`), the flavor Chapter 3 introduces.
+
 ## 22.9 Keyboard Translation and Mouse Grab
 
 Two cross-cutting concerns deserve their own section: how Qt key codes become guest key codes, and how the window captures the host pointer.

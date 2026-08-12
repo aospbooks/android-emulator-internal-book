@@ -431,6 +431,72 @@ macOS has no native Vulkan — Apple ships only Metal. MoltenVK (`external/molte
 
 When `useMoltenVK` is set, the renderer enables `VK_KHR_portability_subset` on the device and remembers `mInstanceSupportsMoltenVK` (queried later via `supportsMoltenVk()`). MoltenVK advertises itself as a portability ICD — its bundled `MoltenVK_icd.json` carries `"is_portability_driver": true`, which is why the host instance must enable `VK_KHR_portability_enumeration` to even see the device. The decoded guest Vulkan therefore runs Metal underneath, transparently, on Mac hosts.
 
+### 13.7.4 Per-application validation-layer filtering
+
+Because the guest's Vulkan calls are replayed against a real host driver, the Khronos validation layers (VVL) can be loaded on the host and will validate whatever the guest sent. For a long time that was an all-or-nothing switch: setting `GFXSTREAM_USE_TESTING_VALIDATION_LAYERS` validated *every* guest `VkInstance`, so the output was dominated by the framework, SystemUI, and the launcher even when the app under investigation was one game. Filtering now happens per guest application.
+
+Three command-line options drive it, declared in `external/qemu/android/emu/cmdline/include/android/cmdline-options.h:198`:
+
+```c
+// Source: external/qemu/android/emu/cmdline/include/android/cmdline-options.h
+OPT_PARAM( vulkan_validation, "<mode>", "Vulkan validation mode (off|print|fail|crash)" )
+OPT_PARAM( vulkan_validation_include_filter, "<filters>", "Comma-separated list of app/engine filters to include for Vulkan validation" )
+OPT_PARAM( vulkan_validation_exclude_filter, "<filters>", "Comma-separated list of app/engine filters to exclude for Vulkan validation" )
+```
+
+`startOpenglesRendererImpl()` — the body `android_startOpenglesRenderer()` dispatches to through the ops table — copies all three into the gfxstream `FeatureSet` as string features (`external/qemu/android/android-emu/android/opengles.cpp:487` through `:513`, against the declarations at `hardware/google/gfxstream/host/features/include/gfxstream/host/features.h:441`). Any mode other than `off` also force-enables `VulkanDebugUtils`, since the whole mechanism is built on `VK_EXT_debug_utils`:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/opengles.cpp
+if (strcmp(opts->vulkan_validation, "off") != 0) {
+    if (!gfxstreamFeatures.VulkanDebugUtils.enabled()) {
+        gfxstreamFeatures.VulkanDebugUtils.setEnabled(true);
+```
+
+Loading the layer itself is still a process-wide, environment-variable affair. `ensureVulkanValidationLayersEnabled()` (`hardware/google/gfxstream/host/vulkan/vulkan_dispatch.cpp:394`) hunts for `lib64/vulkan/layers` next to the program or launcher, falls back to `testlib64/layers`, and pushes `VK_ADD_LAYER_PATH` and `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` into the environment before the loader is initialized. It runs when either the old testing variable or the new `ANDROID_EMU_VVL_BEHAVIOR` variable is set (`:488`), so the layer is present in the host process; the filtering decides who gets *listened to*.
+
+The configuration is resolved once, up front, into an enum rather than re-parsed per call. `VVLConfiguration::parse()` (`hardware/google/gfxstream/host/vulkan/vk_vvl_configuration.cpp:92`) maps the mode string onto `VVLBehavior` — `None`, `PrintOnly`, `Fail`, or `Crash` (`vk_vvl_configuration.h:14`) — accepting `ANDROID_EMU_VVL_BEHAVIOR` when the feature is unset, and lowercases each comma-separated filter token into an `unordered_set`. `VkEmulation::create()` keeps the result only if it would ever fire:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_common_operations.cpp
+auto vvlConfig = VVLConfiguration::parse(features);
+if (vvlConfig.getBehavior() != VVLBehavior::None) {
+    emulation->mVVLConfig.emplace(std::move(vvlConfig));
+}
+```
+
+The per-application decision is made when the guest creates an instance. The decoder's `on_vkCreateInstance` reads the guest's `VkApplicationInfo` — the same `pApplicationName`/`pEngineName` the guest's Vulkan loader filled in — and asks the configuration whether this one is interesting (`vk_decoder_global_state.cpp:1168`). Matching is exact and case-insensitive against *either* name, an empty include list means "everything", and exclude beats include:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_vvl_configuration.cpp
+return (mIncludeFilters.empty() || mIncludeFilters.find(app) != mIncludeFilters.end() ||
+        mIncludeFilters.find(engine) != mIncludeFilters.end()) &&
+       (mExcludeFilters.find(app) == mExcludeFilters.end() &&
+        mExcludeFilters.find(engine) == mExcludeFilters.end());
+```
+
+Exact matching, not substring, is the deliberate choice the unit tests pin down: `com.example.game` in the include list matches `COM.EXAMPLE.GAME` but not `com.example.game.sub` (`hardware/google/gfxstream/host/vulkan/vulkan_unittest.cpp:435`).
+
+When an instance matches, three things happen to the `VkInstanceCreateInfo` the host is about to submit. `VK_EXT_debug_utils` is appended to the extension list if the guest did not already ask for it; the messenger's `VkDebugUtilsMessengerCreateInfoEXT` is appended to the `pNext` chain, so instance creation itself is validated (`vk_decoder_global_state.cpp:1211`); and once the instance exists, a real messenger is created through `vkCreateDebugUtilsMessengerEXT` and stashed alongside the callback payload in `InstanceInfo` (`vk_decoder_internal_structs.h:217`). Failure to create the messenger is a warning, not an error — validation degrades to whatever the `pNext` chain caught. The teardown path, `destroyInstanceObjects()`, destroys the messenger immediately before calling `vkDestroyInstance` (`vk_decoder_global_state.cpp:10825`).
+
+The behavior enum is consumed in the callback, which receives the per-instance `VVLContext` through `pUserData` and uses its pre-formatted `appInfo` string (`" [App: <name>, Engine: <name>]"`) to tag every line:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_vvl_configuration.cpp
+GFXSTREAM_LOG_INNER(logSeverity, "VVL%s: %s", context->appInfo.c_str(), pCallbackData->pMessage);
+
+if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+    if (context->behavior == VVLBehavior::Crash) {
+        GFXSTREAM_FATAL("VVL requested CRASH on error: %s", pCallbackData->pMessage);
+    } else if (context->behavior == VVLBehavior::Fail) {
+        GFXSTREAM_ERROR("VVL requested FAIL on error: %s", pCallbackData->pMessage);
+        return VK_TRUE;
+    }
+}
+```
+
+Enforcement is scoped to errors. Warnings, info, and verbose messages are logged and nothing more, whatever the mode. `Crash` aborts the emulator on the first validation error, which is what you want in a bisect. `Fail` returns `VK_TRUE`, the debug-utils protocol for "abort this call", so the layer fails the offending Vulkan entry point with `VK_ERROR_VALIDATION_FAILED_EXT` and the error propagates back across the stream to the guest — turning a silently-ignored validation message into something the guest app has to handle. The end-to-end suite exercises exactly that shape: it registers a log callback, issues a `vkCreateBuffer` with `size = 0` (VUID-VkBufferCreateInfo-size-00904), and asserts that VVL output appears if and only if the `VulkanValidation` feature was on for that parameterization (`hardware/google/gfxstream/tests/end2end/gfxstream_end2end_vvl_tests.cpp:74`).
+
 Host Vulkan forwarding path
 
 ```mermaid
@@ -586,6 +652,20 @@ ANDROID_EMU_VK_ICD=moltenvk emulator @<avd> -gpu host -verbose 2>&1 | grep -i "m
 ANDROID_EMU_VK_LOADER_PATH=/some/path/libvulkan.so emulator @<avd> -gpu host
 ```
 
+Turn on the validation layers for one guest application and watch the `VVL [App: ...]` lines appear only for it:
+
+```bash
+# Log validation errors from one package and from ANGLE, nothing else.
+emulator @<avd> -gpu host \
+  -vulkan-validation print \
+  -vulkan-validation-include-filter "ANGLE,com.example.game" 2>&1 | grep VVL
+
+# Validate everything except the framework, and fail the offending call on error.
+emulator @<avd> -gpu host \
+  -vulkan-validation fail \
+  -vulkan-validation-exclude-filter "android framework,system_ui"
+```
+
 Browse the source that implements each stage:
 
 ```bash
@@ -609,6 +689,7 @@ grep -n "getPossibleLoaderPathBasenames\|deviceTypeScoreTable\|useMoltenVK" \
 - ANGLE translates GLES to Vulkan/D3D/Metal/desktop-GL; `swangle` means ANGLE over SwiftShader's Vulkan; SwiftShader and mesa lavapipe/llvmpipe are the CPU-only fallbacks; virglrenderer is the alternative virtio-gpu renderer that Android does not use.
 - `rcGetGLString` synthesizes the GL vendor/renderer/version and extension strings the guest sees, augmenting the host's real strings with gfxstream's pipe extensions and gating GPU-only extensions on `SELECTED_RENDERER_HOST`.
 - Vulkan is forwarded, not translated: the decoder remaps handles and memory and calls a real host driver via a dlopen'd loader; physical-device scoring prefers discrete GPUs; on macOS MoltenVK (a Metal-backed portability ICD) is selected via `ANDROID_EMU_VK_ICD=moltenvk`.
+- The Khronos validation layers are loaded process-wide through `VK_INSTANCE_LAYERS`, but listening to them is decided per guest application: `-vulkan-validation` picks a behavior (`off`/`print`/`fail`/`crash`) and the include/exclude filters match the guest's `VkApplicationInfo` app and engine names exactly and case-insensitively, so only matching instances get a `VK_EXT_debug_utils` messenger attached. Enforcement applies to errors only — `fail` returns `VK_TRUE` from the callback so the layer fails the call with `VK_ERROR_VALIDATION_FAILED_EXT`, while `crash` aborts.
 - Rendered pixels live in `ColorBuffer` objects that may have GL and/or Vulkan backings with explicit flush/invalidate between them; a `PostWorker` thread blits/presents the final buffer into the on-screen sub-window, while per-frame pixel readback is handled by `ReadbackWorker::doNextReadback()` called on the render thread inside `postImpl()`, delivering RGBA bytes to an `OnPostCallback` for recording and WebRTC.
 
 ### Key Source Files
@@ -624,7 +705,9 @@ grep -n "getPossibleLoaderPathBasenames\|deviceTypeScoreTable\|useMoltenVK" \
 | `hardware/google/gfxstream/host/gl/emulation_gl.cpp` | GL emulation init, version negotiation, `eglUseOsEglApi` |
 | `hardware/google/gfxstream/host/render_control.cpp` | renderControl handlers; `rcGetGLString` GL-string synthesis |
 | `hardware/google/gfxstream/host/vulkan/vk_common_operations.cpp` | Vulkan instance/device creation, device scoring, MoltenVK selection |
-| `hardware/google/gfxstream/host/vulkan/vulkan_dispatch.cpp` | Host Vulkan loader discovery and dispatch table population |
+| `hardware/google/gfxstream/host/vulkan/vulkan_dispatch.cpp` | Host Vulkan loader discovery, dispatch table population, validation-layer env setup |
+| `hardware/google/gfxstream/host/vulkan/vk_vvl_configuration.cpp` | Validation behavior/filter parsing, per-app matching, debug-utils callback |
+| `hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp` | Guest instance creation; attaches the debug messenger for matching apps |
 | `hardware/google/gfxstream/host/color_buffer.h` | `ColorBuffer` GL/Vulkan dual backing and flush/invalidate |
 | `hardware/google/gfxstream/host/post_worker_gl.cpp` | Posting a color buffer to the GL display/sub-window |
 | `hardware/google/gfxstream/host/include/render-utils/Renderer.h` | `OnPostCallback` / readback callback signatures |

@@ -160,16 +160,35 @@ The `Config` sub-message records the enabled feature flags (as raw `int32` so th
 
 ### 9.3.1 The version number
 
-The snapshot `version` is not a hand-bumped integer; it is computed in `external/qemu/android/android-emu/android/snapshot/Snapshot.cpp` from a base number and the count of feature-control items, so that adding a feature flag automatically changes the version:
+The snapshot `version` packs two numbers into one integer. The high bits hold a hand-maintained base version; the low ten bits hold the count of feature-control items, computed at compile time in `external/qemu/android/android-emu/android/snapshot/Snapshot.cpp` by re-including the feature definition headers with `FEATURE_CONTROL_ITEM` defined as `+ 1`, so that adding a feature flag changes the version without anyone editing it:
 
 ```cpp
-// Source: external/qemu/android/android-emu/android/snapshot/Snapshot.cpp
-static constexpr int kVersionBase = 86;
+// Source: external/qemu/android/android-emu/android/snapshot/Snapshot.cpp:429-444
+static constexpr int kVersionBase = 87;
 // ... kFeatureOffset counts every FEATURE_CONTROL_ITEM
 static constexpr int kVersion = (kVersionBase << 10) + kFeatureOffset;
 ```
 
-`isVersionCompatible()` then compares either the full version or just the high bits (`version >> 10`, the base part) depending on a flag, so a feature-count change can be tolerated where a base-version change cannot.
+`kVersionBase` moves only when the serialized format itself changes, and its recent history is almost entirely graphics: 84 added Vulkan renderer checks, 86 added display ids to the gfxstream stream, and 87 covers the gfxstream save/load changes described in 9.10.
+
+`isVersionCompatible()` then compares either the full version or just the high bits (`version >> 10`, the base part) depending on the `DownloadableSnapshot` flag, so a feature-count change can be tolerated where a base-version change cannot:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/snapshot/Snapshot.cpp:699-709
+bool Snapshot::isVersionCompatible() const {
+    if (mSnapshotPb.has_version()) {
+        if (fc::isEnabled(fc::DownloadableSnapshot)) {
+            return (mSnapshotPb.version() >> 10) == (kVersion >> 10);
+        } else {
+            return (mSnapshotPb.version() == kVersion);
+        }
+    } else {
+        return false;
+    }
+}
+```
+
+A mismatch sets `FailureReason::IncompatibleVersion`, which sits above `UnrecoverableErrorLimit` — so an old snapshot is discarded rather than retried.
 
 ### 9.3.2 Validation and failure reasons
 
@@ -552,7 +571,263 @@ tombstone.saveFailure(FailureReason::Tombstone);
 
 The crash interaction is worth noting: `onCrashedSnapshot` treats a crash within `kSnapshotCrashThresholdMs` (two minutes) of loading as a snapshot fault and marks the load failed, so a snapshot that reliably crashes the emulator soon after load will be invalidated rather than re-loaded forever.
 
-## 9.10 Try It
+## 9.10 Vulkan State and the gfxstream Half of a Snapshot
+
+Everything above treats the GPU as one line item: `textures.bin`, written by the `TextureSaver`. That was an adequate description for as long as the host renderer's job was GL emulation whose interesting state reduced to texture memory. It was never true for Vulkan. A guest Vulkan app leaves the host renderer holding live `VkDevice` handles, device allocations, images with layouts, pipelines, descriptor sets, and command buffers — none of which can be reconstructed from guest RAM pages, because the guest only ever saw opaque handles that the host invented. For years the emulator's answer was to refuse: either the save was skipped outright, or the offending app was force-stopped first so that there was no Vulkan state left to lose. The `VulkanSnapshots` feature replaces that refusal with a real save and restore path implemented inside gfxstream, and the emulator-side gates that used to guard against it have been rewired to defer to it.
+
+### 9.10.1 The VulkanSnapshots feature flag
+
+The flag is a host-side feature-control item, declared in the AEMU host definition list that `external/qemu/android/emu/feature/` expands into the `android::featurecontrol::Feature` enum:
+
+```cpp
+// Source: hardware/google/aemu/host-common/include/host-common/FeatureControlDefHost.h:58
+FEATURE_CONTROL_ITEM(VulkanSnapshots, 26)
+```
+
+It ships off. The defaults file gives it one line:
+
+```ini
+# Source: external/qemu/android/data/advancedFeatures.ini:269
+VulkanSnapshots = off
+```
+
+Two properties of that declaration matter for the rest of this section. First, the flag is absent from `external/qemu/android/emu/feature/include/android/featurecontrol/FeatureControlDefSnapshotInsensitive.h`, which means `Snapshot::verifyFeatureFlags` treats it like any other state-affecting feature: a snapshot taken with Vulkan snapshots on cannot be loaded with them off, and the reverse also fails. That is not bureaucratic strictness — the flag genuinely changes the stream format, as in `RenderThreadInfo::onSave`, where a 64-bit process id is written only when the feature is enabled (`hardware/google/gfxstream/host/render_thread_info.cpp:71-75`).
+
+Second, the emulator does not consume the flag alone; it forwards it into gfxstream's own feature set when the renderer is created:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/opengles.cpp:410-411
+{android::featurecontrol::VulkanSnapshots,
+ &gfxstream::host::FeatureSet::VulkanSnapshots},
+```
+
+On the gfxstream side the same feature is declared with a one-line description — "If enabled, supports snapshotting the guest and host Vulkan state" (`hardware/google/gfxstream/host/features/include/gfxstream/host/features.h:359-363`) — and every save/load site checks `m_features.VulkanSnapshots.enabled()`. When gfxstream is built standalone against virtio-gpu instead of the emulator, the same feature is set from an environment variable rather than from feature control:
+
+```cpp
+// Source: hardware/google/gfxstream/host/virtio_gpu_gfxstream_renderer.cpp:124-126
+GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
+    &features, VulkanSnapshots,
+    gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_CAPTURE_VK_SNAPSHOT") == "1");
+```
+
+### 9.10.2 The old defense: skipping the save and stopping Vulkan apps
+
+Both of the pre-existing defenses are keyed off the same thing — a host-side registry of live `VkInstance`s. gfxstream reports each instance as it is created and destroyed, through callbacks into the emulator (`hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:1257` and `:10837`), and `FrameBuffer::Impl::registerVulkanInstance` resolves the guest process name for it before handing it over (`hardware/google/gfxstream/host/frame_buffer.cpp:4152-4171`). The emulator keeps them in a small table in the QEMU glue (`external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp:249-285`).
+
+The first defense is the save-skip predicate consulted by `Snapshotter::checkSafeToSave` (9.2.2) and by `Quickboot::save`:
+
+```cpp
+// Source: external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp:227-243
+    // if vulkan snapshot is enabled
+    namespace fc = android::featurecontrol;
+    if (fc::isEnabled(fc::VulkanSnapshots) || does_snapshot_use_vulkan) {
+        // for now, it is not really stable
+        // assume user is aware of that
+        return false;
+    }
+
+    // otherwise, check the vulkan apps
+    // skip if there is vulkan apps
+    const std::lock_guard<std::mutex> lock(s_vulkanTableLock);
+    if (s_vulkanTable.size() > 0) {
+        skip_snapshot_save_reason = SNAPSHOT_SKIP_UNSUPPORTED_VK_APP;
+        return true;
+    }
+```
+
+With the feature off and any Vulkan instance alive, the save is refused with `SNAPSHOT_SKIP_UNSUPPORTED_VK_APP`, which `Quickboot::save` maps to `FailureReason::UnsupportedVkApp` for metrics and then deletes the stale snapshot (`external/qemu/android/android-emu/android/snapshot/Quickboot.cpp:668-690`). The comment on the early return is worth reading literally: enabling the feature does not make the skip logic smarter, it disables it.
+
+The second defense is blunter. `Snapshotter::stopVulkanAppsIfApplicable` enumerates the registry, force-stops every app in it over adb, and polls up to three times with a growing backoff for the instances to disappear:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/snapshot/Snapshotter.cpp:836-849
+    for (int i = 0; i < count; ++i) {
+        std::string appRealName = std::string(names[i]);
+        free(names[i]);
+        // ...
+        LOG(INFO) << "stopping vulkan app '" << appRealName << "'";
+        adbInterface->runAdbCommand(
+                {"shell", "am", "force-stop", appRealName},
+                [this](const android::emulation::OptionalAdbCommandResult&) {},
+                5000);
+    }
+```
+
+There is no pipe or guest service behind this — it is literally `adb shell am force-stop` per package, which is also why the function gives up in configurations where adb cannot stop the app (XR mode with GuestAngle). It is called from three places: the Qt window's close handler, just before `queueQuitEvent()`, so the apps are dead by the time `vl.c` reaches `androidSnapshot_quickbootSave` (`external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp:2381-2389`); the gRPC snapshot service; and the legacy snapshot UI controller, the only caller that honors the return value and surfaces "Cannot stop Vulkan apps."
+
+### 9.10.3 Not stopping Vulkan apps any more
+
+The behavior change is a four-line early return placed at the very top of that function, ahead of any enumeration:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/snapshot/Snapshotter.cpp:793-802
+bool Snapshotter::stopVulkanAppsIfApplicable() {
+    const bool vulkanSnapshotsEnabled = android::featurecontrol::isEnabled(
+            android::featurecontrol::VulkanSnapshots);
+    // No need to check or stop the apps when vulkan snapshots are enabled
+    if (vulkanSnapshotsEnabled) {
+        return true;
+    }
+
+    // Vulkan snapshots are not enabled, check and to stop vulkan apps
+    uint32_t count = 0;
+```
+
+The placement matters more than it looks. The feature check existed before, but it lived further down, tangled with the `-no-snapshot-save` and XR/GuestAngle conditions that force `needToSaveSnapshot` to false — and a false there meant the function returned `false`, which the legacy UI reported as a failure to stop the apps. Hoisting the check turns "we could not kill the apps, so we cannot snapshot" into "we do not need to kill the apps," and closing the emulator with a Vulkan app in the foreground now saves that app's GPU state instead of terminating it.
+
+### 9.10.4 Where gfxstream state enters the snapshot stream
+
+None of this is reached through the RAM or vmstate paths of 9.4 and 9.8. The renderer is snapshotted as a *pipe service*: the goldfish `opengles` pipe registers `preSave`/`postSave` and `preLoad`/`postLoad` hooks, and QEMU calls them while serializing pipe state into the vmstate stream. The whole gfxstream snapshot therefore rides inside QEMU's device-state serialization, wrapped in a `GfxstreamStreamAdapter` that presents the emulator's `base::Stream` as the `gfxstream::Stream` the renderer expects:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/opengl/OpenglEsPipe.cpp:121-129
+void preSave(android::base::Stream* stream) override {
+    if (const auto& renderer = android_getOpenglesRenderer()) {
+        renderer->pauseAllPreSave();
+        stream->putByte(1); // hasRenderer
+        stream->putBe32(OPENGL_SAVE_VERSION);
+
+        android::snapshot::GfxstreamStreamAdapter gfxstreamStream(stream);
+        renderer->save(&gfxstreamStream,
+                       Snapshotter::get().saver().textureSaver());
+        // ...
+```
+
+The `textureSaver` handed in here is the same one that writes `textures.bin` (9.9), so texture payloads still go to their own file while everything else goes inline. `pauseAllPreSave()` quiesces every render thread first, and `postSave`/`postLoad` call `resumeAll()`.
+
+`RendererImpl::save` forwards to `FrameBuffer::onSave`, which writes its own version and, at the end, a trailing magic number; the Vulkan hand-off sits in the middle of it, behind the feature check:
+
+```cpp
+// Source: hardware/google/gfxstream/host/frame_buffer.cpp:3393-3400
+    // Save Vulkan state
+    if (m_features.VulkanSnapshots.enabled() && vk::VkDecoderGlobalState::get()) {
+        GFXSTREAM_DEBUG("snapshot save: save decoder global state");
+        bool res = vk::VkDecoderGlobalState::get()->save(stream);
+        if (!res) {
+            return false;
+        }
+    }
+```
+
+The load side mirrors it at `frame_buffer.cpp:3712-3719`, dropping the framebuffer lock around the call because replay re-enters the decoder. One asymmetry is visible there: `save` propagates its failure upward, while the return value of `load` is discarded.
+
+```mermaid
+sequenceDiagram
+    participant SV as savevm.c (pipe vmstate)
+    participant PS as OpenglEsPipe Service
+    participant REN as RendererImpl
+    participant FB as FrameBuffer
+    participant VK as VkDecoderGlobalState
+    participant REC as VkReconstruction
+
+    SV->>PS: preSave(stream)
+    PS->>REN: pauseAllPreSave
+    PS->>REN: save(stream, textureSaver)
+    REN->>FB: onSave(stream, textureSaver)
+    FB->>FB: version, color buffers, contexts
+    FB->>VK: save(stream) if VulkanSnapshots
+    VK->>REC: saveReplayBuffers(stream)
+    REC-->>VK: created handles + API packet trace
+    VK->>VK: memory, images, buffers,<br/>descriptors, fences, semaphores
+    FB->>FB: trailing magic 0xC0FFEEEE
+    SV->>PS: postSave(stream)
+    PS->>REN: resumeAll
+```
+
+*Figure 9-7: The gfxstream save path, from QEMU's pipe vmstate hook down to the Vulkan replay buffers.*
+
+### 9.10.5 Record and replay: VkReconstruction
+
+gfxstream does not serialize Vulkan objects field by field. It records the API calls that created them and replays those calls on load — the same trick the RAM index uses in spirit, applied to a command stream. The design is written up in `hardware/google/gfxstream/docs/snapshot.md`.
+
+Recording happens in the decoder. For every decoded packet, `VkDecoder` keeps the raw bytes and, when snapshots are enabled, hands them to a per-entrypoint recorder alongside the decoded arguments:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_decoder.cpp:185-188
+VkSnapshotApiCallHandle snapshotApiCallHandle = kInvalidSnapshotApiCallHandle;
+if (m_snapshotsEnabled) {
+    snapshotApiCallHandle = m_state->snapshot()->createApiCallInfo();
+}
+```
+
+The recorder is `VkDecoderSnapshot`, a generated file with one method per Vulkan entrypoint, and it is a thin wrapper over `VkReconstruction` (`hardware/google/gfxstream/host/vulkan/vk_reconstruction.cpp`). `VkReconstruction` stores each call as a `VkSnapshotApiCallInfo` holding the raw packet, the handles the call created, and the handles it depends on, and maintains a `DependencyGraph` linking objects to their parents. Destroying an object removes its node and all descendants — with two deliberate exceptions, shader modules and render passes, which are kept alive because replay needs them even after the guest has dropped them (`hardware/google/gfxstream/host/vulkan/dependency_graph.cpp:53-65`).
+
+Because boxed handle ids encode a tag, generation, and index rather than a creation order, the graph carries an explicit timestamp per node, and the save walks nodes in timestamp order to derive a call order that satisfies dependencies:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_reconstruction.cpp:59-108
+std::vector<uint64_t> uniqApiRefsByTopoOrder;
+mGraph.getIdsByTimestamp(uniqApiRefsByTopoOrder);
+// ... concatenate every info->createdHandles, then every info->packet
+gfxstream::host::saveBuffer(stream, createdHandleBuffer);
+gfxstream::host::saveBuffer(stream, apiTraceBuffer);
+```
+
+So the Vulkan portion of a snapshot is two flat buffers: the list of handles the replay is expected to produce, and the concatenated packet bytes. Replay reads both, primes the boxed handle manager so that every newly created handle is forced to the exact id it had at save time, and pushes the packets back through a decoder placed in snapshot-load mode:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:804-820
+sBoxedHandleManager.replayHandles(handleReplayBuffer);
+
+VkDecoder decoderForLoading;
+// A decoder that is set for snapshot load will load up the created handles first,
+// if any, allowing us to 'catch' the results as they are decoded.
+decoderForLoading.setForSnapshotLoad(true);
+// ...
+size_t consumed = decoderForLoading.decode(decoderReplayBuffer.data(),
+                                           decoderReplayBuffer.size(), ...);
+```
+
+Forcing the handle ids is what makes replay possible at all: the packets contain embedded handles, and the guest still holds the old ones, so re-executing `vkCreateImage` must yield the same boxed handle it yielded originally (`hardware/google/gfxstream/host/vulkan/vulkan_boxed_handles.cpp:72-81`).
+
+Replay only rebuilds the object graph. Contents come after it, in a fixed order inside `VkDecoderGlobalState::Impl::save`/`load` (`vk_decoder_global_state.cpp:449-757` and `:759-1096`): device-to-context-id maps, then the replay buffers, then mapped memory contents, image contents, buffer contents, descriptor pools and sets, unsignaled fences, events, and semaphores.
+
+### 9.10.6 Validation and stability controls
+
+There is no checksum over any of this. What guards the stream instead is a layered set of version numbers, magic values, size limits, and per-object liveness checks — plus a small number of trip wires that give up on the save entirely.
+
+The outermost guard couples gfxstream's format to the emulator's snapshot version, and says so:
+
+```cpp
+// Source: hardware/google/gfxstream/host/frame_buffer.cpp:137-141
+// Version and magic numbers for framebuffer stream for validity checks.
+// The global snapshot version (e.g. kVersionBase for AEMU) should be updated when changing
+// the framebuffer version to avoid getting errors when loading old, unsupported snapshots.
+static constexpr uint32_t kFramebufferSnapshotVersionNumber = 1;
+static constexpr uint32_t kFramebufferSnapshotMagicNumber = 0xC0FFEEEE;
+```
+
+That is the link back to 9.3.1: bumping `kVersionBase` to 87 is how a gfxstream format change gets rejected cleanly by the metadata check rather than discovered halfway through a load. The magic number is verified at the end of `FrameBuffer::onLoad` (`frame_buffer.cpp:3729-3735`) and functions as a "did the stream stay in sync" assertion; individual color buffers carry their own `0xCAFEFACE` (`hardware/google/gfxstream/host/color_buffer.cpp:230-234`), and each saved image is prefixed with either `kGoodImageSnapshot` (`0x900df00d`) or `kBadImageSnapshot` (`0xbaadbeef`) so the loader knows whether pixel data follows (`hardware/google/gfxstream/host/vulkan/vk_decoder_snapshot_utils.cpp:62-63`).
+
+Save-time sanity limits reject implausible resource counts before writing anything, on the theory that a renderer holding sixteen thousand color buffers is a leak rather than a workload:
+
+```cpp
+// Source: hardware/google/gfxstream/host/frame_buffer.cpp:134-135
+static constexpr uint32_t kNumMaxProcessResources = 5000;
+static constexpr uint32_t kNumMaxColorBuffers = 16000;
+```
+
+Load-time validation is per object and fails the whole load. Mapped memory must match both handle and size (`vk_decoder_global_state.cpp:834-847`), every saved fence must resolve to a live `VkFence` (`:1067-1073`), and a per-mip payload whose byte count differs from the expected staging size is fatal (`vk_decoder_snapshot_utils.cpp:364-368`). Descriptor sets get a more interesting treatment: their writes hold weak pointers to the underlying image, image view, or buffer, and on save any write whose targets have expired is dropped rather than serialized, because replaying a descriptor write against a destroyed resource would either fault or silently bind whatever now occupies that handle (`vk_decoder_global_state.cpp:618-676`).
+
+The stability controls proper come in three shapes. First, `snapshotsEnabled()` changes runtime behavior so that state remains recoverable: buffers gain `TRANSFER_SRC` usage so their contents can be read back, device memory is force-mapped so it can be serialized, and shader modules are never released eagerly because a later replay still needs them (`vk_decoder_global_state.cpp:7990-7994`). These costs are paid only when the feature is on.
+
+Second, a save can be abandoned from either side. gfxstream can tell the emulator to skip the save through the `set_skip_snapshot_save` vm operation, feeding the same `is_snapshot_save_skipped()` predicate from 9.10.2 with the reason `UNSUPPORTED_VK_API`. There is exactly one Vulkan trip wire wired up today:
+
+```cpp
+// Source: hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:3347-3355
+if (bindInfoCount > 1 && snapshotsEnabled()) {
+    // ...
+    get_gfxstream_vm_operations().set_skip_snapshot_save(true);
+    get_gfxstream_vm_operations().set_skip_snapshot_save_reason(
+        GFXSTREAM_SNAPSHOT_SKIP_REASON_UNSUPPORTED_VK_API);
+}
+```
+
+plus a GL counterpart for native EGLImage import (`hardware/google/gfxstream/host/gl/glestranslator/egl/egl_imp.cpp:1418`). Separately, a pending acceleration-structure descriptor write fails the save outright with "abort (NYI)" rather than producing a snapshot that cannot be restored, and gfxstream also reports back that a snapshot involved Vulkan at all, which is what sets `does_snapshot_use_vulkan` in the skip predicate.
+
+Third — and this is the honest characterization of the current state — some unsupported cases are silently degraded rather than detected. Multisample images and images in `VK_IMAGE_LAYOUT_UNDEFINED` are written as `kBadImageSnapshot` with no contents and restore uninitialized (`vk_decoder_snapshot_utils.cpp:66-86`); stale boxed image and buffer handles are skipped on save under a `TODO` that says it should return an error instead. Combined with the "for now, it is not really stable" comment guarding the skip bypass, that is why the feature still ships off by default, and why the interesting question about a Vulkan snapshot is usually not whether it saved but whether the restored app draws the same frame.
+
+## 9.11 Try It
 
 The following exercises assume an x86_64 AVD and the `emulator` binary on your `PATH`.
 
@@ -596,6 +871,14 @@ avd snapshot load mysnap
 ANDROID_SNAPSHOT_COMPRESS=1 emulator -avd <avd_name> -verbose
 ```
 
+- Turn on Vulkan snapshots for one session, then start a Vulkan app and take a snapshot. Without the flag the save is refused with `SNAPSHOT_SKIP_UNSUPPORTED_VK_APP` or the app is force-stopped first; with it, the app keeps running:
+
+```bash
+emulator -avd <avd_name> -feature VulkanSnapshots -verbose
+```
+
+Note that the flag is snapshot-sensitive, so a `default_boot` saved with it enabled will be rejected on the next launch without it (`IncompatibleVersion` / feature-flag mismatch). Cold-boot once when switching the flag.
+
 ## Summary
 
 - A snapshot is a directory under `<avd>/snapshots/<name>/` containing `ram.bin` (guest RAM), `textures.bin` (GPU state), `snapshot.pb` (metadata), and optionally `ram.img` (file-backed RAM); device and CPU state plus disk snapshots live inside the qcow2 images.
@@ -606,6 +889,8 @@ ANDROID_SNAPSHOT_COMPRESS=1 emulator -avd <avd_name> -verbose
 - File-backed RAM maps guest memory from `ram.img`; a shared mapping makes save nearly free, a private one still needs a copy, and a `ram.img.dirty` marker forces a cold boot after a crash. `snapshotRemap` switches between shared and private at runtime for `default_boot`.
 - Quickboot saves `default_boot` on exit and loads it on boot, gated by feature flags, boot completion, uptime, and command-line options; a liveness monitor deletes the snapshot and cold-boots if the restored guest never comes online.
 - QEMU's `savevm.c` serializes device/CPU state and creates the qcow2 snapshot, while file hooks redirect RAM pages out of the vmstate stream into the custom `RamSaver`/`RamLoader` by returning `RAM_SAVE_CONTROL_DELAYED`.
+- The `VulkanSnapshots` feature (off by default, host feature id 26) makes host Vulkan state snapshottable, so the emulator no longer skips the save or force-stops running Vulkan apps: `Snapshotter::stopVulkanAppsIfApplicable` returns immediately when it is on, and `is_snapshot_save_skipped` stops consulting the live `VkInstance` registry.
+- gfxstream state rides in through the `opengles` pipe's `preSave`/`preLoad` hooks, not the RAM path. Vulkan objects are saved as a topologically ordered trace of the API calls that created them and rebuilt by replaying that trace with the original boxed handle ids, then refilled with memory, image, and buffer contents; version and magic numbers guard the stream, and `kVersionBase` was raised to 87 for these gfxstream save/load changes.
 
 ### Key Source Files
 
@@ -621,3 +906,8 @@ ANDROID_SNAPSHOT_COMPRESS=1 emulator -avd <avd_name> -verbose
 | `external/qemu/migration/savevm.c` | QEMU `qemu_savevm` / `qemu_loadvm` and snapshot callback dispatch |
 | `external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp` | RAM file hooks, block registration, remap, glue into savevm |
 | `hardware/google/aemu/host-common/include/host-common/snapshot_common.h` | File-name constants, `FailureReason`, `OperationStatus`, page size |
+| `external/qemu/android/android-emu/android/opengl/OpenglEsPipe.cpp` | Pipe `preSave`/`preLoad` hooks that drive the gfxstream renderer's save and load |
+| `hardware/google/gfxstream/host/frame_buffer.cpp` | Renderer save/load: version and magic checks, resource limits, Vulkan hand-off |
+| `hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp` | Vulkan save/load ordering, replay, per-object validation, unsupported-API trip wires |
+| `hardware/google/gfxstream/host/vulkan/vk_reconstruction.cpp` | Recorded API-call trace and the topologically ordered replay buffers |
+| `hardware/google/gfxstream/host/vulkan/dependency_graph.cpp` | Object dependency graph and timestamp ordering behind the replay trace |

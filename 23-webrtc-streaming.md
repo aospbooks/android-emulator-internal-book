@@ -109,6 +109,38 @@ Notice that the JSEP payload is a plain string, not a structured protobuf. The `
 
 Keeping the payload as JSON is what lets a browser act as a near-zero-translation peer: the strings the emulator emits are the strings the WebRTC JavaScript API expects.
 
+### 23.2.3 What "v2" actually changed
+
+The `v2` in the filename is easy to misread. It is not a second streaming stack, a new transport, or a new codec path. `RtcServiceV2.cpp` constructs the same `Switchboard` as v1, hands it the same `-turncfg` and `-dump-audio` arguments, and its `SendJsepMessage`, `ReceiveJsepMessageStream`, and `ReceiveJsepMessage` bodies are the v1 handlers with the payload unwrapped from an envelope. Both services are registered on the same gRPC server (Section 23.10), each with its own `Switchboard`, so an `ANDROID_WEBRTC` build answers `android.emulation.control.Rtc` and `android.emulation.control.v2.Rtc` simultaneously.
+
+Two things are genuinely different. The first is API hygiene: every RPC now takes and returns a named message (`RtcStreamRequest`, `SendJsepMessageRequest`, `ReceiveJsepMessageResponse`) instead of a bare `RtcId`, `JsepMsg`, or `google.protobuf.Empty`, which leaves room to add fields without breaking the wire. `RtcId` is renamed `Id`. `RtcStreamRequest` also declares a `google.protobuf.Any payload` as an extension point for "extra information needed by the server" — nothing in the tree reads it today.
+
+The second is the only new capability: the client can supply its own ICE servers.
+
+```proto
+// Source: hardware/google/aemu/protos/services/webrtc/rtc_service_v2.proto
+message RtcStreamRequest {
+    google.protobuf.Any payload = 1;
+    optional IceServerConfig ice_server_config = 2;
+}
+```
+
+`IceServerConfig` comes from `hardware/google/aemu/protos/services/webrtc/ice_config.proto:52` — a structured version of an `RTCConfiguration`, with a repeated `ice_servers` list of URL/username/credential triples, a TLS certificate policy, and an `ice_transport_policy` string. In v1 there is no such field: TURN configuration can only come from the host, by way of the `-turncfg` command (Section 23.9). In v2, `RequestRtcStream` serializes whatever the client sent back to JSON and feeds it to the bridge, which is where the `jsonStr` branch shown in Section 23.2.1 comes from:
+
+```cpp
+// Source: external/qemu/android/android-webrtc/android-webrtc/android/emulation/control/RtcServiceV2.cpp
+google::protobuf::util::JsonPrintOptions options;
+options.add_whitespace = true;
+options.always_print_fields_with_no_presence = true;
+options.preserve_proto_field_names = true;
+auto status = google::protobuf::util::MessageToJsonString(
+        request->ice_server_config(), &jsonStr, options);
+```
+
+A config the protobuf runtime cannot render as JSON is rejected with `INVALID_ARGUMENT` rather than silently dropped. Note `preserve_proto_field_names`: the JSON handed downstream uses the proto's snake_case spelling, so the servers arrive under `ice_servers`, which is precisely the second key `RtcConfig::parse` looks for (`external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/RtcConfig.cpp:65`). The transport policy does not survive the same trip — it is emitted as `ice_transport_policy`, while the parser only tests the camelCase `iceTransportPolicy` (same file, line 104), so a client asking for relay-only transport through the v2 message does not get it.
+
+The 2026 build change that put "WebRTC v2" back in the changelog is narrower still: it added `rtc_service_v2_java_proto` and `rtc_service_v2_java_grpc` to `hardware/google/aemu/protos/services/webrtc/BUILD.bazel:77`, so JVM clients can be generated from the v2 contract the way C++ clients already were. One thing to watch when consuming those: both protos declare `java_package = "com.android.emulator.control"` with `java_multiple_files = true`, so the v1 and v2 `JsepMsg` classes land on the same fully-qualified name. A JVM client depends on one target or the other, not both.
+
 JSEP handshake over the split gRPC service
 
 ```mermaid
@@ -639,6 +671,7 @@ $EDITOR external/qemu/android/android-webrtc/android-webrtc/android/emulation/co
 - The emulator has two front ends sharing one control plane: the local Qt UI (Chapter 22) and a windowless WebRTC stream used by the Android Studio embedded emulator and remote clients.
 - Signaling rides a gRPC `Rtc` service (`rtc_service_v2.proto`) split into `RequestRtcStream`, `SendJsepMessage`, a server-streaming `ReceiveJsepMessageStream`, and a polling fallback — the split exists because JavaScript gRPC-web cannot do bidirectional streams.
 - JSEP messages are opaque JSON blobs (`start`, `sdp`, `candidate`, `bye`) that a browser can hand almost verbatim to its `RTCPeerConnection`.
+- "v2" is an API-shape revision of the same service, not a new streaming stack: it wraps every RPC in a named request/response message, renames `RtcId` to `Id`, reserves an unread `Any payload`, and adds the one real capability v1 lacks — an optional `IceServerConfig` on `RequestRtcStream` that lets the *client* supply ICE/TURN servers instead of relying solely on the host's `-turncfg`. Both versions are served at once, and the recent build work only adds Java proto/gRPC targets for the v2 contract.
 - The gRPC service talks only to an `RtcBridge`; the modern implementation is the in-process `Switchboard`, which also implements `RtcConnection`, making it the seam between the gRPC and WebRTC worlds. The legacy out-of-process `WebRtcBridge`/videobridge is deprecated.
 - Each connected client is a `Participant` that owns a peer connection, drives the offer/answer/ICE handshake, and is torn down on the signaling thread when the connection fails or closes.
 - Video comes from `InprocessVideoSource`, which captures a screenshot on each renderer framebuffer-change event, converts RGB888 to I420 with libyuv, and broadcasts it to the WebRTC encoder; audio comes from `InprocessAudioSource` re-framing guest audio into 10 ms WebRTC packets.
@@ -651,6 +684,8 @@ $EDITOR external/qemu/android/android-webrtc/android-webrtc/android/emulation/co
 | File | Purpose |
 |------|---------|
 | `hardware/google/aemu/protos/services/webrtc/rtc_service_v2.proto` | The gRPC signaling contract (v2 Rtc service, JsepMsg). |
+| `hardware/google/aemu/protos/services/webrtc/ice_config.proto` | `IceServerConfig`, the client-supplied ICE/TURN configuration carried by v2. |
+| `hardware/google/aemu/protos/services/webrtc/BUILD.bazel` | C++ and Java proto/gRPC targets generated from the v1 and v2 contracts. |
 | `external/qemu/android/android-webrtc/android-webrtc/android/emulation/control/RtcServiceV2.cpp` | gRPC service implementation that bridges signaling to the `RtcBridge`. |
 | `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Switchboard.cpp` | In-process bridge/connection that manages participants and message queues. |
 | `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.cpp` | Per-client peer connection, JSEP handshake, data-channel input. |

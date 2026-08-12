@@ -22,6 +22,8 @@ There are three distinct slirp components in play, and it helps to keep them sep
 
 3. `external/qemu/net/slirp.c` is QEMU's adapter for the main networking path. It owns the `SlirpState` struct, registers the QEMU `NetClientInfo`, and wraps the bundled library through `#include "slirp/libslirp.h"`.
 
+The bundled copy in `external/qemu/slirp/` parses attacker-controlled guest packets inside the emulator's own address space, and it has taken a round of hardening for exactly that reason. `ip_reass` now unlinks an overlapping fragment with `ip_deq` before freeing its mbuf, closing a use-after-free on the neighbor pointers it updates afterwards (`external/qemu/slirp/ip_input.c:312`), and caps a reassembled datagram at `IP_MAXPACKET` so a truncated 16-bit length cannot become a heap overflow (`external/qemu/slirp/ip_input.c:337`); `arp_input` rejects anything shorter than a full 42-byte Ethernet + ARP frame before dereferencing the header, stopping an out-of-bounds read on short guest ARP packets (`external/qemu/slirp/slirp.c:1067`). The ARP and DHCP length checks were first written against `sizeof()` of the C structs, which broke networking on TV AVDs, so both now measure the physical wire sizes instead: 28 bytes of ARP payload rather than a `slirp_arphdr` a compiler may pad to 32, and the fixed 264-byte BOOTP header rather than the 576-byte padded `struct bootp_t` that had been dropping legitimate variable-length guest DHCP requests (`external/qemu/slirp/bootp.c:347`).
+
 Both libraries are deliberately host-agnostic — they never call `send()` themselves, instead calling back through registered function pointers when they have a frame to deliver to the guest. The standalone library exposes this as a `SlirpCb` callback struct passed to `slirp_new`; the netsim Wi-Fi driver (`external/qemu/android-qemu2-glue/netsim/libslirp_driver.cpp`) declares such a struct and uses it.
 
 ### 18.1.2 The packet path in QEMU's glue
@@ -468,7 +470,7 @@ The proto comment describes the architecture precisely: "AVDs running in a guest
 
 ### 18.8.2 Connecting the emulator to netsim
 
-On the emulator side, the client is `external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc`. It builds a gRPC channel to a local `netsimd` process (default endpoint `localhost:<port>`), launching the daemon if it is not already running:
+On the emulator side, the client is `external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc`. It builds a gRPC channel to a local netsim daemon (default endpoint `localhost:<port>`), launching the daemon if it is not already running:
 
 ```cpp
 // Source: external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc
@@ -477,6 +479,18 @@ endpoint = "localhost:" + port.value();
 return grpc::experimental::CreateCustomChannelWithInterceptors(
     endpoint, grpc::InsecureChannelCredentials(), args, ...);
 ```
+
+Which daemon binary that launch actually starts is a feature-flag decision made in `RunNetsimd` (`external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc:77`):
+
+```cpp
+// Source: external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc
+std::string executable = "netsimd";
+if (android::featurecontrol::isEnabled(android::featurecontrol::NetsimX)) {
+  executable = "netsimdx";
+}
+```
+
+`NetsimX` — "Netsim Next" — used to default to `off`, so `netsimd` was what you got unless you asked otherwise. It now ships enabled (`external/qemu/android/data/advancedFeatures.ini:510`), which means an AVD started with no extra flags runs `netsimdx`, and the legacy daemon is the opt-in path, selected with `-feature -NetsimX` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:227`). Section 18.8.4 covers what changes on the far side of the stream.
 
 The emulator registers itself with netsim through `register_netsim`, passing the packet-streamer endpoint, the host DNS, the HTTP proxy, and any extra `netsim_args` (`external/qemu/android-qemu2-glue/qemu-setup.cpp:312`). All of these are exposed as command-line options: `-packet-streamer-endpoint`, `-netsim-args` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:260`).
 
@@ -493,7 +507,7 @@ if (mRedirectToNetsim) {
 }
 ```
 
-The `NetsimWifiForwarder` (`external/qemu/android-qemu2-glue/netsim/NetsimWifiForwarder.cpp`) opens a `PacketStreamer` stream with chip kind WIFI and ships each guest `HWSIM_CMD_FRAME` to the daemon as a `bytes packet`. Inside the daemon, the Rust `medium` module (`tools/netsim/rust/daemon/src/wifi/medium.rs`) tracks every connected device as a `Station` keyed by MAC address and routes frames between them — delivering a frame to a known peer station if the destination MAC is registered, re-broadcasting multicast and broadcast frames to all stations, and otherwise sending data frames out to the Internet through netsim's own libslirp wrapper:
+The `NetsimWifiForwarder` (`external/qemu/android-qemu2-glue/netsim/NetsimWifiForwarder.cpp`) opens a `PacketStreamer` stream with chip kind WIFI and ships each guest `HWSIM_CMD_FRAME` to the daemon as a `bytes packet`. Inside the legacy `netsimd`, the Rust `medium` module (`tools/netsim/rust/daemon/src/wifi/medium.rs`) tracks every connected device as a `Station` keyed by MAC address and routes frames between them — delivering a frame to a known peer station if the destination MAC is registered, re-broadcasting multicast and broadcast frames to all stations, and otherwise sending data frames out to the Internet through netsim's own libslirp wrapper:
 
 ```rust
 // Source: tools/netsim/rust/daemon/src/wifi/medium.rs
@@ -508,7 +522,7 @@ if dest_addr.is_multicast() ... {
 }
 ```
 
-netsim hosts its own libslirp instance (the `libslirp-rs` crate at `tools/netsim/rust/libslirp-rs/`, "a wrapper for libslirp C library") so that guests sharing the simulated medium still get NAT'd Internet access, and its own `hostapd` (the `hostapd-rs` crate) to act as the shared access point. The result is that two emulators pointed at the same netsim daemon are no longer isolated — frames from one guest's `wlan0` reach the other guest's `wlan0` because both are stations in the same `Medium`.
+That daemon hosts its own libslirp instance (the `libslirp-rs` crate at `tools/netsim/rust/libslirp-rs/`, "a wrapper for libslirp C library") so that guests sharing the simulated medium still get NAT'd Internet access, and its own `hostapd` (the `hostapd-rs` crate) to act as the shared access point. The result is that two emulators pointed at the same netsim daemon are no longer isolated — frames from one guest's `wlan0` reach the other guest's `wlan0` because both are stations in the same `Medium`.
 
 Two emulators sharing one simulated medium via netsim
 
@@ -535,6 +549,14 @@ flowchart TB
     MED --> SL2 --> NET2["Internet"]
     MED -->|"peer frames"| PS
 ```
+
+### 18.8.4 Netsim Next: the default daemon
+
+Netsim Next (`netsimdx`) is a rewrite of the daemon as a set of Rust actors under `tools/netsim/next/`, and because `NetsimX` now defaults to `on` it is what an ordinary AVD talks to. The wire protocol is untouched: the emulator still opens the same `StreamPackets` stream and still ships `HWSIM_CMD_FRAME` payloads, and the service implementation on the daemon side is `PacketStreamerService` (`tools/netsim/next/grpc-server/src/packet_streamer.rs:87`). Everything behind that stream moves.
+
+The station table and frame routing that lived in `tools/netsim/rust/daemon/src/wifi/medium.rs` are now the `wifi-actor` crate's `Medium`, whose `determine_routes` makes the same three-way decision — deliver to a peer station, flood multicast, or hand the frame to the infrastructure gateway (`tools/netsim/next/wifi-actor/src/medium/rx.rs:126`) — and a `Station` is still a client id plus its MAC, hwsim MAC, and frequency (`tools/netsim/next/wifi-actor/src/medium/types.rs:11`). The uplink is now chosen through a `GatewayTrait` (`tools/netsim/next/wifi-actor/src/gateway.rs:23`): `SlirpGateway` is the default and passes infrastructure traffic to a `SlirpActor` wrapping libslirp (`tools/netsim/next/wifi-actor/src/slirp_gateway.rs:28`, `tools/netsim/next/slirp-actor/src/lib.rs:18`), while `TapGateway` bridges to a host TAP interface on Linux. The access point is no longer `hostapd` at all: the `ap-actor` crate implements the EAP, RSN (WPA2) and SAE (WPA3) handshakes directly in Rust, exporting an `EapAuthenticator`, a `WpaAuthenticator`, and an `SaeStateMachine` in place of the external daemon (`tools/netsim/next/ap-actor/src/lib.rs:26`).
+
+There is also no web UI on this path. The emulator still passes `--no-web-ui` when the `NetsimWebUi` feature is off (`external/qemu/android-qemu2-glue/netsim/qemu-packet-stream-agent-impl.cpp:219`), but the Next daemon accepts the flag only for compatibility and does not implement it (`tools/netsim/next/daemon/src/args.rs:38`), and the `netsim-ui` web bundle has been dropped from netsim's build and distribution packaging. The control surface is the `netsim` CLI (`tools/netsim/next/cli/`), which netsim's own README calls the primary way to interact with a running simulation (`tools/netsim/next/README.md:5`).
 
 ## 18.9 TAP Mode: Bypassing slirp
 
@@ -576,7 +598,11 @@ Hands-on with the emulator's networking, using a running AVD:
 
 - Emulated Wi-Fi combines the guest's `mac80211_hwsim` radio, a host `virtio-wifi` device, and host `hostapd`, with `VirtioWifiForwarder` routing 802.11 frames between the AP, the slirp uplink, and peer VMs.
 
-- netsim (`tools/netsim/`) is a standalone daemon that lets multiple virtual devices share one simulated radio medium over a `PacketStreamer` gRPC stream, with its own Rust-wrapped libslirp and hostapd for shared NAT and AP duties.
+- netsim (`tools/netsim/`) is a standalone daemon that lets multiple virtual devices share one simulated radio medium over a `PacketStreamer` gRPC stream, with its own Rust-wrapped libslirp for shared NAT.
+
+- The daemon the emulator launches by default is now Netsim Next (`netsimdx`, `tools/netsim/next/`), because the `NetsimX` feature ships `on` (`external/qemu/android/data/advancedFeatures.ini:510`); its actor-based Wi-Fi path replaces hostapd with an in-Rust access point and serves no web UI, and the legacy `netsimd` remains available behind `-feature -NetsimX`.
+
+- The bundled slirp stack (`external/qemu/slirp/`) has been hardened against guest-crafted packets — a use-after-free and an `IP_MAXPACKET` overflow in `ip_reass`, an out-of-bounds read in `arp_input` — with the ARP and BOOTP length checks measured against wire sizes so real guest ARP and DHCP traffic still passes.
 
 - TAP mode (`-net-tap`) bypasses slirp entirely for real layer-2 connectivity, at the cost of slirp's zero-setup conveniences.
 
@@ -595,4 +621,6 @@ Hands-on with the emulator's networking, using a running AVD:
 | `external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp` | 802.11 frame routing between guest radio, hostapd, and slirp |
 | `external/qemu/android-qemu2-glue/emulation/WifiService.cpp` | Wi-Fi service builder; slirp config and BSSID for emulated Wi-Fi |
 | `tools/netsim/proto/netsim/packet_streamer.proto` | gRPC packet-streamer protocol for multi-device simulation |
-| `tools/netsim/rust/daemon/src/wifi/medium.rs` | netsim Wi-Fi medium; per-station frame routing |
+| `tools/netsim/rust/daemon/src/wifi/medium.rs` | Legacy `netsimd` Wi-Fi medium; per-station frame routing |
+| `tools/netsim/next/wifi-actor/src/medium/rx.rs` | Netsim Next Wi-Fi medium; station, multicast, and gateway routing |
+| `tools/netsim/next/ap-actor/src/lib.rs` | Netsim Next in-Rust access point (EAP, WPA2/RSN, WPA3/SAE) |

@@ -406,7 +406,128 @@ Because the camera service is a qemud client, it participates in snapshotting. E
 
 The service also reports usage metrics. `camera-metrics.cpp` records a session start with source type, direction, and resolution (`startCapturingImpl`, `camera-service.cpp:940`), a start result code, and a frame count at session stop (`camera-service.cpp:991`). The `ClientStartResult` codes in `camera-common.h:240` — success, parameter mismatch, unknown pixel format, no conversion, out of memory — are exactly what gets reported and what the guest sees as the `ko:` reason string.
 
-## 16.10 Try It
+## 16.10 Inside the Virtual Environment Renderer
+
+Section 16.5 treated `ver_create_scene` and `ver_render_view` as opaque calls. They are the public surface of `android/ver`, the virtual environment renderer that now sits under every non-webcam camera source and under the emulator's environment scene. It builds as its own CMake target, `virtual_environment_renderer` (`external/qemu/android/android-emu/android-emu.cmake:217`), publishes exactly one include directory (`android/ver/include`), and keeps the scene graph, the renderer backends, and the raw image sources private under `android/ver/src`. Everything inside is in `namespace android::ver`; the exported API is a flat set of `ver_*` free functions operating on opaque handles, which is what lets the camera's C-flavored code drive a C++ renderer. The boundary is not fully C yet — the header still passes `std::vector`, `std::function`, and `std::filesystem::path`, and only the webcam-enumeration block is wrapped in `ANDROID_BEGIN_HEADER` for C callers, with a standing `TODO(virtualscene-library): remove the namespace and other C++ usages` at `virtual_environment_renderer_types.h:35`.
+
+### 16.10.1 Initialization and the ScenesManager
+
+`ver_initialize` is called once, from `emulator_window_load_environment` (`external/qemu/android/android-ui/modules/aemu-ui-window/src/android/emulator-environment.cpp:73`). Its three inputs are the resource search paths, the EGL/GLESv2 dispatch tables, and a Vulkan base path:
+
+```cpp
+// Source: external/qemu/android/android-ui/modules/aemu-ui-window/src/android/emulator-environment.cpp
+const char* avdBasePath = avdInfo_getContentPath(avdInfo);
+if (avdBasePath) {
+    resourceBasePaths.push_back(std::filesystem::path(avdBasePath));
+}
+std::filesystem::path resourcesBasePath = launcherDir / "resources";
+resourceBasePaths.push_back(resourcesBasePath);
+vulkanBasePath = launcherDir / "lib64" / "vulkan";
+```
+
+Scene files are therefore resolved first against the AVD's own content directory and then against the emulator's `resources` folder, in that order. `ver_initialize` itself does nothing but hand those values to `ScenesManager` (`external/qemu/android/android-emu/android/ver/src/virtual_environment_renderer.cpp:284`), a class of statics that owns every `Scene` and every `RendererView` in the process (`ver/src/ScenesManager.h:36`). The handles the camera code carries around are just those objects' pointers, `reinterpret_cast` to opaque struct types at the API edge (`virtual_environment_renderer.cpp:303`).
+
+### 16.10.2 Scene Modes Decide How Much Renderer You Get
+
+A scene is described entirely by a `SceneConfig`: a mode and a string argument (`ver/include/ver/virtual_environment_renderer_types.h:64`). There are eight modes, and `modeFromString` is what maps the camera device-name strings from 16.1.1 onto them — `virtualscene` and `mesh3d` both become `Mesh3D` (`virtual_environment_renderer_types.h:102`).
+
+```cpp
+// Source: external/qemu/android/android-emu/android/ver/include/ver/virtual_environment_renderer_types.h
+enum class Mode {
+    Unknown = 0,
+    Mesh3D,     ///< Full 3D environment with posters
+    VideoFile,  ///< Single video file rendered as a plane
+    ImageFile,  ///< Single image file rendered as a plane
+    Color,      ///< Uniform background color
+    Image360,   ///< 360-degree panoramic image
+    StreetView, ///< 360-degree street view panoramic image
+    Webcam,     ///< Single webcam feed rendered as a plane
+};
+```
+
+A set of static predicates on the same struct turns the mode into behavior, and they are consulted from both the renderer and the UI: `modeRequiresRenderer` is true only for `Mesh3D`, `Image360`, and `StreetView` (`:174`); `modeSupportsSceneControls` matches that same trio (`:203`); `modeSupportsCameraTranslation` is `Mesh3D` alone (`:221`); and `modeHasDynamicContents` is `StreetView` alone (`:214`).
+
+`ScenesManager::renderView` (`virtual_environment_renderer.cpp:90`) branches on the same distinction. The three 3D modes ask the `Scene` for a renderable list and call `Renderer::render`; `ImageFile`, `VideoFile`, `Color`, and `Webcam` never touch a graphics context at all — they scale the scene's current RGBA overlay straight into the view's framebuffer with libyuv through `ImageScaler` (`virtual_environment_renderer.cpp:156`), using `AspectFitZoom` except for the 1x1 solid-color case, which uses `ScaleToFill`. That is why `-camera-back imagefile:picture.png` costs no GPU resources.
+
+Before any of that, `renderView` consults the view's cache: if the scene's version hash and frame time both match what the view last rendered, it invokes the finish callback and returns without re-rendering (`virtual_environment_renderer.cpp:106`). The hash is `mObjectsVersion` XORed with the scene's address (`ver/src/Scene.cpp:572`), and `mObjectsVersion` is bumped by every structural change — loading a poster, changing its scale, releasing resources.
+
+### 16.10.3 Two Renderer Backends, Vulkan First
+
+`Renderer::create` (`ver/src/Renderer.cpp:237`) is the whole backend policy. There is no feature flag and no AVD setting: Vulkan is tried first and GLES is the fallback, with an environment variable to force either one.
+
+```cpp
+// Source: external/qemu/android/android-emu/android/ver/src/Renderer.cpp
+std::string backend = System::get()->envGet("VER_RENDERER_BACKEND");
+...
+dprint("VER: Attempting to create Vulkan renderer.");
+auto vulkanRenderer = RendererVulkan::create(vulkanBasePath);
+if (vulkanRenderer) {
+    dprint("VER: Successfully created Vulkan renderer.");
+    return vulkanRenderer;
+}
+dprint("VER: Could not create Vulkan renderer, falling back to GLES renderer.");
+```
+
+`RendererVulkan` asks for API 1.3 (`ver/src/RendererVulkan.cpp:95`) and renders offscreen into a 1024x1024 color image using dynamic rendering rather than a swapchain. At the end of `render` it transitions that image to `TRANSFER_SRC`, copies it into a host-visible staging buffer with `vkCmdCopyImageToBuffer` (`RendererVulkan.cpp:1669`), maps it, and scales it into the `RendererView`'s RGBA8 cache (`RendererVulkan.cpp:1687`) — which is exactly the buffer `ver_render_view_get_framebuffer` hands to `convert_frame` back in 16.5.2.
+
+Neither backend links against a Vulkan loader. The headers are vendored under `ver/src/third_party/vulkan`, included with `VK_NO_PROTOTYPES` (`ver/src/VulkanDispatch.h:60`), and every entry point is resolved at runtime through `VulkanDispatchTable::initDriver` (`VulkanDispatch.h:162`). Driver discovery tries the emulator's own `lib64/vulkan` folder before the system search path, and prefers the bundled lavapipe software rasterizer over whatever the host installed:
+
+```cpp
+// Source: external/qemu/android/android-emu/android/ver/src/VulkanDispatch.h
+const std::vector<std::string> libNames = {
+    "libvulkan_lvp.so",
+    "libvulkan.so",
+    "libvulkan.so.1",
+};
+...
+if (!driverFolder.empty()) {
+    for (const auto& name : libNames) {
+        std::filesystem::path fullPath = driverFolder / name;
+        if (tryLoad(fullPath.string())) { break; }
+    }
+}
+```
+
+`tryLoad` accepts either `vkGetInstanceProcAddr` or the ICD-level `vk_icdGetInstanceProcAddr`, so a bare ICD with no loader in front of it still works. `initInstance` and `initDevice` then fill the rest of the table, with `vkCmdBeginRendering` falling back to its `KHR` alias when the driver only exposes the extension form.
+
+```mermaid
+flowchart TD
+    CAM["RenderedCameraDevice<br/>(camera-virtualscene-utils)"] --> API["ver_* API<br/>create scene, render view"]
+    VSM["VirtualSceneManager<br/>(environment scene)"] --> API
+    API --> SM["ScenesManager statics<br/>owns Scenes and RendererViews"]
+    SM --> SC["Scene + SceneConfig::Mode"]
+    SC --> OBJ["SceneObject list<br/>Mesh / Poster"]
+    SC --> Q{"modeRequiresRenderer?"}
+    Q -->|yes| RB["Renderer::create<br/>Vulkan, else GLES"]
+    Q -->|no| SCL["ImageScaler on RGBA overlay"]
+    RB --> FB["RendererView RGBA8 cache"]
+    SCL --> FB
+    FB --> CONV["ver_render_view_get_framebuffer<br/>to convert_frame"]
+```
+
+*Figure 16-8: How the camera and the environment scene share one renderer library*
+
+### 16.10.4 Scene Objects, glTF, and Posters
+
+A `Scene` holds a list of `SceneObject`s (`ver/src/SceneObject.h:33`), each carrying a model transform, a list of `Renderable`s, a bounding box, and a virtual `setAnimationTime`. Two subclasses exist. `PosterSceneObject` is a unit quad clamped between a 20 cm minimum (`virtual_environment_renderer_types.h:43`) and the per-location maximum size (`ver/src/PosterSceneObject.h:28`). `MeshSceneObject` loads geometry from `.obj`, `.gltf`, or `.glb` (`ver/src/MeshSceneObject.cpp:958`), and also synthesizes the 64-segment UV sphere used by the panoramic modes (`MeshSceneObject.cpp:971`).
+
+glTF 2.0 support is compiled in from a vendored tinygltf — `MeshSceneObject.cpp` is the single translation unit that defines `TINYGLTF_IMPLEMENTATION` (`MeshSceneObject.cpp:22`), and the build exposes it as an interface target that links the emulator's shared nlohmann JSON library rather than tinygltf's bundled copy (`external/qemu/android/third_party/CMakeLists.txt:124`). `loadGltf` (`MeshSceneObject.cpp:309`) reads the node hierarchy, skins with their inverse bind matrices, animation channels, and the `JOINTS_0`/`WEIGHTS_0` attributes of each skinned primitive. Playback is deliberately minimal: `setAnimationTime` (`MeshSceneObject.cpp:1034`) plays animation 0, loops it with `fmod` over the clip duration, skins the base vertices on the CPU, and pushes the result back with `Renderer::updateMesh`. `Scene::update` drives it with the scene's own frame time in seconds (`Scene.cpp:531`), so pausing animations from the UI freezes mesh animation and video playback together.
+
+Posters are a `Mesh3D`-only feature — `Scene::createPosterLocation` rejects every other mode outright (`Scene.cpp:600`), which is why `-virtualscene-poster` has no effect on an `imagefile` or `image360` camera.
+
+### 16.10.5 Street View Scenes
+
+`Mode::StreetView` renders a live 360-degree panorama on the same sphere mesh as `Image360`. It is off unless `ANDROID_EMU_ENABLE_STREETVIEW` is `1` (`Scene.cpp:168`), and it is the one mode whose argument is not a file, so `configArgumentFileExists` returns true unconditionally for it (`Scene.cpp:128`). At scene creation the code reads the current emulated GPS position, resolves a Maps key from `android::location::MapsKey` (preferring the user key over the Android Studio one, `Scene.cpp:211`), and then walks three fallbacks: stitch tiles fetched through the Map Tiles API with `fetch360Panorama`, fall back to a single static Street View image with `downloadStaticImage`, and finally fall back to the bundled `default360.jpg` (`Scene.cpp:224`).
+
+The endpoints are collected as constants in `ver/src/StreetViewUtils.cpp:63` — session creation, tile and Maps metadata, tiles, static imagery — and responses are parsed with `nlohmann/json` (`StreetViewUtils.cpp:28`), the same shared library the tinygltf target links. Error logs run URLs through `redactApiKey` first, so a failed download never prints the caller's Maps key. Because `modeHasDynamicContents` is true for this mode alone, `VirtualSceneManager::onLocationChanged` re-creates the whole scene when the emulated location moves (`external/qemu/android/android-emu/android/virtualscene/VirtualSceneManager.cpp:949`).
+
+### 16.10.6 What VirtualSceneManager Still Owns
+
+With rendering moved into `ver`, `VirtualSceneManager` is left as the policy layer for the single *environment* scene. It reads `environment.ini` through `avdInfo_getEnvironmentIni`, refuses any `version` other than 1, and parses `scene.mode` as `mode:argument` split on the first colon (`VirtualSceneManager.cpp:273`), with `background.blurAmount` and `background.enabled` controlling the transparent-display background view. If `ver_create_scene` fails for the configured mode, it retries with a hardcoded fallback of `Mode::ImageFile` plus `default.jpg` before giving up (`VirtualSceneManager.cpp:447`).
+
+It also reference-counts scene users. `addSceneUser` (`VirtualSceneManager.cpp:699`) is what the `kEnvironment` camera path from 16.5.1 calls: on the first user it loads renderer resources, replays the stored poster locations and poster settings into the scene, and starts the 30 Hz scene update thread (`kUpdatePerSecond`, `VirtualSceneManager.cpp:63`); on the last `removeSceneUser` it unloads them again. Each transition also pushes `modeSupportsSceneControls(ver_scene_get_mode(...))` to the UI (`VirtualSceneManager.cpp:730`), which is how the extended controls know whether to offer scene navigation at all — and `modeSupportsCameraTranslation` further decides whether that navigation includes WASD translation or only rotation. Finally, `getEnvironment` (`VirtualSceneManager.cpp:976`) reflects the resolved configuration back out as `version`, `scene.mode`, `background.blurAmount`, and `background.enabled` key/value pairs for callers that want to read the environment without owning it.
+
+## 16.11 Try It
 
 Inspect and exercise the camera pipeline against a running AVD.
 
@@ -450,6 +571,8 @@ emulator -avd <name> -camera-back virtualscene -virtualscene-poster wall=/path/t
 - Host webcam passthrough on Linux uses V4L2 with mmap/userptr/direct I/O, enumerating `/dev/video*` and preferring a native format close to the guest's YV12 need.
 - `convert_frame` takes a libyuv fast path (I420 intermediate) when white balance is neutral and the format pair is supported, otherwise a per-pixel slow path; a persistent staging buffer keeps the steady state allocation-free.
 - Orientation and timestamps are coupled to the sensors subsystem so frames stay upright and on the same clock as sensor events, and each client class implements save/load so capture survives snapshots.
+- Scene rendering lives in the `android/ver` library (`namespace android::ver`), reached through opaque `ver_*` handles: `ScenesManager` owns every `Scene` and `RendererView`, `SceneConfig::Mode` decides whether a mode needs a GPU at all, and `Renderer::create` picks Vulkan first and falls back to GLES, with `VER_RENDERER_BACKEND` forcing either.
+- `ver` vendors its own Vulkan headers and resolves entry points through a runtime dispatch table that searches the emulator's `lib64/vulkan` folder first, loads glTF 2.0 meshes and skinned animation via a vendored tinygltf, and fetches Street View panoramas over the Maps APIs; `VirtualSceneManager` is now just the policy layer that reads `environment.ini`, reference-counts users of the shared environment scene, and tells the UI which scene controls apply.
 
 ### Key Source Files
 
@@ -460,6 +583,13 @@ emulator -avd <name> -camera-back virtualscene -virtualscene-poster wall=/path/t
 | `external/qemu/android/android-emu/android/camera/camera-virtualscene.cpp` | Virtual scene vtable shims over `RenderedCameraDevice` |
 | `external/qemu/android/android-emu/android/camera/camera-virtualscene-utils.cpp` | Scene creation, per-frame render, RGBA8 framebuffer to `convert_frame` |
 | `external/qemu/android/android-emu/android/virtualscene/SceneCamera.cpp` | Scene viewpoint driven by the physical model / sensors |
+| `external/qemu/android/android-emu/android/virtualscene/VirtualSceneManager.cpp` | `environment.ini` parsing, the shared environment scene, scene-user refcounting and scene controls |
+| `external/qemu/android/android-emu/android/ver/include/ver/virtual_environment_renderer.h` | Public `ver_*` API over opaque scene and render-view handles |
+| `external/qemu/android/android-emu/android/ver/src/virtual_environment_renderer.cpp` | `ScenesManager` statics, handle marshalling, per-mode render dispatch and view caching |
+| `external/qemu/android/android-emu/android/ver/src/Renderer.cpp` | Backend selection (Vulkan then GLES), `RendererView` framebuffer cache, libyuv `ImageScaler` |
+| `external/qemu/android/android-emu/android/ver/src/VulkanDispatch.h` | Runtime Vulkan dispatch table and driver discovery against the Vulkan base path |
+| `external/qemu/android/android-emu/android/ver/src/MeshSceneObject.cpp` | `.obj` and glTF 2.0 mesh loading, skinning, and animation playback |
+| `external/qemu/android/android-emu/android/ver/src/StreetViewUtils.cpp` | Street View metadata, tile fetch and stitching, API-key redaction |
 | `external/qemu/android/android-emu/android/camera/camera-capture-linux.c` | V4L2 host webcam enumeration and capture |
 | `external/qemu/android/android-emu/android/camera/camera-format-converters.c` | `convert_frame` fast (libyuv) and slow (table) paths |
 | `external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/camera/VirtualSceneCamera.cpp` | gRPC control of the virtual scene camera pose |

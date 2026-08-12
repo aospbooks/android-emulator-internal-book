@@ -518,6 +518,8 @@ if (feature_is_enabled(kFeature_ModemSimulator) && !opts->ui_only) {
 
 The transport differs from the legacy path. Instead of a goldfish tty wired straight into the in-process modem, the simulator runs as a detached server on a TCP socket, and QEMU bridges the guest to it with a `virtio-serial` port named `modem` over a reconnecting socket chardev. `start_android_modem_simulator_detached` sets `android_modem_version = 2`, starts the Cuttlefish `ModemSimulator` instances with a timezone and phone number, and returns the guest-side port. This is the same modem code path Cuttlefish uses, which is why the simulator carries its own NVRAM config, ICCID profiles, and a richer AT-command implementation than the legacy table.
 
+Both C++ backends are in maintenance mode. Recent work in `external/qemu/android/emu/telephony/` is hardening against malformed input rather than new features. `amodem_add_line` now clamps its contribution to the room left in `out_buff` instead of trusting `vsnprintf`'s return value, and `amodem_end_line` clamps `out_size` before writing the terminator (lines 544–574 of `modem.c`). `make_SRES_Kc` in `sim_card.c` (lines 338–356) takes an unsigned length and returns canned `'0'` digits when it is zero, rather than using it as a modulus — the length is parsed straight out of an `AT+CSIM` hex field, so a guest could make it zero. In `sms.c`, `sms_get_text_utf8` rejects a user-data length that cannot fit in the remaining PDU bytes (line 907), and `sms_receiver_add_submit_pdu` links a freshly allocated fragment into the receiver list only after the fragment index has been validated against that fragment's own `max` (lines 1623–1634), so a bogus concatenation header can no longer leave a half-initialised fragment reachable. The Cuttlefish simulator got the same treatment: its host thread now length-checks and hand-parses the four-byte `REMx` remote-call request instead of calling `std::stoi`, which throws on unparseable input (`external/qemu/android/third_party/modem-simulator/modem_main.cpp`, line 534).
+
 The two backends and their transports
 
 ```mermaid
@@ -541,7 +543,158 @@ flowchart LR
     VS --> GUEST
 ```
 
-## 21.10 Try It
+## 21.10 The Rust Modem in netsim
+
+A third baseband is being written, and it lives outside the emulator entirely. `modem-rs` is a Rust crate under `tools/netsim/next/modem-rs/`, part of netsim's next-generation actor tree, and its roadmap states the goal plainly: it "is a replacement for the existing C++ Unisoc library" — the Cuttlefish modem simulator of section 21.9. The stated reason is architectural. The C++ simulator uses one process per emulated device, so testing a call between two devices means console commands or hand-built TCP bridges; the Rust implementation "runs as a single service within Netsim that manages multiple modem instances," which makes device-to-device calls and SMS a matter of routing inside one process (`tools/netsim/next/modem-rs/ROADMAP.md`, lines 3–13).
+
+### 21.10.1 One service per command family
+
+Where `modem.c` is a single 3,000-line file with one flat dispatch table, `modem-rs` splits the AT surface into eight service modules, each owning its commands and its state.
+
+```rust
+// Source: tools/netsim/next/modem-rs/src/modem.rs
+pub struct ModemImpl {
+    pub sim_service: SimService,
+    pub network_service: NetworkService,
+    pub sms_service: SmsService,
+    pub call_service: CallService,
+    pub stk_service: StkService,
+    pub sup_service: SupService,
+    pub misc_service: MiscService,
+    pub data_service: DataService,
+```
+
+Each service declares a Rust enum of the commands it handles, annotated with the AT string, and the `CommandParser` derive macro generates the parser from those annotations. `Command::parse` is then an ordered `alt` over the eight per-service parsers (`src/parser.rs`, lines 126–150), and `ModemImpl::execute` is a match that routes each variant to its service (`src/modem.rs`, lines 523–536). There is no `!`-prefix convention and no shared answer table: a command either parses into a typed variant or falls out of the `alt`.
+
+```rust
+// Source: tools/netsim/next/modem-rs/src/network_service.rs
+#[derive(Debug, PartialEq, Clone, Copy, CommandParser)]
+pub enum NetworkCommand<'a> {
+    #[command(tag = "AT+COPS?")]
+    QueryOperator,
+    #[command(tag = "AT+COPS=?")]
+    QueryAvailableOperators,
+    #[command(tag = "AT+COPS=")]
+    SetOperator { mode: CopsMode, format: Option<CopsFormat>, oper: Option<QuotedString<'a>> },
+```
+
+The state each service holds is likewise scoped. `NetworkService` keeps `cops_mode` and `cops_format` (lines 325–354), `SupService` keeps the CLIR mode plus a per-service-class call-waiting map (lines 101–125), and the modem struct owns them rather than flattening everything into one `AModemRec_`.
+
+### 21.10.2 Typed commands, typed parameters
+
+The recent work has been a steady march from byte slices to types. Dial arguments are the clearest case. The legacy handler receives the raw command tail as `const char*` and picks it apart inline; `modem-rs` parses `ATD` into a `DialArgs` carrying a validated number, a CLIR mode, and an emergency flag.
+
+```rust
+// Source: tools/netsim/next/modem-rs/src/types.rs
+pub struct DialArgs {
+    pub number: PhoneNumber,
+    pub clir: ClirMode,
+    pub is_emergency: bool,
+}
+```
+
+`DialString` does the dirty work behind that struct (lines 128–186): it accepts the pause and wait modifiers (`,`, `W`, `w`), truncates the number at the first one, strips a trailing `i` or `I` and turns it into `ClirMode::Suppression` or `ClirMode::Invocation`, treats `@` or a cleaned number of `911` as an emergency dial, and rejects anything else. `PhoneNumber` then owns the properties the rest of the modem asks for — `normalized` strips a leading `+`, `toa` returns 145 for international numbers and 129 otherwise, and `is_gprs_dial` recognises the `*99...#` family (lines 79–105).
+
+Three command families arrived recently on top of that typing work. `AT+COPS=?` (network scan) enumerates the known operators and then, per 27.007, the supported `<mode>` and `<format>` value lists, all built from the `CopsMode` and `CopsFormat` enums rather than a canned string (`src/network_service.rs`, lines 244–279). `AT+CLIR` gained both a query and a setter, plus a separate variant for a non-standard spelling the goldfish RIL emits:
+
+```rust
+// Source: tools/netsim/next/modem-rs/src/sup_service.rs
+    #[command(tag = "AT+CLIR?")]
+    QueryClir,
+    /// Non-standard Goldfish CLIR syntax
+    #[command(tag = "AT+CLIR: ")]
+    SetClirGoldfish(ClirMode),
+    #[command(tag = "AT+CLIR=")]
+    SetClir(ClirMode),
+```
+
+`AT+CCWA` (call waiting) keeps a status per basic service class — voice, data, fax — and a query returns one `+CCWA:` line per active class, or a single not-active line for the queried class when none are (`src/sup_service.rs`, lines 185–222).
+
+The largest recent addition is a real SIM Toolkit service. `StkService` implements `AT+CUSATD?`/`AT+CUSATD=` (profile download readiness), `AT+CUSATE=` (envelope), and `AT+CUSATT=` (terminal response), plus the older `AT+STKEN`, `AT+STKUR`, and `AT+STK` enable switches (`src/stk_service.rs`, lines 45–61). It parses menu-selection envelopes down to the BER-TLV tags — `0xD3` for a menu selection, `0x81` for command details, `0x83` for the result — and walks the menu tree defined by the SIM profile, keeping a `current_path` of selected menu ids so that a select, a back, and a session-end behave like a real card (lines 14–41, 115–150). Responses go back as `+CUSATE:` and `+CUSATT:`, and the service pushes proactive commands and session ends to the guest as `+CUSATP:` and `+CUSATEND` unsolicited results (lines 72–92). The crate's `README.md` still lists STK terminal response and `AT+COPS=` as missing; that table is dated February 2026 and the code has moved past it.
+
+### 21.10.3 SIM profiles and the goldfish default
+
+A `modem-rs` SIM is an XML ICC profile — a nested file system of dedicated and elementary files, PIN state, facility locks, and an STK setup menu — deserialised into the `SimProfile` types in `src/config.rs`. Three profiles are compiled into the binary (`src/profiles.rs`), and `new_modem` picks between them.
+
+```rust
+// Source: tools/netsim/next/modem-rs/src/modem_network_simulator.rs
+let xml_content = match &sim_profile {
+    Some(xml) => xml.as_str(),
+    None => match sim_type {
+        Some(2) => crate::profiles::PROFILE_CTS_XML,
+        _ => {
+            if quirks.is_cuttlefish {
+                crate::profiles::PROFILE_TEL_ALASKA_XML
+            } else {
+                crate::profiles::PROFILE_DEFAULT_XML
+            }
+        }
+    },
+};
+```
+
+An explicit profile passed in at chip creation wins; `sim_type` 2 selects the CTS carrier-API profile; otherwise the choice is by guest kind. Cuttlefish gets the TelAlaska SIM, which puts the modem on PLMN 311740 — `AT+CIMI` answers `311740123456789` and `AT+COPS?` answers `+COPS: 0,2,311740` (`tools/netsim/next/modem-rs/tests/sim_service_test.rs`, lines 1050–1090). Goldfish, and every other guest, gets the default profile: the T-Mobile SIM, IMSI `310260000000000`, with its own STK setup menu (`src/profiles/iccprofile_for_sim0.xml`, lines 78–80 and 163–177). That split is why the home PLMN is no longer a constant — `SimProfile::home_plmn` takes the first six IMSI digits and only falls back to `DEFAULT_PLMN` when the profile has none (`src/config.rs`, lines 39–41; `src/constants.rs`, line 11). Phone numbers follow the familiar emulator scheme: profiles that carry no MSISDN get `15555211` plus a per-modem index, making the first modem on a network `15555211001` (`src/constants.rs`, line 14; `src/modem_network_simulator.rs`, lines 197–212).
+
+The guest-kind decision arrives as a `Quirks` struct, which netsimd fills in from the `DeviceInfo` the client sent at connect time.
+
+```rust
+// Source: tools/netsim/next/daemon/src/netsimd.rs
+ChipKind::CELLULAR => {
+    let (goldfish_ril_37_or_earlier, is_cuttlefish) = match chip_info.device_info.as_ref() {
+        Some(d) => {
+            let is_emulator = d.kind == "EMULATOR";
+            let is_cuttlefish = d.kind == "CUTTLEFISH";
+            let sdk_version = d.sdk_version.parse::<i32>().unwrap_or(0);
+            (is_emulator && sdk_version < 38, is_cuttlefish)
+        }
+        None => (false, false),
+    };
+```
+
+The other flag, `goldfish_ril_37_or_earlier` (`tools/netsim/next/model/src/cell.rs`, lines 19–26), exists because the goldfish RIL in SDK 37 and earlier mishandles a numeric `+COPS?` answer while unregistered: the modem returns a quoted `"310260"` for those guests instead of the spec-correct `+COPS: <mode>,2,0`, with the reasoning spelled out in a comment (`src/network_service.rs`, lines 174–183).
+
+### 21.10.4 Reaching the guest, and controlling it from the host
+
+There is no QEMU chardev in this design and no `_vx` dispatch. To `modem-rs` the guest is a netsim chip of kind `CELLULAR`, and the bytes arrive on the same packet-stream plumbing netsim already uses for Bluetooth, UWB, and NFC — a file-descriptor pair from the startup config, a Unix socket, TCP, or the gRPC packet streamer. The startup proto carries the two cellular-specific fields: `sim_type` and an optional `sim_profile` holding the XML profile itself (`tools/netsim/proto/netsim/startup.proto`, lines 104–107).
+
+Framing is the modem's own. `ModemCodec` splits the byte stream on `\r` or `\n`, but yields `\x1a` (Ctrl-Z) and `\x1b` (ESC) *inside* the frame so the SMS body prompt still works (`tools/netsim/next/packet-stream/src/transport/modem.rs`, lines 9–49). That is the same subtlety `modem_driver.c` handles with its `in_sms` flag, moved into the codec: on the modem side, `receive_at_command` checks whether an SMS PDU is pending, treats a trailing Ctrl-Z as the body and an embedded ESC as an abort, and otherwise waits for more bytes (`src/modem.rs`, lines 253–286).
+
+`CellActor` is the glue. Its `handle_create` takes the packet sink and stream that netsimd hands it, bridges the async sink to the synchronous `ModemSink` the crate expects via an unbounded channel and a forwarder task, registers the stream, and calls `add_modem` with the chip's `sim_type`, `sim_profile`, and quirks (`tools/netsim/next/cell-actor/src/service.rs`, lines 30–88). Timers work the same way in reverse: the simulator emits `HostEvent::TimerRequest`, and the actor schedules it with `ctx.run_later` and calls back into `on_timer` (`src/lifecycle.rs`, lines 58–79), which is how ring and call-progress timeouts advance without the crate owning a clock.
+
+```mermaid
+flowchart LR
+    subgraph GUESTP["Guest"]
+        RIL2["rild / vendor RIL"]
+    end
+    subgraph NETSIM["netsimd process"]
+        PS["packet-stream<br/>ModemCodec framing"]
+        CA["CellActor"]
+        SIMU["ModemNetworkSimulator<br/>one entry per modem"]
+        SVC["8 services<br/>sim / network / call / sms<br/>data / sup / stk / misc"]
+        GRPC2["gRPC CellService"]
+    end
+
+    RIL2 -->|"AT lines over fd, socket or gRPC"| PS
+    PS --> CA
+    CA -->|add_modem, send_data| SIMU
+    SIMU --> SVC
+    SVC -.->|"responses and URCs"| CA
+    CA -.-> PS
+    PS -.-> RIL2
+    GRPC2 -->|"IncomingCall, ReceiveSms, ..."| CA
+```
+
+*Figure 21-7: The modem-rs path from guest AT lines to the per-modem services, with host control arriving through netsim's gRPC CellService.*
+
+Host control is a netsim gRPC service rather than an emulator one. `CellService` offers `Get`, `List`, and `Execute` (`tools/netsim/proto/netsim/cell.proto`, lines 10–19), and the `Execute` action list covers what the `gsm` and `sms` console groups cover: `IncomingCall`, `EndCall`, `RemoteAnswer`, `RemoteHold`, `ReceiveSms`, `ReceivePdu`, `SetSignalStrength`, `SetVoiceRegistration`, `SetDataRegistration`, `SetSimStatus`, `SetNetworkTechnology`, `SetNetworkTimezone`, and `SetOperator` (lines 33–51). `CellActor::handle_action` validates the arguments — phone numbers, SMS senders, even-length hex for a raw PDU — and translates each into a `ModemAction` for the simulator (`tools/netsim/next/cell-actor/src/service.rs`, lines 194–254). Reads go the other way: `Get` returns the modem's ringing state, SMS count, RSSI, BER, registration states, and the active call list, assembled from the services in `get_modem_info` (`tools/netsim/next/modem-rs/src/modem_network.rs`, lines 50–99).
+
+Cuttlefish reaches the crate through netsimd's file-descriptor listener: `DualFdListener` is compiled only on Linux with the `cuttlefish` feature, wraps the guest's in and out descriptors in the `ModemCodec` reader for a `CELLULAR` chip, and hands the resulting stream and sink to the same actor path (`tools/netsim/next/packet-stream/src/transport/dual_fd.rs`, lines 284–287; `tools/netsim/next/daemon/src/netsimd.rs`, lines 867–882).
+
+Alongside that there is a standalone `modem_simulator` binary in a separate crate, `modem-main`, which is not part of the netsim workspace build. It exists to drive the simulator without netsimd: in server mode it daemonises, listens on TCP port 5556, and accepts three HTTP-style handshakes — `REGISTER /modem?modem_id=`, `INJECT /modem?modem_id=`, and `GET /modems` — creating a modem per registered proxy connection and removing it on disconnect (`tools/netsim/next/modem-rs/modem-main/src/server.rs`, lines 79–214). Proxy clients compute a globally unique modem id as `(instance_id << 32) | index` so that several instances share one simulated network (`modem-main/src/client.rs`, lines 29–46), and a `cli send-sms` subcommand injects `AT+CMGF=1`, `AT+CMGS=`, and a Ctrl-Z-terminated body over the `INJECT` handshake (`modem-main/src/main.rs`, lines 71–89 and 144–168).
+
+For the emulator, the wiring is not finished. netsimd already recognises an `EMULATOR` device on a `CELLULAR` chip and picks the goldfish SIM profile and quirks for it, but nothing in `external/qemu` opens that chip yet: the QEMU glue registers netsim chardevs only for UWB, NFC, and Bluetooth (`external/qemu/android-qemu2-glue/main.cpp`, lines 3046–3066), and the packet protocols it implements cover exactly those three kinds (`external/qemu/android-qemu2-glue/netsim/PacketStreamTransport.cpp`, lines 22–25). Until that lands there is no feature flag to flip — an emulator still gets `ModemLegacy` or, with `kFeature_ModemSimulator`, the Cuttlefish C++ simulator, while `modem-rs` is exercised by Cuttlefish and by the crate's own given/when/then integration tests, which drive a `World` of modems entirely through AT strings (`tools/netsim/next/modem-rs/tests/`).
+
+## 21.11 Try It
 
 The console commands work on any running emulator. Connect to the console and authenticate first.
 
@@ -566,7 +719,9 @@ The console commands work on any running emulator. Connect to the console and au
 - SMS uses genuine GSM 03.40 PDU encoding; inbound messages arrive as unsolicited `+CMT:` lines and multipart messages are split into concatenated PDUs.
 - Signal strength is polled by the guest with `+CSQ` about every 15 seconds, served either from a five-level profile table or raw host-set values; the modem piggybacks NITZ time and physical-channel-config updates onto that poll.
 - Host control flows through the telnet console (`gsm`/`sms`/`cdma`), the `QAndroidCellularAgent` vtable, and the gRPC `Modem` service, all of which funnel into the same `amodem_*_vx` functions.
-- A feature flag selects between the legacy in-process modem and the Cuttlefish modem simulator, the latter running as a detached TCP server bridged to the guest over virtio-serial.
+- A feature flag selects between the legacy in-process modem and the Cuttlefish modem simulator, the latter running as a detached TCP server bridged to the guest over virtio-serial. Both C++ backends are now in hardening mode — the recent commits are bounds checks in `modem.c`, `sms.c`, `sim_card.c`, and the Cuttlefish `modem_main.cpp`.
+- A third baseband, the Rust `modem-rs` crate, is growing inside netsim as a replacement for the C++ Cuttlefish simulator. It splits the AT surface into eight service modules with derive-macro-generated parsers, parses dial strings into typed `PhoneNumber`/`DialArgs` values, and has recently gained `AT+COPS=?`, `AT+CLIR`, `AT+CCWA`, and a full SIM Toolkit service.
+- `modem-rs` runs as one service inside netsimd managing every modem on the virtual network, reached as a `CELLULAR` netsim chip rather than a QEMU chardev, with SIM profiles chosen by guest kind (T-Mobile for goldfish, TelAlaska for Cuttlefish) and host control through netsim's gRPC `CellService`. The emulator's QEMU glue does not open that chip yet.
 
 ### Key Source Files
 
@@ -582,3 +737,11 @@ The console commands work on any running emulator. Connect to the console and au
 | `external/qemu/android/android-emu/android/console.cpp` | `gsm`/`sms`/`cdma` console command handlers |
 | `external/qemu/android/android-grpc/services/incubating/modem/server/src/android/emulation/control/incubating/ModemService.cpp` | gRPC `Modem` service implementation |
 | `external/qemu/android/third_party/modem-simulator/android_modem_v2.cpp` | `_vx` dispatch selecting `ModemLegacy` vs `ModemSimulator` |
+| `tools/netsim/next/modem-rs/src/modem.rs` | Rust modem: the eight per-family services and AT command execution |
+| `tools/netsim/next/modem-rs/src/parser.rs` | `Command` enum unifying the per-service command parsers |
+| `tools/netsim/next/modem-rs/src/types.rs` | Typed AT parameters: `PhoneNumber`, `DialString`, `DialArgs` |
+| `tools/netsim/next/modem-rs/src/stk_service.rs` | SIM Toolkit envelopes, terminal responses, and menu navigation |
+| `tools/netsim/next/modem-rs/src/modem_network_simulator.rs` | Multi-modem network: SIM profile selection, event scheduling, routing |
+| `tools/netsim/next/cell-actor/src/service.rs` | netsim `CELLULAR` chip actor bridging packet streams to `modem-rs` |
+| `tools/netsim/next/packet-stream/src/transport/modem.rs` | `ModemCodec` AT-line framing, including the Ctrl-Z SMS body |
+| `tools/netsim/proto/netsim/cell.proto` | gRPC `CellService` host control surface for the Rust modem |
