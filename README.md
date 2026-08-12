@@ -21,19 +21,19 @@ crosvm-based Cuttlefish virtual device:
 
 | Part | Ch. | Topics | Reviewed |
 |------|-----|--------|----------|
-| Front | 0 | Frontmatter | ✗ |
-| I | 1 | Introduction (host/guest split, architecture) | ✗ |
-| I | 2 | Source Code & Build System (repo manifest, CMake/Bazel) | ✗ |
-| I | 3 | Running the Emulator (launcher, AVDs, config) | ✗ |
-| II | 4 | The QEMU Fork (ranchu/goldfish, qemu2-glue) | ✗ |
-| II | 5 | CPU Acceleration (KVM/HVF/WHPX/AEHD/TCG) | ✗ |
-| II | 6 | Virtual Hardware & virtio | ✗ |
-| III | 7 | android-emu Architecture & Lifecycle | ✗ |
-| III | 8 | Console & gRPC Control Plane | ✗ |
-| III | 9 | Snapshots & Quickboot | ✗ |
-| III | 10 | Sensors, Battery & Location | ✗ |
-| IV | 11 | Graphics Architecture (gfxstream) | ✗ |
-| IV | 12 | Guest GPU Drivers | ✗ |
+| Front | 0 | Frontmatter | ✓ |
+| I | 1 | Introduction (host/guest split, architecture) | ✓ |
+| I | 2 | Source Code & Build System (repo manifest, CMake/Bazel) | ✓ |
+| I | 3 | Running the Emulator (launcher, AVDs, config) | ✓ |
+| II | 4 | The QEMU Fork (ranchu/goldfish, qemu2-glue) | ✓ |
+| II | 5 | CPU Acceleration (KVM/HVF/WHPX/AEHD/TCG) | ✓ |
+| II | 6 | Virtual Hardware & virtio | ✓ |
+| III | 7 | android-emu Architecture & Lifecycle | ✓ |
+| III | 8 | Console & gRPC Control Plane | ✓ |
+| III | 9 | Snapshots & Quickboot | ✓ |
+| III | 10 | Sensors, Battery & Location | ✓ |
+| IV | 11 | Graphics Architecture (gfxstream) | ✓ |
+| IV | 12 | Guest GPU Drivers | ✓ |
 | IV | 13 | Host Rendering (libOpenglRender/ANGLE/mesa) | ✗ |
 | IV | 14 | gfxstream Protocol | ✗ |
 | V | 15 | Audio | ✗ |
@@ -54,7 +54,7 @@ crosvm-based Cuttlefish virtual device:
 | App. | B | Key Files Reference | ✗ |
 | App. | C | Glossary | ✗ |
 
-✗ = not yet reviewed by a human; published openly for community review.
+✓ = reviewed by a human; ✗ = not yet reviewed by a human, published openly for community review.
 <!-- --8<-- [end:coverage] -->
 
 ## How to Give Feedback
