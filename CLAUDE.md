@@ -1,7 +1,7 @@
 # Android Emulator Internals Book
 
 28 chapters + 2 appendices, source-referenced against the Android Emulator tree,
-served as a MkDocs Material website with Mermaid diagrams.
+served as a ProperDocs (MkDocs fork) Material website with Mermaid diagrams.
 
 ## Quick Start
 
@@ -34,12 +34,12 @@ docker compose up -d serve         # http://localhost:8001
 6. Source refs: real emulator paths with line numbers, repo-relative (see Privacy & Path Rules)
 7. The body of every chapter ends with "Try It" then "Summary" — nothing else comes after Summary, **except** an optional final "Key Source Files" table, which may sit after Summary as a final reference.
 8. **Do not add epigraph blockquotes at the top of chapters.** The chapter goes straight into its introductory paragraph after the title.
-9. **Verify mermaid format parses after every edit.** Run `./serve.sh png NN-slug.md` on every chapter whose Mermaid blocks you touched and confirm the output reports `errors=0`. The CI `mkdocs build` does NOT validate Mermaid (the live site renders it client-side), so a parse error reaches readers as a "Syntax error" banner with no build-time signal. Treat `errors=0` as a hard precondition.
+9. **Verify mermaid format parses after every edit.** Run `./serve.sh png NN-slug.md` on every chapter whose Mermaid blocks you touched and confirm the output reports `errors=0`. The CI `properdocs build` does NOT validate Mermaid (the live site renders it client-side), so a parse error reaches readers as a "Syntax error" banner with no build-time signal. Treat `errors=0` as a hard precondition.
 10. **Visually verify mermaid diagrams after writing or editing them.** Parse-clean is not enough — diagrams can render with text overflowing rectangles, overlapping nodes, or be factually wrong about the architecture. After rule 9 passes, inspect each PNG under `.mermaid-png/<slug>/`. Check: (a) every label fits inside its shape; (b) no nodes or edge labels overlap; (c) the boxes, arrows, and grouping match the architecture the prose describes.
 
 ## CI
 
-GitHub Actions runs `mkdocs build` on push/PR (~2 min) and deploys to GitHub
+GitHub Actions runs `properdocs build` on push/PR (~2 min) and deploys to GitHub
 Pages on push to `main`.
 
 ## Commit Rules
@@ -49,5 +49,5 @@ a plain author and no AI/tool attribution footer.
 
 ## Skills
 
-- `.claude/skills/book-writer/SKILL.md` — chapter structure, content guidelines, MkDocs sync
+- `.claude/skills/book-writer/SKILL.md` — chapter structure, content guidelines, site config sync
   - `references/mermaid-syntax.md` — detailed quoting rules and common parse errors

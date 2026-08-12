@@ -6,7 +6,7 @@ on:
     paths:
       - '**.md'
       - '**.png'
-      - 'mkdocs.yml'
+      - 'properdocs.yml'
       - '.github/workflows/build-test.yml'
   pull_request:
     branches: [main]
@@ -27,7 +27,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install MkDocs
-        run: pip install mkdocs-material pymdown-extensions
+        run: pip install properdocs mkdocs-material pymdown-extensions
 
       - name: Create docs symlinks
         run: |
@@ -40,7 +40,7 @@ jobs:
           echo "Linked $(ls docs/ | wc -l) entries"
 
       - name: Build site
-        run: mkdocs build 2>&1 | tail -20
+        run: properdocs build 2>&1 | tail -20
 
       - name: Verify output
         run: |

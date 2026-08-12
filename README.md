@@ -90,17 +90,17 @@ mkdir -p docs
 for f in [0-9]*.md [A-Z]-*.md index.md; do ln -sf "../$f" "docs/$f"; done
 
 # Start
-mkdocs serve                       # http://127.0.0.1:8000
+properdocs serve                   # http://127.0.0.1:8000
 
 # Build static site
-mkdocs build                       # output in site/
+properdocs build                   # output in site/
 ```
 
 Open **http://localhost:8001** — chapters in the sidebar, Mermaid renders live, hot-reload on edits.
 
 ## GitHub Actions
 
-Tests `mkdocs build` on push to `main` and PRs (~2 min); deploys to GitHub Pages on push to `main`.
+Tests `properdocs build` on push to `main` and PRs (~2 min); deploys to GitHub Pages on push to `main`.
 
 ## Project Structure
 
@@ -108,17 +108,17 @@ Tests `mkdocs build` on push to `main` and PRs (~2 min); deploys to GitHub Pages
 [0-9]*.md                  chapter files
 [A-C]-appendix-*.md        appendix files
 index.md                   Website homepage
-mkdocs.yml                 MkDocs config (Material theme + Mermaid)
-docs/                      Symlinks for MkDocs (gitignored)
+properdocs.yml             ProperDocs config (Material theme + Mermaid)
+docs/                      Symlinks for ProperDocs (gitignored)
 mkdocs-mermaid-renderer/   Shared Mermaid SVG renderer (Playwright + cache)
 mkdocs-pdf-generate/       MkDocs plugin: PDF export
 mkdocs-epub-generate/      MkDocs plugin: EPUB export
-Dockerfile                 python:3.12-slim + Playwright + MkDocs plugins
+Dockerfile                 python:3.12-slim + Playwright + ProperDocs plugins
 docker-compose.yml         serve / build-site / build-pdf / build-epub
 tools/render_mermaid_png.py  Mermaid → PNG renderer for visual review
 CLAUDE.md                  Project rules for AI agents
 .claude/skills/            book-writer
-.github/workflows/         CI: mkdocs build test + Pages deploy
+.github/workflows/         CI: properdocs build test + Pages deploy
 ```
 
 ## License
