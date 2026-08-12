@@ -665,56 +665,56 @@ valid_targets = [
 
 These commands assume you have a synced superproject. Run them from the workspace root unless noted.
 
-1. List every project the manifest pins, and confirm the development branch:
+- List every project the manifest pins, and confirm the development branch:
 
-   ```bash
-   repo list | head
-   grep 'revision=' .repo/manifests/default.xml | head -1
-   ```
+```bash
+repo list | head
+grep 'revision=' .repo/manifests/default.xml | head -1
+```
 
-2. Inspect the symlinks `repo` created at the root — they should point into `external/qemu` and `build/bazel`:
+- Inspect the symlinks `repo` created at the root — they should point into `external/qemu` and `build/bazel`:
 
-   ```bash
-   ls -l MODULE.bazel .bazelrc .bazelversion
-   ```
+```bash
+ls -l MODULE.bazel .bazelrc .bazelversion
+```
 
-3. See the package revision that gets stamped into your build:
+- See the package revision that gets stamped into your build:
 
-   ```bash
-   cat external/qemu/source.properties
-   ```
+```bash
+cat external/qemu/source.properties
+```
 
-4. List every build task without running anything:
+- List every build task without running anything:
 
-   ```bash
-   external/qemu/android/rebuild.sh --task-list
-   ```
+```bash
+external/qemu/android/rebuild.sh --task-list
+```
 
-5. List the toggleable feature flags the build understands:
+- List the toggleable feature flags the build understands:
 
-   ```bash
-   external/qemu/android/rebuild.sh --feature-list
-   ```
+```bash
+external/qemu/android/rebuild.sh --feature-list
+```
 
-6. Run a single phase — for example, just the configure step — and watch the CMake command line it assembles:
+- Run a single phase — for example, just the configure step — and watch the CMake command line it assembles:
 
-   ```bash
-   external/qemu/android/rebuild.sh --task configure --verbose
-   ```
+```bash
+external/qemu/android/rebuild.sh --task configure --verbose
+```
 
-7. After a build, look at the distribution layout and count the bundled shared libraries:
+- After a build, look at the distribution layout and count the bundled shared libraries:
 
-   ```bash
-   ls external/qemu/objs/distribution/emulator
-   ls external/qemu/objs/distribution/emulator/qemu/linux-x86_64
-   ls external/qemu/objs/distribution/emulator/lib64/*.so | wc -l
-   ```
+```bash
+ls external/qemu/objs/distribution/emulator
+ls external/qemu/objs/distribution/emulator/qemu/linux-x86_64
+ls external/qemu/objs/distribution/emulator/lib64/*.so | wc -l
+```
 
-8. Confirm the `$ORIGIN` RPATH is baked into the launcher (Linux):
+- Confirm the `$ORIGIN` RPATH is baked into the launcher (Linux):
 
-   ```bash
-   readelf -d external/qemu/objs/distribution/emulator/emulator | grep -i path
-   ```
+```bash
+readelf -d external/qemu/objs/distribution/emulator/emulator | grep -i path
+```
 
 ---
 

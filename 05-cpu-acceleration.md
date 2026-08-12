@@ -698,44 +698,44 @@ flowchart TD
 
 These commands assume the emulator command-line tools are on your `PATH`.
 
-1. Ask the emulator-check tool what your host supports. The status string explains any failure:
+- Ask the emulator-check tool what your host supports. The status string explains any failure:
 
 ```bash
 emulator-check accel
 ```
 
-2. Print the CPU model information the probe collected (vendor, virtualization support, bare-metal vs VM, 32/64-bit):
+- Print the CPU model information the probe collected (vendor, virtualization support, bare-metal vs VM, 32/64-bit):
 
 ```bash
 emulator-check cpu-info
 ```
 
-3. Launch an AVD with verbose init logging and watch the accelerator selection lines ("Selecting KVM for CPU acceleration", "Host can use CPU acceleration"):
+- Launch an AVD with verbose init logging and watch the accelerator selection lines ("Selecting KVM for CPU acceleration", "Host can use CPU acceleration"):
 
 ```bash
 emulator -avd <your_avd> -verbose -show-kernel
 ```
 
-4. Force software translation to feel the difference, then compare boot time against the default:
+- Force software translation to feel the difference, then compare boot time against the default:
 
 ```bash
 emulator -avd <your_avd> -accel off
 ```
 
-5. On Linux, confirm KVM is present and that your user can open it (the same checks `ProbeKVM` runs):
+- On Linux, confirm KVM is present and that your user can open it (the same checks `ProbeKVM` runs):
 
 ```bash
 ls -l /dev/kvm
 getent group kvm
 ```
 
-6. On Windows, check whether the Hypervisor Platform feature is installed (the same DISM query `emulator-check whpx` runs):
+- On Windows, check whether the Hypervisor Platform feature is installed (the same DISM query `emulator-check whpx` runs):
 
 ```bash
 emulator-check whpx
 ```
 
-7. Inspect which `-cpu` model your build targets by reading the verbose command line the launcher constructs:
+- Inspect which `-cpu` model your build targets by reading the verbose command line the launcher constructs:
 
 ```bash
 emulator -avd <your_avd> -verbose 2>&1 | grep -- "-cpu"

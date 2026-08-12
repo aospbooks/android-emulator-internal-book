@@ -329,15 +329,15 @@ If at any point you lose the thread of *which layer am I in*, come back to the l
 
 You can confirm the architecture described in this chapter on your own machine.
 
-1. Find the engine binaries the launcher execs. From an SDK install, list the QEMU directory: `ls emulator/qemu/` will show per-host directories like `linux-x86_64`, each containing `qemu-system-x86_64` and friends — the engine binaries from Section 1.3.
+- Find the engine binaries the launcher execs. From an SDK install, list the QEMU directory: `ls emulator/qemu/` will show per-host directories like `linux-x86_64`, each containing `qemu-system-x86_64` and friends — the engine binaries from Section 1.3.
 
-2. Watch the launcher hand off to the engine. Run `emulator -avd <name> -verbose 2>&1 | head -40` and look for the resolved AVD, the chosen ABI, and the full command line the launcher builds before it execs the engine.
+- Watch the launcher hand off to the engine. Run `emulator -avd <name> -verbose 2>&1 | head -40` and look for the resolved AVD, the chosen ABI, and the full command line the launcher builds before it execs the engine.
 
-3. Talk to the control plane. With an emulator running, connect to the telnet console: `telnet localhost 5554`, then type `help`. Each command you see (`rotate`, `power`, `sms send`, `gps fix`) calls through the agent vtable from Section 1.5.
+- Talk to the control plane. With an emulator running, connect to the telnet console: `telnet localhost 5554`, then type `help`. Each command you see (`rotate`, `power`, `sms send`, `gps fix`) calls through the agent vtable from Section 1.5.
 
-4. See the gRPC surface. Run `adb devices` to confirm the guest is reachable, then inspect the running emulator's advertised ports — the gRPC `EmulatorController` is what Android Studio's device streaming uses, defined under `external/qemu/android/android-grpc/services/emulator-controller`.
+- See the gRPC surface. Run `adb devices` to confirm the guest is reachable, then inspect the running emulator's advertised ports — the gRPC `EmulatorController` is what Android Studio's device streaming uses, defined under `external/qemu/android/android-grpc/services/emulator-controller`.
 
-5. Browse the source split. In a checkout, compare `ls external/qemu/android/android-emu/android` (the core feature surface), `ls external/qemu/android-qemu2-glue` (the QEMU-backed agent implementations), and `ls hardware/google/gfxstream/host` (the graphics renderer). The directory names line up with the layers in Section 1.4.
+- Browse the source split. In a checkout, compare `ls external/qemu/android/android-emu/android` (the core feature surface), `ls external/qemu/android-qemu2-glue` (the QEMU-backed agent implementations), and `ls hardware/google/gfxstream/host` (the graphics renderer). The directory names line up with the layers in Section 1.4.
 
 ## Summary
 
