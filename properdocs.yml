@@ -80,9 +80,11 @@ plugins:
 
 extra_javascript:
   - javascripts/mermaid-zoom.js?v=6
+  - javascripts/mermaid-theme.js?v=1
 
 extra_css:
   - stylesheets/mermaid-zoom.css?v=8
+  - stylesheets/mermaid-theme.css?v=1
 
 extra:
   analytics:

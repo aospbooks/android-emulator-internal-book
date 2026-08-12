@@ -18,13 +18,17 @@ mermaid.initialize({
   startOnLoad: false,
   securityLevel: 'loose',
   theme: 'base',
+  // Keep in sync with stylesheets/mermaid-theme.css (site skin): white nodes,
+  // blue-gray borders, muted gray edges, quiet cluster washes.
   themeVariables: {
-    primaryColor: '#2196F3',
-    primaryTextColor: '#1b1b1b',
-    primaryBorderColor: '#1976D2',
+    primaryColor: '#ffffff',
+    primaryTextColor: '#212121',
+    primaryBorderColor: '#455a64',
     lineColor: '#616161',
     secondaryColor: '#E3F2FD',
-    tertiaryColor: '#F5F5F5',
+    tertiaryColor: '#F7F7F7',
+    clusterBkg: '#F7F7F7',
+    clusterBorder: '#E0E0E0',
     noteBkgColor: '#E3F2FD',
     noteTextColor: '#1b1b1b'
   }
