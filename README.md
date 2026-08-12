@@ -47,7 +47,7 @@ crosvm-based Cuttlefish virtual device:
 | VII | 23 | WebRTC & the Embedded Emulator | ✗ |
 | VIII | 24 | System Images & the Goldfish HAL | ✗ |
 | VIII | 25 | Guest Boot | ✗ |
-| IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) | ✗ |
+| IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) | ✓ |
 | X | 27 | Testing | ✓ |
 | X | 28 | Debugging, Tracing & Crash Reporting | ✓ |
 | App. | A | Paravirtualization from Xen to Android | ✗ |
