@@ -97,8 +97,15 @@ def _scaled_svg(svg_text: str) -> str:
     scale = min(1.0, MAX_SIDE_PX / max(w, h))
     out_w = round(w * scale)
     out_h = round(h * scale)
-    # Strip any existing width/height/style and re-set them.
-    svg_text = re.sub(r'\s(?:width|height|style)="[^"]*"', "", svg_text, count=3)
+    # Strip any existing width/height/style from the root tag only and re-set
+    # them. Mermaid's sequence SVGs carry just width+style (no height), so an
+    # unscoped count-limited sub would eat an attribute off a later element
+    # (e.g. an actor rect's width).
+    tag_end = svg_text.index(">") + 1
+    svg_text = (
+        re.sub(r'\s(?:width|height|style)="[^"]*"', "", svg_text[:tag_end])
+        + svg_text[tag_end:]
+    )
     svg_text = svg_text.replace(
         "<svg",
         f'<svg width="{out_w}" height="{out_h}" style="width:{out_w}px;height:{out_h}px"',
