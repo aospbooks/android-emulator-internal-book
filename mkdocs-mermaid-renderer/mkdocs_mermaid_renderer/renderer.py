@@ -19,20 +19,20 @@ mermaid.initialize({
   securityLevel: 'loose',
   theme: 'base',
   // Keep in sync with stylesheets/mermaid-theme.css and
-  // javascripts/mermaid-theme.js (site skin): white nodes with near-black
-  // borders, muted gray edges, quiet cluster washes, uppercase mono zone
-  // labels, mono edge annotations.
+  // javascripts/mermaid-theme.js (site skin, light palette): blue-50 node
+  // cards with primary-blue borders, blue-tinted cluster washes, uppercase
+  // mono zone labels, blue mono edge annotations.
   themeVariables: {
-    primaryColor: '#ffffff',
+    primaryColor: '#E3F2FD',
     primaryTextColor: '#212121',
-    primaryBorderColor: '#37474f',
-    lineColor: '#616161',
-    actorLineColor: '#9e9e9e',
-    secondaryColor: '#E3F2FD',
-    tertiaryColor: '#F7F7F7',
-    clusterBkg: '#F7F7F7',
-    clusterBorder: '#E0E0E0',
-    noteBkgColor: '#E3F2FD',
+    primaryBorderColor: '#1976d2',
+    lineColor: '#546e7a',
+    actorLineColor: '#a9c3e4',
+    secondaryColor: '#BBDEFB',
+    tertiaryColor: '#F7FAFD',
+    clusterBkg: '#F7FAFD',
+    clusterBorder: '#D6E4F5',
+    noteBkgColor: '#BBDEFB',
     noteTextColor: '#1b1b1b',
     fontFamily: 'Roboto, Helvetica, Arial, sans-serif'
   },
@@ -43,15 +43,15 @@ mermaid.initialize({
     '.cluster rect{rx:8px;ry:8px}',
     '.cluster-label .nodeLabel{font-family:"Roboto Mono",monospace;' +
       'font-size:10.5px;font-weight:500;letter-spacing:.14em;' +
-      'text-transform:uppercase;color:rgba(33,33,33,0.55)!important}',
+      'text-transform:uppercase;color:rgba(21,101,192,0.75)!important}',
     '.edgePath .path,.flowchart-link{stroke-width:1.1px}',
     '.edgeLabel .nodeLabel,span.edgeLabel{font-family:"Roboto Mono",monospace;' +
-      'font-size:11.5px;color:#616161!important}',
+      'font-size:11.5px;color:#1565c0!important}',
     '.actor{rx:6px;stroke-width:1px}',
     'text.actor>tspan{font-size:14px}',
     '.messageText{font-size:12.5px;font-family:"Roboto Mono",monospace!important}',
     '.noteText>tspan,.labelText>tspan,.loopText>tspan{font-size:12.5px}',
-    '.activation0,.activation1,.activation2{fill:#eeeeee;stroke:#616161;stroke-width:0.8px}'
+    '.activation0,.activation1,.activation2{fill:#E8F1FB;stroke:#546e7a;stroke-width:0.8px}'
   ].join('')
 });
 var _c = 0;

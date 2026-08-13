@@ -7,40 +7,46 @@
  * clusters) is injected per-diagram by javascripts/mermaid-theme.js using
  * the --emu-mermaid-* variables below.
  *
- * Design: white nodes with near-black borders, muted gray edges, quiet
- * zone washes labeled in small uppercase mono — blue stays reserved for
- * links/emphasis, matching the site.
+ * Design: the site's blue color sheet (Material blue primary / light-blue
+ * accent) — blue-50 node cards with primary-blue borders, blue-tinted zone
+ * washes labeled in small uppercase mono, blue edge annotations over muted
+ * blue-gray lines.
+ *
+ * Node backgrounds must stay opaque: mermaid draws edges underneath nodes,
+ * so a translucent fill would show lines passing through the boxes.
  */
 
 :root,
 [data-md-color-scheme="default"] {
-  --md-mermaid-node-bg-color: #ffffff;
-  --md-mermaid-node-fg-color: #37474f;
-  --md-mermaid-edge-color: #616161;
+  --md-mermaid-node-bg-color: #e3f2fd;
+  --md-mermaid-node-fg-color: #1976d2;
+  --md-mermaid-edge-color: #546e7a;
   --md-mermaid-label-fg-color: #212121;
-  --md-mermaid-sequence-note-bg-color: #e3f2fd;
-  --md-mermaid-sequence-note-border-color: rgba(25, 118, 210, 0.3);
-  --md-mermaid-sequence-actor-line-color: rgba(33, 33, 33, 0.25);
+  --md-mermaid-sequence-actor-bg-color: #e3f2fd;
+  --md-mermaid-sequence-note-bg-color: #bbdefb;
+  --md-mermaid-sequence-note-border-color: rgba(25, 118, 210, 0.4);
+  --md-mermaid-sequence-actor-line-color: rgba(21, 101, 192, 0.3);
 
-  --emu-mermaid-cluster-bg: rgba(33, 33, 33, 0.025);
-  --emu-mermaid-cluster-border: rgba(33, 33, 33, 0.12);
-  --emu-mermaid-activation-bg: rgba(33, 33, 33, 0.06);
-  --emu-mermaid-zone-label-color: rgba(33, 33, 33, 0.55);
-  --emu-mermaid-edge-label-color: #616161;
+  --emu-mermaid-cluster-bg: rgba(25, 118, 210, 0.035);
+  --emu-mermaid-cluster-border: rgba(25, 118, 210, 0.2);
+  --emu-mermaid-activation-bg: rgba(25, 118, 210, 0.1);
+  --emu-mermaid-zone-label-color: rgba(21, 101, 192, 0.75);
+  --emu-mermaid-edge-label-color: #1565c0;
 }
 
 [data-md-color-scheme="slate"] {
-  --md-mermaid-node-bg-color: #2b303b;
-  --md-mermaid-node-fg-color: #b0bec5;
-  --md-mermaid-edge-color: #a5b0ba;
+  --md-mermaid-node-bg-color: #263241;
+  --md-mermaid-node-fg-color: #64b5f6;
+  --md-mermaid-edge-color: #9fb8cc;
   --md-mermaid-label-fg-color: #eceff1;
-  --md-mermaid-sequence-note-bg-color: #263238;
-  --md-mermaid-sequence-note-border-color: rgba(100, 181, 246, 0.35);
-  --md-mermaid-sequence-actor-line-color: rgba(236, 239, 241, 0.25);
+  --md-mermaid-sequence-actor-bg-color: #263241;
+  --md-mermaid-sequence-note-bg-color: #1e3a5f;
+  --md-mermaid-sequence-note-border-color: rgba(100, 181, 246, 0.45);
+  --md-mermaid-sequence-actor-line-color: rgba(100, 181, 246, 0.35);
 
-  --emu-mermaid-cluster-bg: rgba(236, 239, 241, 0.04);
-  --emu-mermaid-cluster-border: rgba(236, 239, 241, 0.14);
-  --emu-mermaid-activation-bg: rgba(236, 239, 241, 0.08);
-  --emu-mermaid-zone-label-color: rgba(236, 239, 241, 0.6);
-  --emu-mermaid-edge-label-color: #a5b0ba;
+  --emu-mermaid-cluster-bg: rgba(100, 181, 246, 0.06);
+  --emu-mermaid-cluster-border: rgba(100, 181, 246, 0.25);
+  --emu-mermaid-activation-bg: rgba(100, 181, 246, 0.15);
+  --emu-mermaid-zone-label-color: rgba(100, 181, 246, 0.75);
+  --emu-mermaid-edge-label-color: #64b5f6;
 }
