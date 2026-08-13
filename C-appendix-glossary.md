@@ -10,8 +10,6 @@ Unlike the numbered chapters, this is a reference list rather than a narrative: 
 
 Before the alphabetical list, four diagrams group the terms that are easiest to confuse with one another. Read them as a map; the definitions that follow fill in the detail.
 
-### CPU accelerator backends per host OS
-
 ```mermaid
 flowchart TB
     ENUM["CpuAccelerator enum<br/>CpuAccelerator.h"]
@@ -28,7 +26,7 @@ flowchart TB
     TCG --> SW["Binary translation, no hardware needed"]
 ```
 
-### Graphics streaming path
+*Figure C-1: CPU accelerator backends per host OS*
 
 ```mermaid
 flowchart LR
@@ -40,7 +38,7 @@ flowchart LR
     RC --> BACKEND["Host backend: native GL/Vulkan, ANGLE, or SwiftShader"]
 ```
 
-### Guest-to-host transports
+*Figure C-2: Graphics streaming path*
 
 ```mermaid
 flowchart TB
@@ -58,7 +56,7 @@ flowchart TB
     VGPU --> HOST
 ```
 
-### Two virtual devices, two VMMs
+*Figure C-3: Guest-to-host transports*
 
 ```mermaid
 flowchart TB
@@ -73,6 +71,8 @@ flowchart TB
     AE --> GFX["Shared: gfxstream, RootCanal, netsim"]
     CF --> GFX
 ```
+
+*Figure C-4: Two virtual devices, two VMMs*
 
 ---
 

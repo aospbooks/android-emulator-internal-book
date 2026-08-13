@@ -12,8 +12,6 @@ In *full virtualization*, the guest operating system believes it owns real hardw
 
 The word "paravirtualization" did not mean the same thing in 2025 that it meant in 2003. It started as a demand to port an entire guest kernel; it ended as a narrow contract for device I/O. The timeline below traces that shift in three eras: classic full-kernel PV gave way to a long hybrid era in which hardware took over CPU and memory virtualization and PV survived only as the I/O path — `virtio` — before that same hybrid recipe arrived on the phone.
 
-#### Two decades of paravirtualization, grouped into three eras
-
 ```mermaid
 flowchart TB
     E1["2003 · Classic Xen paravirtualization<br/>entire guest kernel modified"]
@@ -31,6 +29,8 @@ flowchart TB
     class E2,E3,E4 hybrid;
     class E5,E6 android;
 ```
+
+*Figure A-1: Two decades of paravirtualization, grouped into three eras*
 
 ## A.3 Origins: Xen and x86 paravirtualization
 
@@ -58,8 +58,6 @@ What made `virtio` portable rather than merely tidy was a deliberate separation 
 
 A virtqueue in its original "split" layout is three shared data structures the guest allocates, each writable by only one side. The **descriptor table** holds the buffers — each descriptor is an address, a length, some flags, and an optional link to a next descriptor, so one request can chain several memory segments. The **available ring** is where the driver publishes the heads of the descriptor chains it is offering. The **used ring** is where the device publishes the chains it has finished with. Because each ring has exactly one writer, the two sides never contend for a lock on the shared structures.
 
-#### The split virtqueue: three single-writer rings in shared memory
-
 ```mermaid
 flowchart TB
     DRV["Driver (guest) · virtio front-end"]
@@ -75,11 +73,11 @@ flowchart TB
     VQ -- "interrupt" --> DRV
 ```
 
+*Figure A-2: The split virtqueue: three single-writer rings in shared memory*
+
 The cycle is simple: the driver writes a buffer into the descriptor table, puts its index into the available ring, and rings a doorbell — a "kick," a single MMIO write — to notify the device. The device reads the available ring, does the work (copies a packet, services a disk request), writes the index into the used ring, and raises an interrupt. The crucial detail is that *both* notifications can be suppressed: under load a busy device stops asking to be interrupted and a busy driver stops kicking, so a stream of requests costs almost no transitions into the hypervisor. That batching is the entire performance argument for paravirtualization, made concrete.
 
 Concretely, the guest-facing API is tiny. A driver calls `add_buf` to post a scatter-gather buffer — readable parts first, writable parts after — `kick` to ring the doorbell (often once after queuing many buffers), and `get_buf` to reap completions, which need not return in the order they were offered. Two further calls, `enable_cb` and `disable_cb`, switch completion callbacks on and off: the software equivalent of masking a device's interrupt. A single block read shows the shape. The driver chains three descriptors — a read-only sixteen-byte header carrying the request type and sector number, a writable data buffer to be filled, and a one-byte writable status field — publishes the head of that chain in the available ring, and kicks. The device reads the request, fills the buffer, writes `0` into the status byte for success, and returns the head in the used ring.
-
-#### A block read as a chained descriptor
 
 ```mermaid
 flowchart TB
@@ -95,6 +93,8 @@ flowchart TB
     AR -- "head index" --> H
     S -- "on completion" --> UR
 ```
+
+*Figure A-3: A block read as a chained descriptor*
 
 One small field in that used ring carries an outsized lesson. Each completion records not just which chain was consumed but how many bytes the device actually wrote — and that length, the paper is careful to note, must come from a trusted source. Picture a guest handed a buffer for a 1514-byte packet whose sender, malicious or merely buggy, copies in only part of it: without a trusted byte count the receiver would treat whatever stale data already sat in the buffer as the rest of the packet, and could leak it onward. Recording the real length centrally spares every driver from having to zero or sanitize its own buffers. It is a miniature of the threat model later sections carry to its conclusion — the instant a virtqueue can face an untrusted peer, whether another guest or a host a protected VM does not trust, the discipline of who-writes-what stops being an optimization and becomes a security boundary.
 
@@ -122,8 +122,6 @@ The CPU-level enlightenments target the operations most expensive to trap and em
 
 For I/O, Hyper-V uses the same split-driver shape as `virtio`, with its own vocabulary. The privileged *root partition* (the host) runs Virtualization Service Providers (VSPs); each guest *child partition* runs the matching Virtualization Service Clients (VSCs). The two halves of a synthetic device — a synthetic NIC (`NetVSP` / `netvsc`) or SCSI controller (`StorVSP` / `storvsc`) — communicate over VMBus, a purely synthetic channel that exists as no virtual hardware at all and is established through hypercalls. Each VMBus channel is a pair of ring buffers in shared memory, with requests and responses matched by transaction ID. It is, structurally, the front-end/back-end pattern this appendix keeps returning to.
 
-#### Hyper-V enlightened I/O over VMBus
-
 ```mermaid
 flowchart TB
     subgraph CHILD["Child partition (guest)"]
@@ -142,6 +140,8 @@ flowchart TB
     ROOT -- "hypercall" --> HV
     HV --> HW
 ```
+
+*Figure A-4: Hyper-V enlightened I/O over VMBus*
 
 The guest-side pieces ship as Integration Services — the VSC drivers plus helpers for time sync, heartbeat, and graceful shutdown. They are pre-installed in modern Windows, and the equivalent code went into the mainline Linux kernel in 2.6.32, so a Linux guest runs enlightened on Hyper-V out of the box. The relationship is symmetric across vendors, too: KVM can *emulate* the Hyper-V interface, so a Windows guest on Linux uses these same enlightenments for CPU and timing while reaching for signed `virtio` drivers (the `virtio-win` package) for its disks and network. Those Windows drivers are nearly as old as `virtio` itself — Qumranet shipped beta virtio-PCI drivers for Windows guests in the framework's very first year. A Windows VM in the cloud is typically paravirtualized twice over — Hyper-V enlightenments above, `virtio` beneath.
 
@@ -165,8 +165,6 @@ The driving question was security, not server consolidation: how do you run high
 
 `VirtualizationService` manages the lifecycle of these VMs, exposing an AIDL (Android Interface Definition Language) API and managing one `crosvm` process per VM. Inter-VM and VM-to-Android communication runs over `vsock` — the `virtio` socket interface — with each VM addressed by a 32-bit context ID. `pvmfw` (protected VM firmware) is the first code a pVM runs, bootstrapping verified boot and deriving the VM's unique secret via DICE (Device Identifier Composition Engine).
 
-#### The AVF stack: host and protected VM as peers on pKVM
-
 ```mermaid
 flowchart TB
     subgraph HOST["Host Android (EL1)"]
@@ -184,6 +182,8 @@ flowchart TB
     PVM -- "hypercall" --> PK
     PK --> HW
 ```
+
+*Figure A-5: The AVF stack: host and protected VM as peers on pKVM*
 
 The host and the protected VM are peers — both are guests of `pKVM`, not host-over-guest. The only memory they share is the `virtio`/`vsock` channel; `pKVM` unmaps the rest of the pVM's pages from the host, so even a compromised Android kernel cannot read into the VM. The guest-side `virtio` front-end and `crosvm`'s back-end are the same split-driver pattern from the general `virtio` model, now spanning a security boundary rather than only a performance one.
 
@@ -207,8 +207,6 @@ Everything so far has run virtual machines *on* Android. The Android Emulator in
 
 Under the hood it is a downstream fork of QEMU (Chapter 4). Its current virtual board is `ranchu`, successor to the original `goldfish` board, and the change that matters for this appendix is what `ranchu` did to devices: it brought standard `virtio` to the board (Chapter 6). Storage arrives as `virtio-blk` — the system image appears inside the guest as `/dev/block/vda` — and networking is `virtio` too, while graphics and input can run over `virtio` or the older goldfish transports depending on the system image. `ranchu` is in fact a deliberate mixture rather than a clean sweep: alongside its `virtio` devices it retains a handful of Android-specific `goldfish` devices inherited from the old board — the framebuffer, battery, audio, and an input/events device — and, above all, the `goldfish` pipe, a fast paravirtual host-to-guest transport used for jobs like GPU streaming and sensor injection. The emulator guest is, in other words, a paravirtualized guest in exactly the `virtio` sense the rest of this story describes.
 
-#### The Android Emulator virtualization stack
-
 ```mermaid
 flowchart TB
     subgraph GUEST["Android guest — ranchu board"]
@@ -223,13 +221,13 @@ flowchart TB
     ACC --> HW
 ```
 
+*Figure A-6: The Android Emulator virtualization stack*
+
 The "hardware acceleration" half is pluggable per host operating system (Chapter 5), which is where the emulator's history rhymes with the rest of the field. On Linux it uses `KVM`. On macOS it uses Apple's Hypervisor.framework (`HVF`), on both Intel and Apple-silicon Macs. On Windows it uses either the Windows Hypervisor Platform (`WHPX`, layered on Hyper-V and now the recommended option) or the Android Emulator Hypervisor Driver (`AEHD`).
 
 That last option closes a loop. For years the Windows accelerator was Intel's HAXM (Hardware Accelerated Execution Manager). Intel discontinued it in January 2023, and recent emulator builds dropped it entirely. Its replacement, `AEHD` — formerly the "Android Emulator Hypervisor Driver for AMD Processors," and before that `GVM` — is literally Linux `KVM` ported into a Windows kernel driver. The same `KVM` code that turned Linux into a hypervisor in 2007 now accelerates the Android Emulator on Windows.
 
 So the emulator is the `PVHVM` hybrid — hardware CPU virtualization plus `virtio` devices — running on a developer's desktop, and it brought that hybrid to Android tooling years before AVF brought it on-device. It is also easily confused with its two siblings, so they are worth separating.
-
-#### Three faces of Android virtualization
 
 ```mermaid
 flowchart TB
@@ -254,6 +252,8 @@ flowchart TB
     AVF --> FOUND
 ```
 
+*Figure A-7: Three faces of Android virtualization*
+
 They share DNA but serve different masters: the Emulator (QEMU/`ranchu`) is for app developers in Android Studio; `Cuttlefish` (which now defaults to `crosvm`, though it can still run on QEMU) is the high-fidelity AOSP virtual device for people working on the system itself (Chapter 26); and AVF/`pKVM` runs protected VMs on real devices. All three lean on the same paravirtualized-I/O foundation; only the trust model and the audience change.
 
 ## A.14 Paravirtualizing the GPU: virtio-gpu, rutabaga, and Magma
@@ -263,8 +263,6 @@ If block and network devices were the easy wins for paravirtualized I/O, the GPU
 Several dialects coexist. The original *virgl* path has the guest's Mesa driver emit a Gallium intermediate stream that the host's `virglrenderer` translates back into OpenGL; *Venus* is a thin Vulkan-on-Vulkan passthrough (also carried by virglrenderer); Google's `gfxstream` forwards GLES and Vulkan calls to the host with minimal translation (Chapters 13 and 14); and a *cross-domain* context carries Wayland buffers so guest windows can appear directly on the host desktop. Resource handling, `dma_buf`/`dma_fence` synchronization, and the ring itself stay common; only the command dialect changes from one context to the next.
 
 Something on the host has to receive whichever context the guest selected and route it to the right renderer — and that something is `rutabaga_gfx`, the "Rutabaga Virtual Graphics Interface." It is a small, cross-platform Rust library that sits atop `gfxstream` and `virglrenderer`, implements the cross-domain Wayland path itself, and exposes a C FFI so non-Rust VMMs can embed it. It originated inside `crosvm` and is now developed in the open as a standalone, BSD-licensed project. Rutabaga is, in effect, what `virtio` did for block and network applied to the GPU: a stable `virtio-gpu` front-end with pluggable rendering back-ends behind a single seam. QEMU now ships it as a backend (`virtio-gpu-rutabaga`), and the same isolation instinct seen earlier in this appendix reappears — a `vhost-user`-style `vhost-device-gpu` can run the entire graphics stack in a separate, memory-safe process to shrink the attack surface a GPU back-end exposes.
-
-#### GPU paravirtualization through virtio-gpu and rutabaga
 
 ```mermaid
 flowchart TB
@@ -284,6 +282,8 @@ flowchart TB
     VIRGL --> HOST
     CD --> HOST
 ```
+
+*Figure A-8: GPU paravirtualization through virtio-gpu and rutabaga*
 
 This is the plumbing that quietly unifies this appendix's separate GPU stories. `crosvm`'s `virtio-gpu` device renders through rutabaga, so Android's protected and standard VMs and the Cuttlefish virtual device both use it; and `gfxstream` — built on the Android Emulator's `AEMU` base — is the very same host renderer the desktop emulator relies on. It even closes the loop with the emulator's past: the old `goldfish` GPU-streaming pipe gave way, in 2018, to a port of gfxstream onto `virtio-gpu` (at first a symbol-compatible drop-in for virglrenderer), which is why the accelerated graphics that reached the on-device Linux Terminal in Android 16, a Cuttlefish instance in a datacenter, and a developer's emulator on macOS are all variations on one paravirtualized-GPU stack.
 

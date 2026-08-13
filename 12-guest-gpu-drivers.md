@@ -503,6 +503,8 @@ flowchart LR
   R3 -.->|"doorbell when idle"| HOSTSVC
 ```
 
+*Figure 12-6: Transfer mechanisms compared*
+
 ## 12.10 VirtGpu, execBuffer, and Vulkan's Direct Path
 
 The Vulkan ICD does not always serialize into a stream buffer and flush. For control operations and for submitting recorded command buffers, it builds a virtio-gpu command and issues it directly through the `VirtGpuDevice` abstraction. The interface in `external/mesa3d/src/gfxstream/guest/platform/include/VirtGpu.h` exposes resource creation, blob creation, capability queries, and command submission:
@@ -600,6 +602,8 @@ flowchart TB
   GOLD --> HOSTCB
   MINI --> HOSTCB
 ```
+
+*Figure 12-7: Buffer sharing paths*
 
 ## 12.12 Try It
 

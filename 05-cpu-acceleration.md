@@ -37,8 +37,6 @@ external/qemu/target/i386/kvm.c        KVM x86 register sync
 
 The arm64 hardware backend for Apple Silicon lives at `external/qemu/target/arm/hvf.c`, and the arm KVM backend at `external/qemu/target/arm/kvm64.c`.
 
-### Two execution paths from guest instruction to host CPU
-
 ```mermaid
 flowchart TD
     G["Guest instruction stream"] --> DEC{"Guest arch == host arch?"}
@@ -52,6 +50,8 @@ flowchart TD
     NATIVE --> EXIT["VM exit or block boundary"]
     EXIT --> G
 ```
+
+*Figure 5-1: Two execution paths from guest instruction to host CPU*
 
 ---
 
@@ -119,8 +119,6 @@ struct GlobalState {
 
 `GetCurrentCpuAccelerator()` checks `g->probed` first and returns the cached value if the probe already ran. All the public query functions — `GetCurrentCpuAcceleratorStatus()`, `GetCurrentCpuAcceleratorStatusCode()`, `GetCurrentAcceleratorSupport()` — force a probe on first use, then read the cache. The `testing` flag and `SetCurrentCpuAcceleratorForTesting()` exist so unit tests can inject a fixed result without touching real hardware.
 
-### The capability probe and its cached result
-
 ```mermaid
 flowchart TD
     CALL["GetCurrentCpuAccelerator()"] --> CHK{"g->probed or g->testing?"}
@@ -135,6 +133,8 @@ flowchart TD
     CACHE --> SET["g->probed = true"]
     SET --> RET
 ```
+
+*Figure 5-2: The capability probe and its cached result*
 
 ---
 
@@ -268,8 +268,6 @@ case KVM_EXIT_MMIO:
 
 The guest runs entirely inside `KVM_RUN` on the real CPU until it does something the host must handle — a port I/O instruction (`KVM_EXIT_IO`), an access to memory-mapped device registers (`KVM_EXIT_MMIO`), or a shutdown. Each exit hands control to QEMU's device model, which services the access and re-enters `KVM_RUN`. This trap-and-emulate loop is what makes a virtual device feel like real hardware to the guest while costing the host nothing while the guest is computing.
 
-### The KVM_RUN trap-and-emulate loop
-
 ```mermaid
 sequenceDiagram
     participant V as vCPU thread
@@ -285,6 +283,8 @@ sequenceDiagram
     D-->>V: Service device access
     V->>K: ioctl KVM_RUN (re-enter)
 ```
+
+*Figure 5-3: The KVM_RUN trap-and-emulate loop*
 
 ---
 
@@ -407,8 +407,6 @@ if (!aehd.valid() && !gvm.valid()) {
 
 On success it issues a custom IOCTL, `AEHD_GET_API_VERSION` (defined with `CTL_CODE` and the device type `0xE3E3`), to extract the driver version. The driver's QEMU side is `external/qemu/target/i386/aehd-all.c`, whose `aehd_init` and `aehd_init_vcpu` mirror the KVM structure — AEHD is essentially a KVM-style ioctl interface implemented as a Windows kernel driver, which is why its QEMU integration reads almost identically to `kvm-all.c`. Note one Windows-specific wrinkle: after AEHD is selected, `main.cpp` warns the user if the Vanguard anti-cheat service (`vgk`) is detected, because it conflicts with the driver.
 
-### Windows backend selection
-
 ```mermaid
 flowchart TD
     START["Windows host probe"] --> HV{"Hyper-V running as host?"}
@@ -421,6 +419,8 @@ flowchart TD
     WHPX --> OK["CPU_ACCELERATOR_WHPX"]
     AEHD --> OK2["CPU_ACCELERATOR_AEHD"]
 ```
+
+*Figure 5-4: Windows backend selection*
 
 ---
 
@@ -545,8 +545,6 @@ case QEMU_OPTION_enable_whpx:
     break;
 ```
 
-### How -enable-kvm reaches a running vCPU thread
-
 ```mermaid
 flowchart TD
     FLAG["emulator passes -enable-kvm"] --> VL["vl.c rewrites to accel=kvm"]
@@ -562,6 +560,8 @@ flowchart TD
     DISP -->|tcg_enabled| TT["qemu_tcg_init_vcpu"]
     DISP -->|whpx_enabled| WT["qemu_whpx_start_vcpu"]
 ```
+
+*Figure 5-5: How -enable-kvm reaches a running vCPU thread*
 
 ---
 
@@ -671,8 +671,6 @@ This is why an x86_64 system image is the standard recommendation on x86 develop
 
 QEMU upstream carries a complete RISC-V target — `external/qemu/target/riscv/` with its own `cpu.c` and `translate.c`, and `external/qemu/default-configs/riscv64-softmmu.mak` builds a `qemu-system-riscv64`. But that target has no `kvm.c` or `hvf.c`, and the Android glue's `TargetInfo` table has no riscv64 case at all (it covers arm64, arm, mips64, mips, x86_64, and i386). So while QEMU can interpret riscv64 guest code through TCG, the Android Emulator product does not ship a riscv64 device, and there is no hardware-accelerated path for it — RISC-V would be a pure TCG guest.
 
-### Guest-to-host architecture acceleration matrix
-
 ```mermaid
 flowchart TD
     subgraph GUEST["Guest ABI"]
@@ -691,6 +689,8 @@ flowchart TD
     A64 -->|x86_64 host| SW
     RV -->|any host| SW
 ```
+
+*Figure 5-6: Guest-to-host architecture acceleration matrix*
 
 ---
 

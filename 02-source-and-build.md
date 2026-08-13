@@ -158,8 +158,6 @@ add_library(${bazel_TARGET} STATIC IMPORTED GLOBAL)
 
 This is invoked from `android_add_library` in `android/build/cmake/android.cmake`: when a library declaration carries a `BAZEL` argument and the host is Linux x86_64 or any macOS (x86_64 or aarch64), CMake routes the build to Bazel instead of compiling the sources itself. The Bazel path is explicitly disabled for Windows MSVC and Linux aarch64 — those targets compile everything through CMake.
 
-### Build system collaboration
-
 ```mermaid
 graph LR
   PY["cmake.py driver"] --> CMK["CMake + Ninja"]
@@ -169,6 +167,8 @@ graph LR
   MB["MODULE.bazel"] -->|"resolves deps"| BZ
   REG["build/bazel/registry"] -->|"local module versions"| MB
 ```
+
+*Figure 2-2: Build system collaboration*
 
 ---
 
@@ -300,8 +300,6 @@ if args.task:
     tasks = [x.enable(True) for x in tasks if x.name.lower() == args.task.lower()]
 ```
 
-### The task pipeline
-
 ```mermaid
 flowchart TD
   START["rebuild.sh"] --> DRV["cmake.py launch"]
@@ -313,6 +311,8 @@ flowchart TD
   TST --> PKG["PackageSamplesTask /<br/>ZipIntegrationTestsTask"]
   PKG --> DIST["DistributionTask<br/>(zip the output)"]
 ```
+
+*Figure 2-3: The task pipeline*
 
 ### 2.5.2 ConfigureTask: assembling the CMake command line
 
@@ -408,8 +408,6 @@ internal_set_env_cache(
 
 Two things happen here that shape the final package. The `libc++.so` from the Clang prebuilt is copied (not symlinked — symlinks cannot be redistributed) into `lib64/`, and an `$ORIGIN`-relative RPATH is baked into every binary so it finds its bundled shared libraries regardless of where the user installs the emulator. The toolchain file ends by wiring in the Rust compiler from the prebuilt directory.
 
-### Toolchain selection
-
 ```mermaid
 flowchart TD
   T["--target argument"] --> INF["Toolchain._infer_target"]
@@ -423,6 +421,8 @@ flowchart TD
   XC -->|"yes"| NOTEST["skip tests"]
   XC -->|"no"| RUNTEST["run CTest"]
 ```
+
+*Figure 2-4: Toolchain selection*
 
 ---
 
@@ -608,8 +608,6 @@ set(EMULATOR_BIOS_DEPENDENCIES
   ...)
 ```
 
-### Distribution layout
-
 ```mermaid
 graph TD
   DIST["distribution/emulator/"]
@@ -626,6 +624,8 @@ graph TD
   LIB64 --> S2["libgfxstream_backend.so"]
   LIB64 --> S3["libc++.so"]
 ```
+
+*Figure 2-5: Distribution layout*
 
 ---
 

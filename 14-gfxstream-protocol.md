@@ -36,8 +36,6 @@ This single distinction — who writes the bytes and who reads them back — is 
 
 The README makes one deliberate design decision explicit: the wire endianness is whatever the *guest* uses, and the host is responsible for byte-swapping if it differs. This keeps the guest encoder — the hot path that runs inside every graphics-using app — as cheap as possible, at the cost of pushing marshaling complexity onto the host. In practice the emulator runs an x86 or arm64 guest on an x86 or arm64 host with matching endianness, so the swap is a no-op, but the protocol is defined to tolerate the mismatch.
 
-### Wire packet structure for a render-control call
-
 ```mermaid
 flowchart LR
     subgraph PKT["Encoder to decoder packet"]
@@ -49,6 +47,8 @@ flowchart LR
     end
     OP --> LEN --> P1 --> P2 --> CK
 ```
+
+*Figure 14-1: Wire packet structure for a render-control call*
 
 ## 14.2 The emugen Code Generator
 
@@ -136,8 +136,6 @@ rcUpdateColorBufferDMA
 
 `isLarge` matters for performance: a large pixel upload should not be memcpy'd into the small command buffer and then flushed; instead the encoder allocates the command buffer up to the large pointer, flushes that, then writes the large payload directly. `flushOnEncode` tells the encoder to flush the stream as soon as the call is encoded, rather than batching it — used for fire-and-forget calls like `rcCloseColorBuffer` and the async compose variants.
 
-### How emugen turns three text files into both sides of the wire
-
 ```mermaid
 flowchart TD
     IN["renderControl.in<br/>(prototypes)"]
@@ -153,6 +151,8 @@ flowchart TD
     ENC -.shares.- OPC
     DEC -.shares.- OPC
 ```
+
+*Figure 14-2: How emugen turns three text files into both sides of the wire*
 
 ## 14.3 Inside a Generated Encoder Function
 
@@ -212,8 +212,6 @@ struct renderControl_encoder_context_t : public renderControl_client_context_t {
 
 The base `renderControl_client_context_t` is a table of function pointers, one per API entry. At init time those pointers are set to the `_enc` functions above. When guest code calls `rcCreateColorBuffer(rcEnc, ...)`, it is calling through that table into the generated encoder, which marshals the call onto the stream.
 
-### Encoder marshaling of a call with one input pointer
-
 ```mermaid
 sequenceDiagram
     participant App as Guest GL driver
@@ -229,6 +227,8 @@ sequenceDiagram
     Enc->>CK: writeChecksum(ptr)
     Enc->>Stream: readback(retval)
 ```
+
+*Figure 14-3: Encoder marshaling of a call with one input pointer*
 
 ## 14.4 The Stream Abstraction: alloc, flush, readback
 
@@ -342,8 +342,6 @@ static void rcSelectChecksumHelper(uint32_t protocol, uint32_t reserved) {
 
 `setVersion` rejects any value above `CHECKSUMHELPER_MAX_VERSION` (currently `1`), so a future guest that knows version 2 will negotiate down to 1 against an older host. The version is even part of snapshot state — `ChecksumCalculator::save` and `load` serialize the version and the read/write counters so a restored snapshot resumes with a consistent checksum stream.
 
-### State machine of checksum negotiation
-
 ```mermaid
 stateDiagram-v2
     [*] --> Off
@@ -356,6 +354,8 @@ stateDiagram-v2
     end note
     On --> [*] : connection closed
 ```
+
+*Figure 14-4: State machine of checksum negotiation*
 
 ## 14.6 Transports: How Bytes Leave the Guest
 
@@ -469,8 +469,6 @@ long sentChunks = ring_buffer_write(
 
 The flush interval — how many bytes accumulate before the guest pushes a descriptor — and the auxiliary buffer size are configured per device through the `flush_interval` and `buffer_size` fields of the `asg_ring_config` struct shared with the host, which the header documents as coming from the `hw_gltransport_asg_writeStepSize` and `hw_gltransport_asg_writeBufferSize` hardware settings.
 
-### Two transport families, one IOStream contract
-
 ```mermaid
 flowchart TD
     ENC["Generated encoder<br/>(writes via IOStream)"]
@@ -494,6 +492,8 @@ flowchart TD
     VG --> RT
     AD --> RT
 ```
+
+*Figure 14-5: Two transport families, one IOStream contract*
 
 ## 14.7 RenderControl: The Session Protocol
 
@@ -676,8 +676,6 @@ while (end - ptr >= 8) {
 
 The check `if (end - ptr < packetLen) return ...` is what makes the protocol robust to partial reads: if the buffer holds only part of a packet, the decoder returns the bytes it *did* consume, the render thread keeps the remainder, reads more from the transport, and tries again. The packet's self-described length is the only thing that makes this safe.
 
-### Host render thread multiplexing four decoders over one buffer
-
 ```mermaid
 flowchart TD
     RB["ReadBuffer<br/>(raw bytes from transport)"]
@@ -695,6 +693,8 @@ flowchart TD
     RC -->|"consumed N"| RB
     RC --> IMPL["FrameBuffer / GL / VkDecoderGlobalState"]
 ```
+
+*Figure 14-6: Host render thread multiplexing four decoders over one buffer*
 
 ## 14.10 Why the Protocol Is Generated, Not Written
 

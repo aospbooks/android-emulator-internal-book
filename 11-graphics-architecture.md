@@ -49,8 +49,6 @@ gfxstream's host backend serves two completely different virtual machine monitor
 
 Both front ends ultimately drive the same `FrameBuffer`, the same `RenderThread`s, and the same GLES/Vulkan decoders. This chapter follows the goldfish path in detail because it is the path the Android Emulator binary actually takes, and notes the virtio-gpu divergence where it matters.
 
-### Component map of the graphics subsystem
-
 ```mermaid
 flowchart TB
   subgraph GUEST["Guest (Android system image)"]
@@ -72,6 +70,8 @@ flowchart TB
   DEC --> FB --> GPU
   FB --> UI
 ```
+
+*Figure 11-1: Component map of the graphics subsystem*
 
 ---
 
@@ -123,8 +123,6 @@ From a single set of `.in` and `.attrib` files, `emugen` emits three kinds of co
 
 The Vulkan path uses a different generator (`scripts/generate-gfxstream-vulkan.sh`) driven by the Khronos Vulkan XML registry rather than `emugen`, but the principle is identical: a registry in, an encoder and a decoder out.
 
-### Guest encode path for one GLES call
-
 ```mermaid
 sequenceDiagram
   participant App as Guest app
@@ -138,6 +136,8 @@ sequenceDiagram
   Stream->>Host: bytes over opengles pipe
   Note over Host: decoded and replayed on host GPU
 ```
+
+*Figure 11-2: Guest encode path for one GLES call*
 
 ---
 
@@ -188,8 +188,6 @@ Thereafter, when the guest writes to the pipe, `EmuglPipe::onGuestSend` moves th
 
 The QEMU-pipe transport copies bytes. For high throughput, gfxstream also supports two ring-buffer transports that avoid per-command copies: the address-space device (`HOST_CONNECTION_ADDRESS_SPACE`) and, on crosvm/Cuttlefish, virtio-gpu (`HOST_CONNECTION_VIRTIO_GPU_PIPE`). The gfxstream design notes describe Vulkan as using a "Ring Buffer to stream commands, in the style of io_uring" (`hardware/google/gfxstream/docs/design.md`). On the host, the `RenderThread` is constructed with either a `RenderChannelImpl*` (the pipe/channel case) or an `AsgConsumerCreateInfo` (the address-space-graphics ring case), and reads from a `ChannelStream` or a `RingStream` accordingly — a distinction visible in `RenderThread`'s constructors in `hardware/google/gfxstream/host/render_thread.h`.
 
-### Transport selection by VMM
-
 ```mermaid
 flowchart TB
   GC["Guest gfxstream client"]
@@ -203,6 +201,8 @@ flowchart TB
   RS --> RT
   SR --> RT
 ```
+
+*Figure 11-3: Transport selection by VMM*
 
 ---
 
@@ -238,8 +238,6 @@ The `RenderThread` class documents its own role precisely:
 class RenderThread : public gfxstream::base::Thread {
 ```
 
-### Host renderer object ownership
-
 ```mermaid
 flowchart TB
   RL["RenderLib<br/>(from libgfxstream_backend)"]
@@ -258,6 +256,8 @@ flowchart TB
   RT1 --> FB
   RT2 --> FB
 ```
+
+*Figure 11-4: Host renderer object ownership*
 
 ---
 
@@ -310,8 +310,6 @@ Each `decode` returns the number of bytes it consumed; if that is positive, the 
 
 A revealing detail in the loop is an explicit NVIDIA driver workaround: before running the GLES decoders the thread takes `FrameBuffer::getFB()->lockContextStructureRead()`, because on some Linux NVIDIA drivers calling `glTexSubImage2D` concurrently with glXMakeCurrent (making a context current) segfaults. The comment in `render_thread.cpp` documents this verbatim — a reminder that the host path runs against real, quirky drivers.
 
-### RenderThread main decode loop
-
 ```mermaid
 flowchart TB
   START["main: create RenderThreadInfo"] --> INIT["initGl / initRenderControl<br/>waitUntilInitialized"]
@@ -325,6 +323,8 @@ flowchart TB
   CHK -->|"true"| RESET
   CHK -->|"false"| READ
 ```
+
+*Figure 11-5: RenderThread main decode loop*
 
 ---
 
@@ -432,8 +432,6 @@ std::unique_ptr<gl::EmulationGl> m_emulationGl;
 
 A `ColorBuffer` (declared in `hardware/google/gfxstream/host/color_buffer.h`) is `create`d with pointers to both `gl::EmulationGl*` and `vk::VkEmulation*`, and it can be backed by GL, by Vulkan, or interoperate between them. That is why the class exposes paired methods such as `flushFromGl` / `flushFromVk` and `invalidateForGl` / `invalidateForVk`, plus `borrowForComposition` and `borrowForDisplay` that hand out a `BorrowedImageInfo` tagged with `UsedApi::kGl` or `UsedApi::kVk`. When a guest renders into a color buffer with Vulkan but the host composites with GL (or vice versa), these flush/invalidate calls synchronize the shared image between the two host APIs.
 
-### Color buffer lifecycle
-
 ```mermaid
 stateDiagram-v2
   [*] --> Created : rcCreateColorBuffer
@@ -445,6 +443,8 @@ stateDiagram-v2
   Opened --> Closed : closeColorBuffer, refcount zero
   Closed --> [*]
 ```
+
+*Figure 11-6: Color buffer lifecycle*
 
 ---
 
@@ -477,8 +477,6 @@ The callback path is how headless and recording consumers receive frames. On the
 
 The `FrameBuffer` also offers `repost()` to re-present the last posted color buffer — used when the window is resized or uncovered and nothing new has been rendered.
 
-### Compose and post pipeline
-
 ```mermaid
 sequenceDiagram
   participant Guest as Guest HWComposer
@@ -494,6 +492,8 @@ sequenceDiagram
   PW->>Out: present pixels
   Out-->>Guest: vsync / frame done
 ```
+
+*Figure 11-7: Compose and post pipeline*
 
 ---
 
@@ -511,8 +511,6 @@ Third, the `RenderThread` runs the Vulkan decoder *first* and outside the GLES "
 
 Vulkan and GLES are asynchronous: a draw call submitted to the host GPU completes later. gfxstream exposes host completion back to the guest through a `SyncThread` (`hardware/google/gfxstream/host/sync_thread.cpp`), which waits on host fences and then fires the guest's goldfish-sync timeline. It offers GL-flavored waits (`triggerWait` on an `EmulatedEglFenceSync`) and Vulkan-flavored waits (`triggerWaitVk` on a `VkFence`, and `triggerWaitVkQsriWithCompletionCallback` on a `VkImage` for queue-submit-with-release-image semantics). `triggerWait` and `triggerWaitVk` fire a goldfish-sync timeline increment; the `SyncThread` also provides `triggerWaitWithCompletionCallback` and `triggerWaitVkWithCompletionCallback` variants that accept a `FenceCompletionCallback` instead, so the host can run arbitrary work — such as posting the just-rendered image — the instant the GPU signals.
 
-### Vulkan call to host GPU
-
 ```mermaid
 flowchart TB
   GAPP["Guest Vulkan app"]
@@ -525,6 +523,8 @@ flowchart TB
   GAPP --> ICD --> RING --> VKDEC --> GLOBAL --> HOSTVK
   HOSTVK --> SYNC --> ICD
 ```
+
+*Figure 11-8: Vulkan call to host GPU*
 
 ---
 
@@ -542,8 +542,6 @@ crosvm's virtio-gpu device calls `stream_renderer_init` at startup and `stream_r
 
 The practical takeaway: the *encoders*, the *wire protocol*, the *decoders*, the `FrameBuffer`, and the color-buffer model are shared between the two virtual devices. What differs is the transport (QEMU pipe / address-space ring versus virtio-gpu) and the host entry API (`RenderLib` C++ objects versus `stream_renderer_*` C functions).
 
-### Two front ends, one backend
-
 ```mermaid
 flowchart TB
   subgraph CLASSIC["Classic Android Emulator"]
@@ -559,6 +557,8 @@ flowchart TB
   CROSVM --> SRAPI --> BACKEND
   BACKEND --> HGPU["Host GPU driver"]
 ```
+
+*Figure 11-9: Two front ends, one backend*
 
 ---
 

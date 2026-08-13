@@ -32,8 +32,6 @@ The base directory is computed in `external/qemu/android/android-emu/android/sna
 
 The diagram below shows the on-disk artifacts for one snapshot and which subsystem produces each.
 
-#### Snapshot directory contents and their producers
-
 ```mermaid
 flowchart TB
     subgraph DIR["avd/snapshots/{name}/"]
@@ -55,6 +53,8 @@ flowchart TB
     SAVEVM --> DISK
     SNAP --> SS
 ```
+
+*Figure 9-1: Snapshot directory contents and their producers*
 
 ## 9.2 The Snapshotter: Workflow and Ownership
 
@@ -105,8 +105,6 @@ if (mVmOperations.isSnapshotSaveSkipped()) {
 }
 ```
 
-#### The save call path from Snapshotter into QEMU and back
-
 ```mermaid
 sequenceDiagram
     participant ST as Snapshotter
@@ -129,6 +127,8 @@ sequenceDiagram
     SV->>CB: savevm.on_end(name, ret)
     CB->>ST: onSavingComplete(name, ret)
 ```
+
+*Figure 9-2: The save call path from Snapshotter into QEMU and back*
 
 ## 9.3 The Metadata Protobuf
 
@@ -255,8 +255,6 @@ stream.putBe32(uint32_t(mIndex.totalPages));
 
 The hashes enable incremental saving: when a prior RamLoader is present, any page whose hash matches the corresponding previously-saved page is reused on disk rather than rewritten, and the hash is stored in the index so future saves can do the same comparison. When a previous load left a `RamLoader` around with gap-tracking intact, the new `Saver` passes that loader to the `RamSaver` (`tryIncremental = loader && !loader->hasError() && loader->hasGaps()`), and pages whose hash matches the previously-loaded page can be left in place rather than rewritten. The leftover free space from rewriting is tracked by a `GapTracker`, also serialized into the index (only for version > 1).
 
-#### RamSaver page pipeline
-
 ```mermaid
 flowchart LR
     SP["savePage(blockOffset)"] --> ZC{"page all zero?"}
@@ -272,6 +270,8 @@ flowchart LR
     WC --> IDX
     WP --> IDX
 ```
+
+*Figure 9-3: RamSaver page pipeline*
 
 ### 9.4.3 Compression heuristics
 
@@ -399,8 +399,6 @@ if (currentRamFileStatus != SNAPSHOT_RAM_FILE_PRIVATE && !shared) {
 
 This is what the console command `avd snapshot remap <auto-save>` reaches: turning auto-save on remaps to shared so future exits are cheap; turning it off remaps to private.
 
-#### File-backed RAM states and transitions
-
 ```mermaid
 stateDiagram-v2
     [*] --> None : no ram-file
@@ -413,6 +411,8 @@ stateDiagram-v2
     None --> Saved : copy ram.bin on exit
     Saved --> [*]
 ```
+
+*Figure 9-4: File-backed RAM states and transitions*
 
 ## 9.7 Quickboot: Save-on-Exit and Load-on-Boot
 
@@ -465,8 +465,6 @@ If the guest does not come alive within `bootTimeoutMs()` (7 seconds on x86, lon
 
 For file-backed RAM there is an extra step in `androidSnapshot_quickbootSave`: it persists the user's save-on-exit choice into a per-AVD `quickbootChoice.ini` via `androidSnapshot_writeQuickbootChoice`, and clears or sets the dirty flag depending on whether the shared save succeeded.
 
-#### Quickboot save-on-exit decision flow
-
 ```mermaid
 flowchart TB
     EXIT["shutdown requested"] --> INV{"invalidate_exit_snapshot?"}
@@ -483,6 +481,8 @@ flowchart TB
     OK -->|"no"| DELP["delete partial snapshot"]
     OK -->|"yes"| DONE["report success<br/>clear dirty flag"]
 ```
+
+*Figure 9-5: Quickboot save-on-exit decision flow*
 
 ## 9.8 The QEMU Bridge: savevm, loadvm, and File Hooks
 
@@ -526,8 +526,6 @@ The `before_ram_iterate` hook, on `RAM_CONTROL_SETUP`, walks every migratable bl
 
 The load side uses `sLoadHooks`: its `hook_ram_load` handles `RAM_CONTROL_BLOCK_REG` (register the block on the `RamLoader`) and `RAM_CONTROL_HOOK` (start the loader). A separate `qemu_set_ram_load_callback` routes page faults during lazy loading back through `ramOps.loadRam`. The relevant control-flow constants — `RAM_CONTROL_SETUP`, `RAM_CONTROL_FINISH`, `RAM_CONTROL_BLOCK_REG`, `RAM_CONTROL_HOOK`, and `RAM_SAVE_CONTROL_DELAYED` — are defined in `external/qemu/migration/qemu-file.h`.
 
-#### How the file hooks split device state from RAM
-
 ```mermaid
 flowchart TB
     SVS["qemu_savevm_state"] --> DEV["device + CPU vmstate"]
@@ -539,6 +537,8 @@ flowchart TB
     SETUP["before_ram_iterate<br/>RAM_CONTROL_SETUP"] --> REG["registerBlock per RAMBlock"]
     REG --> RS
 ```
+
+*Figure 9-6: How the file hooks split device state from RAM*
 
 ## 9.9 Textures, Compatibility Protobuf, and Cleanup
 

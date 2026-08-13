@@ -33,8 +33,6 @@ The crosvm `VmManager` even keeps a QEMU backend alongside it: `device/google/cu
 
 Crosvm is a from-scratch VMM written in Rust, originally for running Linux apps on ChromeOS. For Cuttlefish it offers three properties that matter at infrastructure scale: a small, memory-safe, security-sandboxed codebase (crosvm runs each virtio device in a seccomp jail); a clean separation of devices into out-of-process "vhost-user" backends; and first-class support for virtio-vsock and the rutabaga/gfxstream graphics path. The cost is that crosvm does not present a single integrated UI the way the emulator's Qt frontend does, which is exactly why Cuttlefish layers a separate WebRTC streamer on top.
 
-### Cuttlefish versus the QEMU emulator at a glance
-
 ```mermaid
 flowchart LR
   subgraph EMU["QEMU emulator"]
@@ -53,6 +51,8 @@ flowchart LR
     C3 --- C6["virtio-vsock + virtio-console"]
   end
 ```
+
+*Figure 26-1: Cuttlefish versus the QEMU emulator at a glance*
 
 ## 26.2 The Host Orchestration Stack
 
@@ -124,8 +124,6 @@ return fruit::createComponent()
     ...
 ```
 
-### The three-stage host launch path
-
 ```mermaid
 sequenceDiagram
   participant User
@@ -143,6 +141,8 @@ sequenceDiagram
   Mon->>Mon: StartAndMonitorProcesses
   Run-->>User: server loop, device booting
 ```
+
+*Figure 26-2: The three-stage host launch path*
 
 ## 26.3 The CommandSource Graph and the Process Monitor
 
@@ -185,8 +185,6 @@ The files under `device/google/cuttlefish/host/commands/run_cvd/launch/` are the
 
 Each of these is small precisely because crosvm pushes device emulation out of the VMM. In the emulator, the equivalent capabilities (sensors, GPS, the modem, the control console) live inside `android-emu` in the one big process.
 
-### run_cvd assembles a process graph
-
 ```mermaid
 flowchart TB
   RUN["run_cvd"] --> CS["CommandSource multibindings"]
@@ -204,6 +202,8 @@ flowchart TB
   PM -->|"fork"| SE
   PM -->|"fork"| MODEM
 ```
+
+*Figure 26-3: run_cvd assembles a process graph*
 
 ## 26.4 crosvm: Building the VMM Command Line
 
@@ -268,8 +268,6 @@ if (instance.enable_sandbox()) {
 }
 ```
 
-### The crosvm command construction
-
 ```mermaid
 flowchart TB
   SC["CrosvmManager::StartCommands"] --> B["CrosvmBuilder"]
@@ -284,6 +282,8 @@ flowchart TB
   SC --> CMDS["vector of MonitorCommand"]
   CMDS --> PM["ProcessMonitor"]
 ```
+
+*Figure 26-4: The crosvm command construction*
 
 ## 26.5 vsock and virtio-console: The Guest Transport
 
@@ -362,8 +362,6 @@ CF_EXPECT(crosvm_cmd.HvcNum() + disk_num ==
                         << disk_num << ") is not the expected total ...");
 ```
 
-### How a guest service reaches the host
-
 ```mermaid
 flowchart LR
   subgraph GUEST["Android guest"]
@@ -379,6 +377,8 @@ flowchart LR
   P1 -->|"localhost TCP"| P2
   G2 -->|"virtio-console FIFO"| P3
 ```
+
+*Figure 26-5: How a guest service reaches the host*
 
 ## 26.6 The Launcher Control Plane
 
@@ -441,8 +441,6 @@ case ActionsCase::kSnapshotTake: {
 
 This is structurally similar in purpose to the emulator's telnet/gRPC console (Chapter on the control plane), but the mechanics differ: the emulator console runs in-process and exposes a text/gRPC protocol; Cuttlefish's launcher monitor is a separate process boundary using a compact binary protocol over a UNIX socket, with the heavy lifting of suspend/snapshot delegated downward to crosvm's own control socket.
 
-### Launcher control flow
-
 ```mermaid
 sequenceDiagram
   participant Tool as Tool stop_cvd
@@ -460,6 +458,8 @@ sequenceDiagram
   end
   SL-->>Tool: LauncherResponse byte
 ```
+
+*Figure 26-6: Launcher control flow*
 
 ## 26.7 Shared Graphics: gfxstream on crosvm
 
@@ -510,8 +510,6 @@ The device process exposes a Wayland socket for frames (`--wayland-sock=`), whic
 
 In the emulator, gfxstream is loaded in-process and frames flow to the Qt UI through the in-process renderer; the emulator does not need a vhost-user boundary because there is only one process. Cuttlefish's split lets the renderer run, crash, and be restarted independently, and lets a headless server omit any local display entirely.
 
-### gfxstream wired into crosvm
-
 ```mermaid
 flowchart LR
   subgraph GUEST["Android guest"]
@@ -529,6 +527,8 @@ flowchart LR
   RB --> WL
   WL -->|"frames"| STREAM["WebRTC streamer"]
 ```
+
+*Figure 26-7: gfxstream wired into crosvm*
 
 ## 26.8 Shared Connectivity: RootCanal and the Modem
 
@@ -592,8 +592,6 @@ if (instance_.start_webrtc_sig_server()) {
 
 The operator code lives under `device/google/cuttlefish/host/frontend/webrtc_operator/` and `operator_proxy/`. The webrtc README notes that "some functionality is crosvm-specific and some is QEMU-specific" — meaning the streaming frontend is shared, but a few paths only light up under one VMM. This is the cleanest illustration of Cuttlefish's philosophy: the substrate is crosvm, but the user-visible surfaces (graphics, input, streaming) are factored to be VMM-agnostic.
 
-### WebRTC display and input path
-
 ```mermaid
 flowchart LR
   subgraph HOST["Host"]
@@ -611,6 +609,8 @@ flowchart LR
   Browser <-->|"signaling"| SIG
 ```
 
+*Figure 26-8: WebRTC display and input path*
+
 ## 26.10 How Cuttlefish Differs From the Emulator
 
 Pulling the threads together, three differences define Cuttlefish relative to the QEMU emulator.
@@ -622,8 +622,6 @@ The differences are VMM, transport, and process model.
 3. **A host orchestration fleet versus one process.** Cuttlefish boots through `cvd`/`start` -> `assemble_cvd` -> `run_cvd`, and `run_cvd` supervises a dozen-plus host processes through a `ProcessMonitor`, controlled over a launcher monitor socket. The emulator is a single self-contained binary. The fleet model is what lets crosvm crash-isolate devices and what makes Cuttlefish suitable for large-scale CI.
 
 What stays the same is everything above the substrate: the Android guest image, gfxstream graphics, RootCanal Bluetooth, the modem simulator, netsim, and a WebRTC display surface. Cuttlefish is best understood not as a different emulator but as a different way of hosting the same Android virtual device.
-
-### The full Cuttlefish runtime
 
 ```mermaid
 flowchart TB
@@ -642,6 +640,8 @@ flowchart TB
   RC -->|"vsock proxy"| CROSVM
   Browser["Browser"] <--> STR
 ```
+
+*Figure 26-9: The full Cuttlefish runtime*
 
 ## 26.11 Try It
 

@@ -73,8 +73,6 @@ static constexpr size_t ACL_PREAMBLE_SIZE = 4;
 
 The parser takes five callbacks at construction time, one per packet type (command, event, ACL, SCO, ISO), and invokes the matching one when a complete packet has been assembled. This is the lowest common denominator that the emulator's QEMU glue, the netsim daemon, and Rootcanal all agree on, and it is why the same `H4Parser` class is copied into the QEMU glue tree as well.
 
-### How an HCI packet reaches the controller
-
 ```mermaid
 flowchart LR
     BYTES["H4 byte stream"] --> P["H4Parser state machine"]
@@ -85,6 +83,8 @@ flowchart LR
     EV --> T["HciTransport Send"]
     T --> BYTES2["H4 byte stream back to host"]
 ```
+
+*Figure 19-1: How an HCI packet reaches the controller*
 
 ---
 
@@ -148,8 +148,6 @@ The README explains the rule that makes multi-device work: "Controllers can exch
 
 The phy channels carry a simplified link-layer protocol defined in `tools/rootcanal/packets/link_layer_packets.pdl`. As the README warns, this protocol "simplifies the LL and LMP protocol packets defined in the Bluetooth specification to abstract over negotiation details," and it "can change in backward incompatible ways."
 
-### The Rootcanal phy mesh
-
 ```mermaid
 flowchart TB
     subgraph TM["TestModel"]
@@ -164,6 +162,8 @@ flowchart TB
     PL -.->|"link-layer packets"| C1
     PL -.->|"link-layer packets"| C2
 ```
+
+*Figure 19-2: The Rootcanal phy mesh*
 
 ---
 
@@ -213,8 +213,6 @@ auto transport = PacketStreamerTransport::create(
 transport->start();
 ```
 
-### The transport chain from guest to Rootcanal
-
 ```mermaid
 flowchart LR
     HAL["Guest BT HAL<br/>/dev/vhci"] --> VSP["virtio serial port<br/>name=bluetooth"]
@@ -225,6 +223,8 @@ flowchart LR
     WC --> FAC["netsim HCI facade<br/>handle_bt_request"]
     FAC --> RC["Rootcanal HciDevice"]
 ```
+
+*Figure 19-3: The transport chain from guest to Rootcanal*
 
 ---
 
@@ -374,8 +374,6 @@ match (last_state, state) {
 
 When the `Bluetooth` struct is dropped, its `Drop` impl calls `ffi_bluetooth::bluetooth_remove(self.rootcanal_id)`, which on the C++ side closes the transport and erases the chip-info entry. The Rust struct's lifetime is the controller's lifetime.
 
-### netsim daemon internal layering
-
 ```mermaid
 flowchart TB
     subgraph RUST["netsimd Rust"]
@@ -396,6 +394,8 @@ flowchart TB
     HTR --> HD
     WIR -.-> DROP
 ```
+
+*Figure 19-4: netsim daemon internal layering*
 
 ---
 
@@ -430,8 +430,6 @@ Everything so far is the data plane — HCI packets moving between guest and con
 
 The CLI is the Rust binary under `tools/netsim/rust/cli/`. Its argument grammar (`tools/netsim/rust/cli/src/args.rs`) maps subcommands onto those RPCs: `radio` (control a device's radio state), `devices`, `capture` (aliased `pcap`), `reset`, `beacon`, `bumble`, and `link`. Device radio toggling is done via `radio`, not a top-level `patch`. The `radio` subcommand takes a `RadioType` of `Ble` or another radio and a status, then issues a `PatchDevice` that flips the corresponding atomic flag described in section 19.6.3 — which, in turn, adds or removes the controller from its phy.
 
-### Control plane vs. data plane
-
 ```mermaid
 flowchart TB
     CLI["netsim CLI"] -->|"PatchDevice / ListDevice"| FE["FrontendService<br/>gRPC"]
@@ -441,6 +439,8 @@ flowchart TB
     WIR -->|"add/remove phy"| RC["Rootcanal TestModel"]
     EMU["Emulator stream"] -->|"PacketStreamer HCI data"| RC
 ```
+
+*Figure 19-5: Control plane vs. data plane*
 
 ### 19.8.1 BLE Beacon Devices
 
@@ -482,8 +482,6 @@ if chip_address.is_empty() {
 
 With stable addresses, two emulators that have paired once stay paired across reboots. This is what makes phone-plus-watch testing, fast-pair flows, and BLE mesh scenarios reproducible on a single host.
 
-### Two emulators on one mesh
-
 ```mermaid
 sequenceDiagram
     box "Emulators"
@@ -506,6 +504,8 @@ sequenceDiagram
     RC-->>ND: connection complete event
     ND-->>E1: connection complete event
 ```
+
+*Figure 19-6: Two emulators on one mesh*
 
 ---
 

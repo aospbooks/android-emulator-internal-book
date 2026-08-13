@@ -25,8 +25,6 @@ When a chapter cites `external/qemu/android/android-emu/android/console.cpp`, th
 
 The diagram below shows how the top-level source roots flow from the build system at the top down through the QEMU fork, glue layer, and android-emu core, out to the host-side renderer, control plane, and Qt UI, with the guest image as a separate column that the host talks to over pipes and sockets.
 
-#### Top-level source roots and how they layer
-
 ```mermaid
 flowchart TB
     subgraph HOST["Host process (emulator / qemu-system)"]
@@ -60,6 +58,8 @@ flowchart TB
     GRPC --> RC
     NETSIM --> RC
 ```
+
+*Figure B-1: Top-level source roots and how they layer*
 
 ---
 

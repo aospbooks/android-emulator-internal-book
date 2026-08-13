@@ -229,6 +229,8 @@ sequenceDiagram
     MC->>QEMU: arm_load_kernel with bootinfo
 ```
 
+*Figure 4-3: Board Initialization Sequence*
+
 ---
 
 ## 4.4 The Device Tree
