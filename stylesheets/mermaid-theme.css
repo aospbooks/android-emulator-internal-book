@@ -2,18 +2,20 @@
  *
  * Restyles every diagram centrally by overriding Material's --md-mermaid-*
  * CSS custom properties (they inherit into the mermaid shadow roots), so
- * chapter Mermaid source needs no styling directives. Structural polish
- * (rounded corners, hairline clusters) is injected per-diagram by
- * javascripts/mermaid-theme.js using the --emu-mermaid-* variables below.
+ * chapter Mermaid source needs no styling directives. Typography and
+ * structural polish (uppercase zone labels, rounded corners, hairline
+ * clusters) is injected per-diagram by javascripts/mermaid-theme.js using
+ * the --emu-mermaid-* variables below.
  *
- * Design: white nodes with soft blue-gray borders, muted gray edges, quiet
- * zone washes — blue stays reserved for links/emphasis, matching the site.
+ * Design: white nodes with near-black borders, muted gray edges, quiet
+ * zone washes labeled in small uppercase mono — blue stays reserved for
+ * links/emphasis, matching the site.
  */
 
 :root,
 [data-md-color-scheme="default"] {
   --md-mermaid-node-bg-color: #ffffff;
-  --md-mermaid-node-fg-color: #455a64;
+  --md-mermaid-node-fg-color: #37474f;
   --md-mermaid-edge-color: #616161;
   --md-mermaid-label-fg-color: #212121;
   --md-mermaid-sequence-note-bg-color: #e3f2fd;
@@ -23,11 +25,13 @@
   --emu-mermaid-cluster-bg: rgba(33, 33, 33, 0.025);
   --emu-mermaid-cluster-border: rgba(33, 33, 33, 0.12);
   --emu-mermaid-activation-bg: rgba(33, 33, 33, 0.06);
+  --emu-mermaid-zone-label-color: rgba(33, 33, 33, 0.55);
+  --emu-mermaid-edge-label-color: #616161;
 }
 
 [data-md-color-scheme="slate"] {
   --md-mermaid-node-bg-color: #2b303b;
-  --md-mermaid-node-fg-color: #90a4ae;
+  --md-mermaid-node-fg-color: #b0bec5;
   --md-mermaid-edge-color: #a5b0ba;
   --md-mermaid-label-fg-color: #eceff1;
   --md-mermaid-sequence-note-bg-color: #263238;
@@ -37,4 +41,6 @@
   --emu-mermaid-cluster-bg: rgba(236, 239, 241, 0.04);
   --emu-mermaid-cluster-border: rgba(236, 239, 241, 0.14);
   --emu-mermaid-activation-bg: rgba(236, 239, 241, 0.08);
+  --emu-mermaid-zone-label-color: rgba(236, 239, 241, 0.6);
+  --emu-mermaid-edge-label-color: #a5b0ba;
 }
