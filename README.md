@@ -34,16 +34,16 @@ crosvm-based Cuttlefish virtual device:
 | III | 10 | Sensors, Battery & Location | ✓ |
 | IV | 11 | Graphics Architecture (gfxstream) | ✓ |
 | IV | 12 | Guest GPU Drivers | ✓ |
-| IV | 13 | Host Rendering (libOpenglRender/ANGLE/mesa) | ✗ |
-| IV | 14 | gfxstream Protocol | ✗ |
-| V | 15 | Audio | ✗ |
-| V | 16 | Camera | ✗ |
-| V | 17 | Display & Multi-Display | ✗ |
-| VI | 18 | Networking (slirp/netsim) | ✗ |
-| VI | 19 | Bluetooth (rootcanal) | ✗ |
-| VI | 20 | ADB Integration | ✗ |
-| VI | 21 | Modem & Telephony | ✗ |
-| VII | 22 | The Qt UI | ✗ |
+| IV | 13 | Host Rendering (libOpenglRender/ANGLE/mesa) | ✓ |
+| IV | 14 | gfxstream Protocol | ✓ |
+| V | 15 | Audio | ✓ |
+| V | 16 | Camera | ✓ |
+| V | 17 | Display & Multi-Display | ✓ |
+| VI | 18 | Networking (slirp/netsim) | ✓ |
+| VI | 19 | Bluetooth (rootcanal) | ✓ |
+| VI | 20 | ADB Integration | ✓ |
+| VI | 21 | Modem & Telephony | ✓ |
+| VII | 22 | The Qt UI | ✓ |
 | VII | 23 | WebRTC & the Embedded Emulator | ✗ |
 | VIII | 24 | System Images & the Goldfish HAL | ✗ |
 | VIII | 25 | Guest Boot | ✗ |
