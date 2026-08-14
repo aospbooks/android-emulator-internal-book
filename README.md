@@ -44,17 +44,17 @@ crosvm-based Cuttlefish virtual device:
 | VI | 20 | ADB Integration | ✓ |
 | VI | 21 | Modem & Telephony | ✓ |
 | VII | 22 | The Qt UI | ✓ |
-| VII | 23 | WebRTC & the Embedded Emulator | ✗ |
-| VIII | 24 | System Images & the Goldfish HAL | ✗ |
-| VIII | 25 | Guest Boot | ✗ |
+| VII | 23 | WebRTC & the Embedded Emulator | ✓ |
+| VIII | 24 | System Images & the Goldfish HAL | ✓ |
+| VIII | 25 | Guest Boot | ✓ |
 | IX | 26 | Cuttlefish & crosvm (the crosvm-based virtual device) | ✓ |
 | X | 27 | Testing | ✓ |
 | X | 28 | Debugging, Tracing & Crash Reporting | ✓ |
-| App. | A | Paravirtualization from Xen to Android | ✗ |
-| App. | B | Key Files Reference | ✗ |
-| App. | C | Glossary | ✗ |
+| App. | A | Paravirtualization from Xen to Android | ✓ |
+| App. | B | Key Files Reference | ✓ |
+| App. | C | Glossary | ✓ |
 
-✓ = reviewed by a human; ✗ = not yet reviewed by a human, published openly for community review.
+✓ = reviewed by a human. All chapters and appendices have been human-reviewed; community review via issues and pull requests remains welcome.
 <!-- --8<-- [end:coverage] -->
 
 ## How to Give Feedback
