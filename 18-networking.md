@@ -1,34 +1,44 @@
 # Chapter 18: Networking
 
-A booting Android system image expects to come up on a real network: it runs a DHCP client, queries DNS, opens TCP connections, and brings up a Wi-Fi interface. The emulator satisfies all of that without touching the host's physical NIC. By default there is no bridge, no TAP device, and no elevated privileges — instead a user-space library, libslirp, pretends to be an entire IP network. It answers the guest's DHCP request, hands it the address `10.0.2.15`, plays the role of the gateway at `10.0.2.2`, intercepts DNS at `10.0.2.3`, and translates every guest socket into an ordinary host socket. From the guest's point of view it is on a normal LAN; from the host's point of view the emulator is just another process opening connections.
+An Android system image expects to boot on a real network. It runs a DHCP client, queries DNS, opens TCP connections, and brings up a Wi-Fi interface. The emulator satisfies all of that and does not touch the host's physical NIC.
 
-This chapter follows a packet from the guest's virtual NIC out to the host and back. It covers the libslirp user-mode stack and its NAT, the fixed `10.0.2.x` addressing, the DHCP/DNS/TFTP services baked into slirp, port forwarding through the `redir` console command and `slirp_add_hostfwd`, the emulated Wi-Fi path built on `mac80211_hwsim` and a `virtio-wifi` device, and finally netsim — the gRPC packet streamer that lets multiple virtual devices share one simulated radio medium.
+By default there is no bridge, no TAP device, and no elevated privileges. Instead, a user-space library, libslirp, pretends to be an entire IP network. It answers the guest's DHCP request and gives the guest the address `10.0.2.15`. It plays the role of the gateway at `10.0.2.2`, and it intercepts DNS at `10.0.2.3`.
+
+libslirp also translates every guest socket into an ordinary host socket. From the guest's point of view, it is on a normal LAN. From the host's point of view, the emulator is just another process that opens connections.
+
+This chapter follows a packet from the guest's virtual NIC out to the host and back. It covers the libslirp user-mode stack and its NAT, the fixed `10.0.2.x` addressing, and the DHCP/DNS/TFTP services that slirp contains. It then explains port forwarding through the `redir` console command and `slirp_add_hostfwd`. Next, it describes the emulated Wi-Fi path, which uses `mac80211_hwsim` and a `virtio-wifi` device. Finally, it introduces netsim, the gRPC packet streamer that lets multiple virtual devices share one simulated radio medium.
 
 ---
 
 ## 18.1 User-Mode Networking with libslirp
 
-The emulator does not put the guest on the host's real network segment. Instead it links against libslirp, a self-contained TCP/IP stack that lives entirely in user space. libslirp is vendored at `external/libslirp/`, and its own README describes it as "a user-mode networking library used by virtual machines, containers or various tools" (`external/libslirp/README.md`). QEMU's networking glue wraps it in `external/qemu/net/slirp.c`, which exposes it to the rest of QEMU as a `NetClientState` of type `NET_CLIENT_DRIVER_USER`.
+The emulator does not put the guest on the host's real network segment. Instead it links against libslirp, a self-contained TCP/IP stack that lives entirely in user space. The source tree contains a copy of libslirp at `external/libslirp/`. The libslirp README describes it as "a user-mode networking library used by virtual machines, containers or various tools" (`external/libslirp/README.md`). QEMU's networking glue wraps it in `external/qemu/net/slirp.c`, which exposes it to the rest of QEMU as a `NetClientState` of type `NET_CLIENT_DRIVER_USER`.
 
-The defining property of user-mode networking is that the guest's packets never reach a host kernel network interface as packets. libslirp parses the Ethernet/IP/TCP headers itself and, when the guest opens a TCP connection, libslirp opens an ordinary host socket on the guest's behalf. The host kernel sees a normal `connect()` from the emulator process — no `CAP_NET_ADMIN`, no TAP device, no bridge. This is why the emulator can do networking with zero setup and zero privileges, and it is the mode every AVD uses unless you explicitly pass `-net-tap`.
+The defining property of user-mode networking is that the guest's packets never reach a network interface of the host kernel as packets. The libslirp library parses the Ethernet/IP/TCP headers itself. When the guest opens a TCP connection, libslirp opens an ordinary host socket on the guest's behalf.
+
+The host kernel sees a normal `connect()` from the emulator process. This setup needs no `CAP_NET_ADMIN`, no TAP device, and no bridge. This is why the emulator can do networking with zero setup and zero privileges. User-mode networking is the mode every AVD uses unless you explicitly pass `-net-tap`.
 
 ### 18.1.1 The three slirp components in the tree
 
-There are three distinct slirp components in play, and it helps to keep them separate:
+There are three distinct slirp components in use, and it helps to keep them separate:
 
-1. `external/qemu/slirp/` is the bundled slirp library — a copy of an older libslirp — that the main QEMU user-mode networking stack uses directly. Its public API is declared in `external/qemu/slirp/libslirp.h`, and its primary entry point is `slirp_init` (`external/qemu/slirp/slirp.c:556`).
+1. `external/qemu/slirp/` is the bundled slirp library — a copy of an older libslirp — that QEMU's main user-mode networking stack uses directly. `external/qemu/slirp/libslirp.h` declares its public API. Its primary entry point is `slirp_init` (`external/qemu/slirp/slirp.c:556`).
 
-2. `external/libslirp/src/` is the standalone upstream library: the actual TCP/IP state machine (`slirp.c`, `tcp_input.c`, `socket.c`, `bootp.c`, `tftp.c`). This version is used by the Wi-Fi and netsim paths; its modern entry point is `slirp_new` (`external/libslirp/src/slirp.c:600`), which accepts a `SlirpCb` callback table.
+2. `external/libslirp/src/` is the standalone upstream library: the actual TCP/IP state machine (`slirp.c`, `tcp_input.c`, `socket.c`, `bootp.c`, `tftp.c`). The Wi-Fi and netsim paths use this version. Its modern entry point is `slirp_new` (`external/libslirp/src/slirp.c:600`), which accepts a `SlirpCb` callback table.
 
 3. `external/qemu/net/slirp.c` is QEMU's adapter for the main networking path. It owns the `SlirpState` struct, registers the QEMU `NetClientInfo`, and wraps the bundled library through `#include "slirp/libslirp.h"`.
 
-The bundled copy in `external/qemu/slirp/` parses attacker-controlled guest packets inside the emulator's own address space, and it has taken a round of hardening for exactly that reason. `ip_reass` now unlinks an overlapping fragment with `ip_deq` before freeing its mbuf, closing a use-after-free on the neighbor pointers it updates afterwards (`external/qemu/slirp/ip_input.c:312`), and caps a reassembled datagram at `IP_MAXPACKET` so a truncated 16-bit length cannot become a heap overflow (`external/qemu/slirp/ip_input.c:337`); `arp_input` rejects anything shorter than a full 42-byte Ethernet + ARP frame before dereferencing the header, stopping an out-of-bounds read on short guest ARP packets (`external/qemu/slirp/slirp.c:1067`). The ARP and DHCP length checks were first written against `sizeof()` of the C structs, which broke networking on TV AVDs, so both now measure the physical wire sizes instead: 28 bytes of ARP payload rather than a `slirp_arphdr` a compiler may pad to 32, and the fixed 264-byte BOOTP header rather than the 576-byte padded `struct bootp_t` that had been dropping legitimate variable-length guest DHCP requests (`external/qemu/slirp/bootp.c:347`).
+The bundled copy in `external/qemu/slirp/` parses attacker-controlled guest packets inside the emulator's own address space. It received a round of hardening for exactly that reason. `ip_reass` now unlinks an overlapping fragment with `ip_deq` before it frees the mbuf of the fragment. This closes a use-after-free on the neighbor pointers that the function updates afterwards (`external/qemu/slirp/ip_input.c:312`). The same function also caps a reassembled datagram at `IP_MAXPACKET`, so a truncated 16-bit length cannot become a heap overflow (`external/qemu/slirp/ip_input.c:337`).
 
-Both libraries are deliberately host-agnostic — they never call `send()` themselves, instead calling back through registered function pointers when they have a frame to deliver to the guest. The standalone library exposes this as a `SlirpCb` callback struct passed to `slirp_new`; the netsim Wi-Fi driver (`external/qemu/android-qemu2-glue/netsim/libslirp_driver.cpp`) declares such a struct and uses it.
+`arp_input` rejects anything shorter than a full 42-byte Ethernet + ARP frame before it dereferences the header. This stops an out-of-bounds read on short guest ARP packets (`external/qemu/slirp/slirp.c:1067`). The ARP and DHCP length checks first used `sizeof()` of the C structs. That broke networking on TV AVDs, so both checks now measure the physical wire sizes instead.
+
+The ARP check now uses 28 bytes of ARP payload, not a `slirp_arphdr` that a compiler may pad to 32. The DHCP check now uses the fixed 264-byte BOOTP header. The old DHCP check used the 576-byte padded `struct bootp_t` and dropped legitimate variable-length guest DHCP requests (`external/qemu/slirp/bootp.c:347`).
+
+Both libraries are deliberately host-agnostic. They never call `send()` themselves. Instead, they call back through registered function pointers when they have a frame to deliver to the guest. The standalone library exposes this as a `SlirpCb` callback struct passed to `slirp_new`. The netsim Wi-Fi driver (`external/qemu/android-qemu2-glue/netsim/libslirp_driver.cpp`) declares such a struct and uses it.
 
 ### 18.1.2 The packet path in QEMU's glue
 
-`external/qemu/net/slirp.c` registers a `NetClientInfo` whose `receive` handler is the entry point for frames coming *from* the guest's virtual NIC, and whose paired `slirp_output` function is the exit point for frames going *to* the guest:
+`external/qemu/net/slirp.c` registers a `NetClientInfo`. Its `receive` handler is the entry point for frames that come *from* the guest's virtual NIC. Its paired `slirp_output` function is the exit point for frames that go *to* the guest:
 
 ```c
 // Source: external/qemu/net/slirp.c
@@ -40,9 +50,9 @@ static NetClientInfo net_slirp_info = {
 };
 ```
 
-A guest-to-host frame arrives at `net_slirp_receive`, which (after optional traffic shaping) calls `net_slirp_receive_raw` and from there `slirp_input(s->slirp, buf, size)` — handing the raw Ethernet frame to the library (`external/qemu/net/slirp.c:145`). The reverse direction is `slirp_output`: when libslirp has assembled a frame for the guest it invokes this callback, which ultimately calls `qemu_send_packet(&s->nc, pkt, pkt_len)` to inject the frame into the guest's NIC (`external/qemu/net/slirp.c:129`).
+A guest-to-host frame arrives at `net_slirp_receive`. After optional traffic shaping, this function calls `net_slirp_receive_raw`, and from there `slirp_input(s->slirp, buf, size)`. That call hands the raw Ethernet frame to the library (`external/qemu/net/slirp.c:145`). The reverse direction is `slirp_output`. When libslirp assembles a frame for the guest, it invokes this callback. The callback ultimately calls `qemu_send_packet(&s->nc, pkt, pkt_len)` to inject the frame into the guest's NIC (`external/qemu/net/slirp.c:129`).
 
-Between those two functions sit two optional hooks the emulator splices in: a recv callback (`s->recv_cb`, used when Wi-Fi or netsim wants to intercept the stream) and a pair of traffic shapers (`s->shaper_out` / `s->shaper_in`) used to emulate cellular bandwidth and latency. `s->recv_cb` and `s->shaper_out` are visible in `slirp_output`; `s->shaper_in` is the symmetric hook in `net_slirp_receive` (line 151), which shapes guest-to-host traffic:
+The emulator inserts two optional hooks between those two functions. The first is a recv callback (`s->recv_cb`), which Wi-Fi or netsim uses when it wants to intercept the stream. The second is a pair of traffic shapers (`s->shaper_out` / `s->shaper_in`) that emulate cellular bandwidth and latency. `s->recv_cb` and `s->shaper_out` are visible in `slirp_output`. `s->shaper_in` is the symmetric hook in `net_slirp_receive` (line 151), which shapes guest-to-host traffic:
 
 ```c
 // Source: external/qemu/net/slirp.c
@@ -79,7 +89,7 @@ flowchart LR
 
 ## 18.2 The Virtual Router and NAT
 
-libslirp behaves like a small NAT router with a fixed topology. Every guest sees the same private `/24` network, the same gateway, and the same set of magic addresses. The defaults are hard-coded in `external/qemu/net/slirp.c` at the top of `net_slirp_init`:
+libslirp behaves like a small NAT router with a fixed topology. Every guest sees the same private `/24` network, the same gateway, and the same set of magic addresses. `external/qemu/net/slirp.c` hard-codes the defaults at the top of `net_slirp_init`:
 
 ```c
 // Source: external/qemu/net/slirp.c
@@ -91,7 +101,7 @@ struct in_addr dhcp = { .s_addr = htonl(0x0a00020f) }; /* 10.0.2.15 */
 struct in_addr dns  = { .s_addr = htonl(0x0a000203) }; /* 10.0.2.3 */
 ```
 
-These five values define the entire virtual LAN. The same constants appear again as strings in the Wi-Fi service builder (`external/qemu/android-qemu2-glue/emulation/WifiService.cpp:45`), confirming that the wired path and the Wi-Fi path share one addressing scheme.
+These five values define the entire virtual LAN. The same constants appear again as strings in the Wi-Fi service builder (`external/qemu/android-qemu2-glue/emulation/WifiService.cpp:45`). This confirms that the wired path and the Wi-Fi path share one addressing scheme.
 
 ### 18.2.1 The standard 10.0.2.x addresses
 
@@ -100,17 +110,17 @@ Each address in the `10.0.2.x` block has a fixed meaning that an Android develop
 | Address | Role |
 |---------|------|
 | `10.0.2.1` | Reserved (router/gateway base in the historic layout) |
-| `10.0.2.2` | The host loopback, as seen from the guest. Connections here reach `127.0.0.1` on the host. |
+| `10.0.2.2` | The host loopback, as the guest sees it. Connections here reach `127.0.0.1` on the host. |
 | `10.0.2.3` | The first virtual DNS server |
-| `10.0.2.4` and up | Additional virtual DNS servers, one per host resolver |
-| `10.0.2.15` | The guest's own address, leased by the slirp DHCP server |
+| `10.0.2.4` and up | More virtual DNS servers, one per host resolver |
+| `10.0.2.15` | The guest's own address, which the slirp DHCP server leases |
 | `255.255.255.0` | The netmask for the whole `10.0.2.0/24` segment |
 
-Because `10.0.2.15` is assigned by DHCP and not negotiated, every emulator using user-mode networking comes up with that exact guest IP. That is why two emulators cannot talk to each other directly over user-mode networking — they both believe they are `10.0.2.15` on isolated networks — and why multi-device scenarios need netsim (Section 18.8) or Wi-Fi forwarding (Section 18.7).
+Because DHCP assigns `10.0.2.15` and does not negotiate it, every emulator that uses user-mode networking starts with that exact guest IP. That is why two emulators cannot talk to each other directly over user-mode networking. They both believe they are `10.0.2.15` on isolated networks. This is also why multi-device scenarios need netsim (Section 18.8) or Wi-Fi forwarding (Section 18.7).
 
 ### 18.2.2 Translating special addresses
 
-The NAT magic lives in libslirp's `socket.c`. When the guest opens a connection whose destination is `10.0.2.2` (the virtual host), libslirp rewrites the target to the host's loopback before opening the real socket:
+The NAT magic lives in libslirp's `socket.c`. When the guest opens a connection to `10.0.2.2` (the virtual host), libslirp rewrites the target to the host's loopback before it opens the real socket:
 
 ```c
 // Source: external/libslirp/src/socket.c
@@ -123,9 +133,9 @@ if (so->so_faddr.s_addr == s->vhost_addr.s_addr ||
 }
 ```
 
-So a guest process connecting to `10.0.2.2:8080` ends up connected to `127.0.0.1:8080` on the host — this is the canonical way to reach a server running on your development machine. Outbound connections to ordinary public addresses are translated transparently: libslirp opens a host socket toward the real destination and shuttles bytes between the host socket and the guest's emulated TCP connection, so the guest never needs a route to the outside world.
+So a guest process that connects to `10.0.2.2:8080` reaches `127.0.0.1:8080` on the host. This is the canonical way to reach a server that runs on your development machine. The libslirp library translates outbound connections to ordinary public addresses transparently. It opens a host socket toward the real destination and moves bytes between the host socket and the guest's emulated TCP connection. As a result, the guest never needs a route to the outside world.
 
-When `restricted` mode is enabled, the guest is confined to the virtual services (DHCP, DNS, TFTP) and cannot reach arbitrary hosts. `net_slirp_init` logs which mode is active and passes `restricted` straight through to `slirp_init` (`external/qemu/net/slirp.c:409`).
+When `restricted` mode is on, libslirp confines the guest to the virtual services (DHCP, DNS, TFTP). The guest cannot reach arbitrary hosts. `net_slirp_init` logs which mode is active and passes `restricted` straight through to `slirp_init` (`external/qemu/net/slirp.c:409`).
 
 NAT topology of the virtual router
 
@@ -154,7 +164,7 @@ flowchart TB
 
 ## 18.3 DHCP, BOOTP and TFTP Inside slirp
 
-libslirp does not just route — it impersonates the standard network services a freshly booted guest expects. These live inside the library and answer guest broadcasts without ever touching the host.
+libslirp does not just route. It impersonates the standard network services that a freshly booted guest expects. These services live inside the library and answer guest broadcasts. They never touch the host.
 
 ### 18.3.1 The built-in DHCP server
 
@@ -165,7 +175,7 @@ When the guest's DHCP client broadcasts a `DHCPDISCOVER`, libslirp's BOOTP/DHCP 
 paddr->s_addr = slirp->vdhcp_startaddr.s_addr + htonl(i);
 ```
 
-Because the emulator only ever has one guest on the segment, `i` is effectively `0` and the guest always receives `10.0.2.15`. The DHCP reply also carries the gateway (`10.0.2.2`), the DNS server (`10.0.2.3`), and the netmask, so the guest's routing table is fully populated from the lease.
+Because the emulator only ever has one guest on the segment, `i` is effectively `0` and the guest always receives `10.0.2.15`. The DHCP reply also carries the gateway (`10.0.2.2`), the DNS server (`10.0.2.3`), and the netmask. As a result, the guest fully populates its routing table from the lease.
 
 ### 18.3.2 The built-in TFTP server
 
@@ -179,15 +189,15 @@ prefix_len = strlen(slirp->tftp_prefix);
 memcpy(spt->filename, slirp->tftp_prefix, prefix_len);
 ```
 
-If no prefix is configured the TFTP server is effectively disabled (`external/libslirp/src/tftp.c:299`). The Android emulator does not normally rely on TFTP boot, but the service is present because it ships with upstream slirp.
+A missing prefix effectively disables the TFTP server (`external/libslirp/src/tftp.c:299`). The Android emulator does not normally rely on TFTP boot, but the service is present because it ships with upstream slirp.
 
 ## 18.4 DNS Handling
 
-DNS is where the Android emulator's slirp diverges most from stock QEMU. The guest is told its DNS server is `10.0.2.3`, but that address does not host a resolver — libslirp intercepts traffic to it and forwards the queries to the host's real DNS servers.
+DNS is where the Android emulator's slirp diverges most from stock QEMU. The DHCP server tells the guest that its DNS server is `10.0.2.3`. However, that address does not host a resolver. Instead, libslirp intercepts traffic to it and forwards the queries to the host's real DNS servers.
 
 ### 18.4.1 Mapping virtual DNS addresses to host resolvers
 
-The translation in the main QEMU networking path happens in `slirp_translate_guest_dns` at `external/qemu/slirp/slirp.c:421`. The emulator can hand the bundled slirp a list of host DNS servers, and the function maps `10.0.2.3` to the first, `10.0.2.4` to the second, and so on using index arithmetic:
+The translation in the main QEMU networking path happens in `slirp_translate_guest_dns` at `external/qemu/slirp/slirp.c:421`. The emulator can give the bundled slirp a list of host DNS servers. The function maps `10.0.2.3` to the first, `10.0.2.4` to the second, and so on. It uses index arithmetic:
 
 ```c
 // Source: external/qemu/slirp/slirp.c
@@ -206,11 +216,11 @@ if (slirp->host_dns_count > 0) {
 }
 ```
 
-An IPv6 twin, `slirp_translate_guest_dns6` at `external/qemu/slirp/slirp.c:452`, applies the same approach for IPv6 resolvers. If no explicit host DNS list was supplied, both functions fall back to `get_dns_addr` to discover the host's resolver.
+An IPv6 twin, `slirp_translate_guest_dns6` at `external/qemu/slirp/slirp.c:452`, applies the same approach for IPv6 resolvers. If the emulator supplies no explicit host DNS list, both functions fall back to `get_dns_addr` to discover the host's resolver.
 
 ### 18.4.2 Where the host DNS list comes from
 
-On the emulator side, the host resolver list is gathered by `android_dns_get_servers` in `external/qemu/android/emu/utils/src/android/utils/dns.cpp`. It honors the `-dns-server` command-line option first, and otherwise queries the host's system resolvers:
+On the emulator side, `android_dns_get_servers` in `external/qemu/android/emu/utils/src/android/utils/dns.cpp` gathers the host resolver list. It honors the `-dns-server` command-line option first, and otherwise queries the host's system resolvers:
 
 ```cpp
 // Source: external/qemu/android/emu/utils/src/android/utils/dns.cpp
@@ -224,7 +234,7 @@ if (!dnsCount) {
 }
 ```
 
-The resulting list is pushed into the running slirp stack through `net_slirp_init_custom_dns_servers`, which iterates every slirp stack and calls `slirp_init_custom_dns_servers` (`external/qemu/net/slirp.c:1270`). When more than one DNS server is found, the guest is also told via the `ndns=` kernel parameter so its resolver knows how many virtual DNS addresses to use (`external/qemu/android/android-emu/android/main-kernel-parameters.cpp:112`).
+The emulator pushes the host resolver list into the running slirp stack through `net_slirp_init_custom_dns_servers`, which iterates every slirp stack and calls `slirp_init_custom_dns_servers` (`external/qemu/net/slirp.c:1270`). When the emulator finds more than one DNS server, it also tells the guest through the `ndns=` kernel parameter. This way, the guest's resolver knows how many virtual DNS addresses to use (`external/qemu/android/android-emu/android/main-kernel-parameters.cpp:112`).
 
 DNS query path from guest to host resolver
 
@@ -242,11 +252,11 @@ sequenceDiagram
 
 ## 18.5 Port Forwarding (redir / hostfwd)
 
-User-mode networking is asymmetric: the guest can reach out, but the host cannot directly connect *in* to a guest port, because the guest is hidden behind NAT at `10.0.2.15`. Port forwarding solves this by telling libslirp to listen on a host port and splice incoming connections through to a guest port. This is the same mechanism behind QEMU's `hostfwd=` and the emulator console's `redir` command.
+User-mode networking is asymmetric: the guest can reach out, but the host cannot directly connect *in* to a guest port. This is because NAT hides the guest at `10.0.2.15`. Port forwarding solves this. It tells libslirp to listen on a host port and to splice incoming connections through to a guest port. This is the same mechanism behind QEMU's `hostfwd=` and the emulator console's `redir` command.
 
 ### 18.5.1 The redir console command
 
-Connect to the emulator's console (`telnet localhost 5554`) and the `redir` command manages forwardings. The handler `do_redir_add` lives in `external/qemu/android/android-emu/android/console.cpp`. It parses a `(tcp|udp):hostport:guestport` spec, rejects duplicates, records the redirection, and then calls into the network agent:
+Connect to the emulator's console (`telnet localhost 5554`). There, the `redir` command manages forwardings. The handler `do_redir_add` lives in `external/qemu/android/android-emu/android/console.cpp`. It parses a `(tcp|udp):hostport:guestport` spec, rejects duplicates, records the redirection, and then calls into the network agent:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -262,11 +272,11 @@ if (!ret) {
 }
 ```
 
-`do_redir_list` prints the active table and `do_redir_del` tears an entry down (`external/qemu/android/android-emu/android/console.cpp:1136`). Before adding anything, the handler checks `net_agent->isSlirpInited()` — if the emulator is running with a TAP interface instead of slirp, redirection is unavailable and the command returns `KO: network emulation disabled`.
+`do_redir_list` prints the active table and `do_redir_del` tears an entry down (`external/qemu/android/android-emu/android/console.cpp:1136`). Before the handler adds anything, it checks `net_agent->isSlirpInited()`. If the emulator runs with a TAP interface instead of slirp, redirection is unavailable and the command returns `KO: network emulation disabled`.
 
 ### 18.5.2 Down into libslirp
 
-The console agent is implemented in `external/qemu/android-qemu2-glue/qemu-net-agent-impl.c`. `slirpRedir` binds the forward to the host loopback and forwards a wildcard guest address (`0`), letting slirp default it to the guest:
+`external/qemu/android-qemu2-glue/qemu-net-agent-impl.c` implements the console agent. `slirpRedir` binds the forward to the host loopback and forwards a wildcard guest address (`0`). This lets slirp default it to the guest:
 
 ```c
 // Source: external/qemu/android-qemu2-glue/qemu-net-agent-impl.c
@@ -278,9 +288,9 @@ static bool slirpRedir(bool isUdp, int hostPort, int guestPort) {
 }
 ```
 
-`slirp_add_hostfwd` is the libslirp public API (`external/libslirp/src/libslirp.h:254`). Internally, QEMU's `slirp_hostfwd` parses the textual spec and calls the same `slirp_add_hostfwd` (`external/qemu/net/slirp.c:684`); the human-facing `hostfwd=` netdev option and the HMP `hmp_hostfwd_add` path (`external/qemu/net/slirp.c:812`) all converge there. There is an IPv6 twin, `slirp_add_ipv6_hostfwd`, reached through `slirpRedirIpv6`.
+`slirp_add_hostfwd` is the libslirp public API (`external/libslirp/src/libslirp.h:254`). Internally, QEMU's `slirp_hostfwd` parses the textual spec and calls the same `slirp_add_hostfwd` (`external/qemu/net/slirp.c:684`). The human-facing `hostfwd=` netdev option and the HMP `hmp_hostfwd_add` path (`external/qemu/net/slirp.c:812`) all converge there. There is an IPv6 twin, `slirp_add_ipv6_hostfwd`, reached through `slirpRedirIpv6`.
 
-The most visible everyday use of this machinery is adb: the emulator automatically forwards a host console/adb port to the guest's adb daemon, which is why `adb connect localhost:<port>` reaches a guest that has no host-visible IP of its own.
+The most visible everyday use of this machinery is adb. The emulator automatically forwards a host console/adb port to the guest's adb daemon. This is why `adb connect localhost:<port>` reaches a guest that has no host-visible IP of its own.
 
 Setting up and using a port redirection
 
@@ -301,7 +311,7 @@ sequenceDiagram
 
 ## 18.6 Traffic Shaping: netspeed and netdelay
 
-The emulator can imitate slow cellular links by rate-limiting and delaying frames as they cross the slirp boundary. The shaper objects (`android_net_shaper_out`, `android_net_shaper_in`) and the delay object (`android_net_delay_in`) are created in `android_qemu_init_slirp_shapers` in `external/qemu/android-qemu2-glue/net-android.cpp`. That function wires the shapers into the slirp callbacks via `net_slirp_set_shapers`:
+The emulator can imitate slow cellular links. It limits the rate of frames and delays them as they cross the slirp boundary. `android_qemu_init_slirp_shapers` in `external/qemu/android-qemu2-glue/net-android.cpp` creates the shaper objects (`android_net_shaper_out`, `android_net_shaper_in`) and the delay object (`android_net_delay_in`). That function wires the shapers into the slirp callbacks via `net_slirp_set_shapers`:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/net-android.cpp
@@ -317,7 +327,7 @@ net_slirp_set_shapers(
             ...
 ```
 
-The shaper callbacks also tap into packet capture: if `-tcpdump <file>` is active, every shaped frame is handed to `qemu_tcpdump_packet`, so the capture sees exactly what crosses the virtual wire. The shaper threads are skipped entirely when slirp is not running (`net_slirp_state() == nullptr`), since TAP mode has nothing to shape.
+The shaper callbacks also tap into packet capture. If `-tcpdump <file>` is active, the callbacks hand every shaped frame to `qemu_tcpdump_packet`, so the capture sees exactly what crosses the virtual wire. The emulator skips the shaper threads entirely when slirp is not active (`net_slirp_state() == nullptr`), since TAP mode has nothing to shape.
 
 ### 18.6.1 The speed and latency presets
 
@@ -336,23 +346,23 @@ The rate and latency values come from named presets defined in `external/qemu/an
     X(evdo,  "EVDO",       75000.0, 280000.0,   0,   0) \
 ```
 
-The console `network speed` and `network delay` commands (`do_network_speed` / `do_network_delay` in `external/qemu/android/android-emu/android/console.cpp:933`) parse these names and update the global `android_net_upload_speed`, `android_net_download_speed`, and the min/max latency through `android_network_set_speed` / `android_network_set_latency` (`external/qemu/android/android-emu/android/network/control.cpp`). The shaper picks up the new rate on the next frame.
+The console `network speed` and `network delay` commands (`do_network_speed` / `do_network_delay` in `external/qemu/android/android-emu/android/console.cpp:933`) parse these names. They update the global `android_net_upload_speed`, `android_net_download_speed`, and the min/max latency through `android_network_set_speed` / `android_network_set_latency` (`external/qemu/android/android-emu/android/network/control.cpp`). The shaper picks up the new rate on the next frame.
 
-These same globals are declared in `external/qemu/android/android-emu/android/network/globals.h`, which also carries `android_net_disable` — the flag that drops all guest traffic when the UI toggles "data off".
+`external/qemu/android/android-emu/android/network/globals.h` declares these same globals. It also carries `android_net_disable`, the flag that drops all guest traffic when the UI toggles "data off".
 
 ## 18.7 Emulated Wi-Fi: virtio-wifi and mac80211_hwsim
 
-Modern Android system images expect a real Wi-Fi interface (`wlan0`), a supplicant, and an access point to associate with. The emulator provides all three without any radio hardware by combining three pieces:
+Modern Android system images expect a real Wi-Fi interface (`wlan0`), a supplicant, and an access point to associate with. The emulator provides all three without any radio hardware. It combines three pieces:
 
 1. The Linux kernel's `mac80211_hwsim` driver inside the guest, which presents a fully software-simulated 802.11 radio.
 
 2. A `virtio-wifi` PCI device that carries `mac80211_hwsim` netlink frames between the guest driver and the host.
 
-3. `hostapd` running on the host, acting as the access point the guest associates with.
+3. `hostapd`, which runs on the host and acts as the access point that the guest associates with.
 
 ### 18.7.1 Bringing up the radio in the guest
 
-The number of simulated radios is chosen at boot time via kernel command line. `external/qemu/android/android-emu/android/main-kernel-parameters.cpp` sets `mac80211_hwsim.radios` based on which Wi-Fi feature is enabled:
+The emulator chooses the number of simulated radios at boot time through the kernel command line. `external/qemu/android/android-emu/android/main-kernel-parameters.cpp` sets `mac80211_hwsim.radios` based on which Wi-Fi feature is enabled:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/main-kernel-parameters.cpp
@@ -374,11 +384,11 @@ if (android::featurecontrol::isEnabled(
 }
 ```
 
-The older `Wifi` path uses two radios (one for the station, one for the AP) plus `mac80211_hwsim.channels=2` so the kernel can scan one channel while talking on another. The newer `VirtioWifi` path pushes AP duties out to host-side `hostapd` and needs fewer in-kernel radios. The guest is also told which transport to use through boot properties such as `androidboot.qemu.virtiowifi` and `androidboot.qemu.wifi` (`external/qemu/android/android-emu/android/userspace-boot-properties.cpp:229`).
+The older `Wifi` path uses two radios (one for the station, one for the AP). It also uses `mac80211_hwsim.channels=2`, so the kernel can scan one channel while it talks on another. The newer `VirtioWifi` path pushes AP duties out to host-side `hostapd` and needs fewer in-kernel radios. The emulator also tells the guest which transport to use through boot properties such as `androidboot.qemu.virtiowifi` and `androidboot.qemu.wifi` (`external/qemu/android/android-emu/android/userspace-boot-properties.cpp:229`).
 
 ### 18.7.2 The virtio-wifi device
 
-On the host side, the `virtio-wifi` device is defined in `external/qemu/android-qemu2-glue/emulation/virtio-wifi.h`. It is a standard virtio device with paired RX/TX virtqueues and a MAC address:
+On the host side, `external/qemu/android-qemu2-glue/emulation/virtio-wifi.h` defines the `virtio-wifi` device. It is a standard virtio device with paired RX/TX virtqueues and a MAC address:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/emulation/virtio-wifi.h
@@ -393,11 +403,11 @@ typedef struct VirtIOWifi {
 } VirtIOWifi;
 ```
 
-The header also exposes `virtio_wifi_set_mac_prefix`, called at setup time with the emulator's serial-number port so that multiple emulators get distinct MAC ranges and don't collide (`external/qemu/android-qemu2-glue/qemu-setup.cpp:699`), and `virtio_wifi_ssid_to_ethaddr`, used by the console `wifi` block/unblock commands to map an SSID to a router MAC.
+The header also exposes `virtio_wifi_set_mac_prefix`, which the emulator calls at setup time with its serial-number port (`external/qemu/android-qemu2-glue/qemu-setup.cpp:699`). This gives multiple emulators distinct MAC ranges, so they do not collide. The header also exposes `virtio_wifi_ssid_to_ethaddr`. The console `wifi` block/unblock commands use it to map an SSID to a router MAC.
 
 ### 18.7.3 The forwarder: hostapd, slirp and 802.11 frames
 
-The component that ties the guest radio, the host AP, and the Internet together is `VirtioWifiForwarder` (`external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp`). It opens a socket pair to `hostapd`, registers a QEMU NIC for the slirp uplink, and inspects every 802.11 frame the guest transmits to decide where it should go:
+The component that ties the guest radio, the host AP, and the Internet together is `VirtioWifiForwarder` (`external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp`). It opens a socket pair to `hostapd` and registers a QEMU NIC for the slirp uplink. It also inspects every 802.11 frame that the guest transmits, to decide where the frame should go:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp
@@ -414,7 +424,9 @@ if (frame->isData()) {
 }
 ```
 
-The decision tree mirrors how a real AP behaves: EAPoL data frames and management/control frames addressed to the BSSID, broadcast, or multicast go to `hostapd` over the socket pair; broadcast and multicast management frames are also forwarded to peer VMs via `sendToRemoteVM`; management frames addressed to a unicast non-BSSID MAC go only to `sendToRemoteVM`, bypassing `hostapd` entirely; and data frames addressed to the BSSID and flagged "to distribution system" are bridged out to the Internet through the slirp NIC. The `WifiService::Builder` in `external/qemu/android-qemu2-glue/emulation/WifiService.cpp` constructs all of this, initializing a dedicated slirp stack with the same `10.0.2.x` addresses and a fixed BSSID:
+The decision tree mirrors how a real AP behaves. EAPoL data frames and management/control frames addressed to the BSSID, broadcast, or multicast go to `hostapd` over the socket pair. The forwarder also forwards broadcast and multicast management frames to peer VMs through `sendToRemoteVM`. Management frames addressed to a unicast non-BSSID MAC go only to `sendToRemoteVM`. They bypass `hostapd` entirely. The forwarder bridges data frames addressed to the BSSID and flagged "to distribution system" out to the Internet through the slirp NIC.
+
+The `WifiService::Builder` in `external/qemu/android-qemu2-glue/emulation/WifiService.cpp` constructs all of this. It initializes a dedicated slirp stack with the same `10.0.2.x` addresses and a fixed BSSID:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/emulation/WifiService.cpp
@@ -426,7 +438,7 @@ static const char* kDhcp = "10.0.2.15";
 static const char* kDns = "10.0.2.3";
 ```
 
-Frames cross the virtio-wifi boundary as `mac80211_hwsim` generic-netlink messages (`HWSIM_CMD_FRAME`). The forwarder parses them with `GenericNetlinkMessage` and acknowledges each transmitted frame back to the guest with a `HWSIM_CMD_TX_INFO_FRAME` carrying `HWSIM_TX_STAT_ACK`, so the guest's radio stack believes its frame was delivered (`external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp:209`).
+Frames cross the virtio-wifi boundary as `mac80211_hwsim` generic-netlink messages (`HWSIM_CMD_FRAME`). The forwarder parses them with `GenericNetlinkMessage`. It also acknowledges each transmitted frame back to the guest with a `HWSIM_CMD_TX_INFO_FRAME` that carries `HWSIM_TX_STAT_ACK`. As a result, the guest's radio stack believes that the network delivered its frame (`external/qemu/android-qemu2-glue/emulation/VirtioWifiForwarder.cpp:209`).
 
 The emulated Wi-Fi datapath
 
@@ -452,7 +464,7 @@ flowchart TB
 
 ## 18.8 netsim: Multi-Device Network Simulation
 
-A single emulator's slirp and Wi-Fi serve one guest. To let *several* virtual devices share a simulated radio environment — so a phone AVD can actually discover and pair with a watch AVD over Bluetooth, or two emulators can join the same Wi-Fi network — the emulator connects to **netsim**, a standalone daemon living at `tools/netsim/`. Its README calls it "a network simulation tool for multi-device use cases ... It offers radio level control and HCI tracing" (`tools/netsim/README.md`).
+A single emulator's slirp and Wi-Fi serve one guest. To let *several* virtual devices share a simulated radio environment, the emulator connects to **netsim**, a standalone daemon at `tools/netsim/`. With netsim, a phone AVD can actually discover and pair with a watch AVD over Bluetooth, or two emulators can join the same Wi-Fi network. The netsim README calls it "a network simulation tool for multi-device use cases ... It offers radio level control and HCI tracing" (`tools/netsim/README.md`).
 
 ### 18.8.1 The packet streamer protocol
 
@@ -466,11 +478,13 @@ service PacketStreamer {
 }
 ```
 
-The proto comment describes the architecture precisely: "AVDs running in a guest VM are built with virtual controllers for each radio chip. These controllers route chip requests to host emulators (qemu and crosvm) using virtio and from there they are forwarded to this gRpc service ... the network simulator contains libraries to emulate Bluetooth, 80211MAC, UWB, and Rtt chips." The first message on each stream is a `ChipInfo` identifying the device and chip kind; subsequent messages carry either an `HCIPacket` (Bluetooth) or an opaque `bytes packet` (Wi-Fi and other radios).
+The proto comment describes the architecture precisely. It says: "AVDs running in a guest VM are built with virtual controllers for each radio chip". It continues: "These controllers route chip requests to host emulators (qemu and crosvm) using virtio and from there they are forwarded to this gRpc service ...". It later adds: "... the network simulator contains libraries to emulate Bluetooth, 80211MAC, UWB, and Rtt chips".
+
+The first message on each stream is a `ChipInfo` that identifies the device and chip kind. Later messages carry either an `HCIPacket` (Bluetooth) or an opaque `bytes packet` (Wi-Fi and other radios).
 
 ### 18.8.2 Connecting the emulator to netsim
 
-On the emulator side, the client is `external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc`. It builds a gRPC channel to a local netsim daemon (default endpoint `localhost:<port>`), launching the daemon if it is not already running:
+On the emulator side, the client is `external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc`. It builds a gRPC channel to a local netsim daemon (default endpoint `localhost:<port>`) and launches the daemon if it does not already run:
 
 ```cpp
 // Source: external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc
@@ -480,7 +494,7 @@ return grpc::experimental::CreateCustomChannelWithInterceptors(
     endpoint, grpc::InsecureChannelCredentials(), args, ...);
 ```
 
-Which daemon binary that launch actually starts is a feature-flag decision made in `RunNetsimd` (`external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc:77`):
+A feature flag decides which daemon binary that launch actually starts. `RunNetsimd` makes this decision (`external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc:77`):
 
 ```cpp
 // Source: external/qemu/android/third_party/netsim/backend/packet_streamer_client.cc
@@ -490,13 +504,13 @@ if (android::featurecontrol::isEnabled(android::featurecontrol::NetsimX)) {
 }
 ```
 
-`NetsimX` — "Netsim Next" — used to default to `off`, so `netsimd` was what you got unless you asked otherwise. It now ships enabled (`external/qemu/android/data/advancedFeatures.ini:510`), which means an AVD started with no extra flags runs `netsimdx`, and the legacy daemon is the opt-in path, selected with `-feature -NetsimX` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:227`). Section 18.8.4 covers what changes on the far side of the stream.
+`NetsimX` — "Netsim Next" — previously defaulted to `off`, so you got `netsimd` unless you asked otherwise. It now ships enabled (`external/qemu/android/data/advancedFeatures.ini:510`). This means that an AVD that starts with no extra flags runs `netsimdx`. The legacy daemon is the opt-in path, which you select with `-feature -NetsimX` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:227`). Section 18.8.4 covers what changes on the far side of the stream.
 
-The emulator registers itself with netsim through `register_netsim`, passing the packet-streamer endpoint, the host DNS, the HTTP proxy, and any extra `netsim_args` (`external/qemu/android-qemu2-glue/qemu-setup.cpp:312`). All of these are exposed as command-line options: `-packet-streamer-endpoint`, `-netsim-args` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:260`).
+The emulator registers itself with netsim through `register_netsim`. It passes the packet-streamer endpoint, the host DNS, the HTTP proxy, and any extra `netsim_args` (`external/qemu/android-qemu2-glue/qemu-setup.cpp:312`). The emulator exposes all of these as command-line options: `-packet-streamer-endpoint`, `-netsim-args` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:260`).
 
 ### 18.8.3 Wi-Fi over netsim
 
-When the Wi-Fi feature is built against netsim (`NETSIM_WIFI`), the `WifiService::Builder` returns a `NetsimWifiForwarder` instead of the local-slirp `VirtioWifiForwarder`:
+When you build the Wi-Fi feature against netsim (`NETSIM_WIFI`), the `WifiService::Builder` returns a `NetsimWifiForwarder` instead of the local-slirp `VirtioWifiForwarder`:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/emulation/WifiService.cpp
@@ -507,7 +521,7 @@ if (mRedirectToNetsim) {
 }
 ```
 
-The `NetsimWifiForwarder` (`external/qemu/android-qemu2-glue/netsim/NetsimWifiForwarder.cpp`) opens a `PacketStreamer` stream with chip kind WIFI and ships each guest `HWSIM_CMD_FRAME` to the daemon as a `bytes packet`. Inside the legacy `netsimd`, the Rust `medium` module (`tools/netsim/rust/daemon/src/wifi/medium.rs`) tracks every connected device as a `Station` keyed by MAC address and routes frames between them — delivering a frame to a known peer station if the destination MAC is registered, re-broadcasting multicast and broadcast frames to all stations, and otherwise sending data frames out to the Internet through netsim's own libslirp wrapper:
+The `NetsimWifiForwarder` (`external/qemu/android-qemu2-glue/netsim/NetsimWifiForwarder.cpp`) opens a `PacketStreamer` stream with chip kind WIFI and ships each guest `HWSIM_CMD_FRAME` to the daemon as a `bytes packet`. Inside the legacy `netsimd`, the Rust `medium` module (`tools/netsim/rust/daemon/src/wifi/medium.rs`) tracks every connected device as a `Station` keyed by MAC address and routes frames between them. If a registered station has the destination MAC, the module delivers the frame to that peer station. It re-broadcasts multicast and broadcast frames to all stations. Otherwise, it sends data frames out to the Internet through netsim's own libslirp wrapper:
 
 ```rust
 // Source: tools/netsim/rust/daemon/src/wifi/medium.rs
@@ -522,7 +536,7 @@ if dest_addr.is_multicast() ... {
 }
 ```
 
-That daemon hosts its own libslirp instance (the `libslirp-rs` crate at `tools/netsim/rust/libslirp-rs/`, "a wrapper for libslirp C library") so that guests sharing the simulated medium still get NAT'd Internet access, and its own `hostapd` (the `hostapd-rs` crate) to act as the shared access point. The result is that two emulators pointed at the same netsim daemon are no longer isolated — frames from one guest's `wlan0` reach the other guest's `wlan0` because both are stations in the same `Medium`.
+That daemon hosts its own libslirp instance (the `libslirp-rs` crate at `tools/netsim/rust/libslirp-rs/`, "a wrapper for libslirp C library"). With this instance, guests that share the simulated medium still get Internet access through NAT. The daemon also hosts its own `hostapd` (the `hostapd-rs` crate), which acts as the shared access point. As a result, two emulators that use the same netsim daemon are no longer isolated. Frames from one guest's `wlan0` reach the other guest's `wlan0`, because both are stations in the same `Medium`.
 
 Two emulators sharing one simulated medium via netsim
 
@@ -552,57 +566,61 @@ flowchart TB
 
 ### 18.8.4 Netsim Next: the default daemon
 
-Netsim Next (`netsimdx`) is a rewrite of the daemon as a set of Rust actors under `tools/netsim/next/`, and because `NetsimX` now defaults to `on` it is what an ordinary AVD talks to. The wire protocol is untouched: the emulator still opens the same `StreamPackets` stream and still ships `HWSIM_CMD_FRAME` payloads, and the service implementation on the daemon side is `PacketStreamerService` (`tools/netsim/next/grpc-server/src/packet_streamer.rs:87`). Everything behind that stream moves.
+Netsim Next (`netsimdx`) is a rewrite of the daemon as a set of Rust actors under `tools/netsim/next/`. Because `NetsimX` now defaults to `on`, an ordinary AVD talks to Netsim Next. The wire protocol does not change. The emulator still opens the same `StreamPackets` stream and still ships `HWSIM_CMD_FRAME` payloads. On the daemon side, `PacketStreamerService` is the service implementation (`tools/netsim/next/grpc-server/src/packet_streamer.rs:87`). Everything behind that stream moves.
 
-The station table and frame routing that lived in `tools/netsim/rust/daemon/src/wifi/medium.rs` are now the `wifi-actor` crate's `Medium`, whose `determine_routes` makes the same three-way decision — deliver to a peer station, flood multicast, or hand the frame to the infrastructure gateway (`tools/netsim/next/wifi-actor/src/medium/rx.rs:126`) — and a `Station` is still a client id plus its MAC, hwsim MAC, and frequency (`tools/netsim/next/wifi-actor/src/medium/types.rs:11`). The uplink is now chosen through a `GatewayTrait` (`tools/netsim/next/wifi-actor/src/gateway.rs:23`): `SlirpGateway` is the default and passes infrastructure traffic to a `SlirpActor` wrapping libslirp (`tools/netsim/next/wifi-actor/src/slirp_gateway.rs:28`, `tools/netsim/next/slirp-actor/src/lib.rs:18`), while `TapGateway` bridges to a host TAP interface on Linux. The access point is no longer `hostapd` at all: the `ap-actor` crate implements the EAP, RSN (WPA2) and SAE (WPA3) handshakes directly in Rust, exporting an `EapAuthenticator`, a `WpaAuthenticator`, and an `SaeStateMachine` in place of the external daemon (`tools/netsim/next/ap-actor/src/lib.rs:26`).
+The station table and frame routing that lived in `tools/netsim/rust/daemon/src/wifi/medium.rs` are now the `wifi-actor` crate's `Medium`. Its `determine_routes` makes the same three-way decision: deliver to a peer station, flood multicast, or hand the frame to the infrastructure gateway (`tools/netsim/next/wifi-actor/src/medium/rx.rs:126`). A `Station` is still a client id plus its MAC, hwsim MAC, and frequency (`tools/netsim/next/wifi-actor/src/medium/types.rs:11`).
 
-There is also no web UI on this path. The emulator still passes `--no-web-ui` when the `NetsimWebUi` feature is off (`external/qemu/android-qemu2-glue/netsim/qemu-packet-stream-agent-impl.cpp:219`), but the Next daemon accepts the flag only for compatibility and does not implement it (`tools/netsim/next/daemon/src/args.rs:38`), and the `netsim-ui` web bundle has been dropped from netsim's build and distribution packaging. The control surface is the `netsim` CLI (`tools/netsim/next/cli/`), which netsim's own README calls the primary way to interact with a running simulation (`tools/netsim/next/README.md:5`).
+Netsim Next now chooses the uplink through a `GatewayTrait` (`tools/netsim/next/wifi-actor/src/gateway.rs:23`). `SlirpGateway` is the default. It passes infrastructure traffic to a `SlirpActor` that wraps libslirp (`tools/netsim/next/wifi-actor/src/slirp_gateway.rs:28`, `tools/netsim/next/slirp-actor/src/lib.rs:18`). In contrast, `TapGateway` bridges to a host TAP interface on Linux.
+
+The access point is no longer `hostapd` at all. The `ap-actor` crate implements the EAP, RSN (WPA2) and SAE (WPA3) handshakes directly in Rust. It exports an `EapAuthenticator`, a `WpaAuthenticator`, and an `SaeStateMachine` in place of the external daemon (`tools/netsim/next/ap-actor/src/lib.rs:26`).
+
+There is also no web UI on this path. The emulator still passes `--no-web-ui` when the `NetsimWebUi` feature is off (`external/qemu/android-qemu2-glue/netsim/qemu-packet-stream-agent-impl.cpp:219`). However, the Next daemon accepts the flag only for compatibility and does not implement it (`tools/netsim/next/daemon/src/args.rs:38`). The netsim project also dropped the `netsim-ui` web bundle from its build and distribution packaging. The control surface is the `netsim` CLI (`tools/netsim/next/cli/`), which netsim's own README calls the primary way to interact with a running simulation (`tools/netsim/next/README.md:5`).
 
 ## 18.9 TAP Mode: Bypassing slirp
 
-For workloads that need real layer-2 connectivity — running the guest on the host's actual network segment, or capturing traffic with external tools — the emulator can replace user-mode networking with a host TAP interface. This is selected with `-net-tap <interface>` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:158`), with optional `-net-tap-script-up` and `-net-tap-script-down` hooks to configure the interface when it comes up and down.
+Some workloads need real layer-2 connectivity. Examples are workloads that run the guest on the host's actual network segment, and workloads that capture traffic with external tools. For such workloads, the emulator can replace user-mode networking with a host TAP interface. You select TAP mode with `-net-tap <interface>` (`external/qemu/android/emu/cmdline/include/android/cmdline-options.h:158`). Optional `-net-tap-script-up` and `-net-tap-script-down` hooks configure the interface when it comes up and down.
 
-In TAP mode there is no libslirp stack: `net_slirp_state()` returns null, so the redirection commands report `network emulation disabled` and the traffic shapers are never installed (`external/qemu/android-qemu2-glue/net-android.cpp:29`). The guest's frames go straight to the TAP device and onto whatever bridge the host has configured, which means the guest gets a real address from the host network's DHCP rather than the synthetic `10.0.2.15`, and the `10.0.2.x` conveniences (host alias, virtual DNS) no longer apply. TAP mode trades the zero-setup convenience of slirp for genuine network presence.
+In TAP mode there is no libslirp stack. `net_slirp_state()` returns null, so the redirection commands report `network emulation disabled` and the emulator never installs the traffic shapers (`external/qemu/android-qemu2-glue/net-android.cpp:29`). The guest's frames go straight to the TAP device and onto whatever bridge the host configures. As a result, the guest gets a real address from the host network's DHCP rather than the synthetic `10.0.2.15`. The `10.0.2.x` conveniences (host alias, virtual DNS) no longer apply. TAP mode trades the zero-setup convenience of slirp for genuine network presence.
 
 ## 18.10 Try It
 
-Hands-on with the emulator's networking, using a running AVD:
+Try the emulator's networking hands-on with a running AVD:
 
-- See the guest's slirp-assigned address and gateway: `adb shell ip addr show eth0` then `adb shell ip route` — the guest reports `10.0.2.15` with a default route via `10.0.2.2`.
+- See the guest's slirp-assigned address and gateway. Run `adb shell ip addr show eth0`. Then run `adb shell ip route`. The guest reports `10.0.2.15` with a default route via `10.0.2.2`.
 
-- Confirm the virtual DNS server the guest was handed: `adb shell getprop | grep dns` and `adb shell cat /etc/resolv.conf` (or use `adb shell getprop net.dns1`), which should show `10.0.2.3`.
+- Confirm the virtual DNS server that the guest received. Run `adb shell getprop | grep dns`. Run `adb shell cat /etc/resolv.conf`. Alternatively, run `adb shell getprop net.dns1`. The output should show `10.0.2.3`.
 
-- Reach a server on your development machine from inside the guest. Start any HTTP server on the host (for example on port 8000), then from the guest run `adb shell curl http://10.0.2.2:8000` — `10.0.2.2` is the host loopback alias.
+- Reach a server on your development machine from inside the guest. Start any HTTP server on the host (for example on port 8000). Then, from the guest, run `adb shell curl http://10.0.2.2:8000`. The address `10.0.2.2` is the host loopback alias.
 
-- Add a port forward through the console. Run `telnet localhost 5554` (use your AVD's console port), authenticate with the token from `~/.emulator_console_auth_token`, then `redir add tcp:8080:5000` to forward host port 8080 to guest port 5000, and `redir list` to see the active table.
+- Add a port forward through the console. Run `telnet localhost 5554` (use your AVD's console port). Authenticate with the token from `~/.emulator_console_auth_token`. Run `redir add tcp:8080:5000` to forward host port 8080 to guest port 5000. Run `redir list` to see the active table.
 
-- Throttle the link to a slow cellular profile: in the same console session run `network speed edge` and `network delay umts`, then run a download inside the guest to feel the difference; `network speed full` removes the cap.
+- Throttle the link to a slow cellular profile. In the same console session, run `network speed edge`. Then run `network delay umts`. Run a download inside the guest to feel the difference. To remove the cap, run `network speed full`.
 
-- Capture the virtual wire: launch with `emulator -avd <name> -tcpdump capture.pcap`, exercise the guest, then open `capture.pcap` in Wireshark to see exactly what crossed the slirp boundary.
+- Capture the virtual wire. Start the AVD with `emulator -avd <name> -tcpdump capture.pcap`. Exercise the guest. Then open `capture.pcap` in Wireshark to see exactly what crossed the slirp boundary.
 
-- Inspect emulated Wi-Fi inside the guest: `adb shell ip link show wlan0` and `adb shell iw dev wlan0 link` show the `mac80211_hwsim`-backed interface and its association with the host AP.
+- Inspect the emulated Wi-Fi inside the guest. Run `adb shell ip link show wlan0`. Then run `adb shell iw dev wlan0 link`. Together, the two commands show the `mac80211_hwsim`-backed interface and its association with the host AP.
 
 ## Summary
 
-- The emulator's default networking is user-mode: libslirp (`external/libslirp/`) is a complete user-space TCP/IP stack that NATs guest traffic into ordinary host sockets, needing no TAP device, bridge, or privileges.
+- The emulator's default networking is user-mode. The libslirp library (`external/libslirp/`) is a complete user-space TCP/IP stack that translates guest traffic into ordinary host sockets with NAT. It needs no TAP device, bridge, or privileges.
 
 - QEMU's adapter `external/qemu/net/slirp.c` bridges the guest virtual NIC to libslirp: `net_slirp_receive` / `slirp_input` carry guest-to-host frames, and `slirp_output` / `qemu_send_packet` carry host-to-guest frames.
 
-- The virtual LAN is fixed at `10.0.2.0/24`: `10.0.2.2` is the host loopback alias, `10.0.2.3+` are the virtual DNS servers, and the guest is always DHCP-leased `10.0.2.15` (`external/qemu/net/slirp.c:201`).
+- The virtual LAN uses the fixed network `10.0.2.0/24`: `10.0.2.2` is the host loopback alias, and `10.0.2.3+` are the virtual DNS servers. DHCP always leases `10.0.2.15` to the guest (`external/qemu/net/slirp.c:201`).
 
-- libslirp embeds DHCP/BOOTP (`bootp.c`) and TFTP (`tftp.c`) servers, and rewrites special destinations — `10.0.2.2` to `127.0.0.1`, and `10.0.2.3`/`10.0.2.4`… to the host's real resolvers — in `socket.c`.
+- libslirp embeds DHCP/BOOTP (`bootp.c`) and TFTP (`tftp.c`) servers. It also rewrites special destinations in `socket.c`: `10.0.2.2` to `127.0.0.1`, and `10.0.2.3`/`10.0.2.4`… to the host's real resolvers.
 
-- Port forwarding is reachable through the console `redir` command (`console.cpp`) and the `slirpRedir` agent (`qemu-net-agent-impl.c`), both bottoming out in `slirp_add_hostfwd`; this is how `adb connect` reaches a NAT-hidden guest.
+- You reach port forwarding through the console `redir` command (`console.cpp`) and the `slirpRedir` agent (`qemu-net-agent-impl.c`). Both lead to `slirp_add_hostfwd`. This is how `adb connect` reaches a NAT-hidden guest.
 
 - Traffic shaping (`net-android.cpp`) injects bandwidth and latency limits from named cellular presets (`constants.h`) and feeds `-tcpdump` capture.
 
-- Emulated Wi-Fi combines the guest's `mac80211_hwsim` radio, a host `virtio-wifi` device, and host `hostapd`, with `VirtioWifiForwarder` routing 802.11 frames between the AP, the slirp uplink, and peer VMs.
+- Emulated Wi-Fi combines the guest's `mac80211_hwsim` radio, a host `virtio-wifi` device, and host `hostapd`. `VirtioWifiForwarder` routes 802.11 frames between the AP, the slirp uplink, and peer VMs.
 
-- netsim (`tools/netsim/`) is a standalone daemon that lets multiple virtual devices share one simulated radio medium over a `PacketStreamer` gRPC stream, with its own Rust-wrapped libslirp for shared NAT.
+- netsim (`tools/netsim/`) is a standalone daemon that lets multiple virtual devices share one simulated radio medium over a `PacketStreamer` gRPC stream. It has its own Rust-wrapped libslirp for shared NAT.
 
-- The daemon the emulator launches by default is now Netsim Next (`netsimdx`, `tools/netsim/next/`), because the `NetsimX` feature ships `on` (`external/qemu/android/data/advancedFeatures.ini:510`); its actor-based Wi-Fi path replaces hostapd with an in-Rust access point and serves no web UI, and the legacy `netsimd` remains available behind `-feature -NetsimX`.
+- The daemon that the emulator launches by default is now Netsim Next (`netsimdx`, `tools/netsim/next/`), because the `NetsimX` feature ships `on` (`external/qemu/android/data/advancedFeatures.ini:510`). In its actor-based Wi-Fi path, Netsim Next replaces hostapd with an in-Rust access point. It serves no web UI. The legacy `netsimd` remains available behind `-feature -NetsimX`.
 
-- The bundled slirp stack (`external/qemu/slirp/`) has been hardened against guest-crafted packets — a use-after-free and an `IP_MAXPACKET` overflow in `ip_reass`, an out-of-bounds read in `arp_input` — with the ARP and BOOTP length checks measured against wire sizes so real guest ARP and DHCP traffic still passes.
+- The bundled slirp stack (`external/qemu/slirp/`) received hardening against guest-crafted packets: a use-after-free and an `IP_MAXPACKET` overflow in `ip_reass`, and an out-of-bounds read in `arp_input`. The ARP and BOOTP length checks now measure wire sizes, so real guest ARP and DHCP traffic still passes.
 
 - TAP mode (`-net-tap`) bypasses slirp entirely for real layer-2 connectivity, at the cost of slirp's zero-setup conveniences.
 
