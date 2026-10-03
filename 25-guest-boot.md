@@ -1,8 +1,10 @@
 # Chapter 25: Guest Boot
 
-When you launch the emulator, the host process spends a few hundred milliseconds doing something deceptively involved before any guest instruction runs: it picks a kernel image, reads the kernel's version out of the file, assembles a kernel command line tailored to the AVD's hardware and feature flags, packs a second blob of "userspace boot properties" into either the command line or a freshly rewritten ramdisk, and hands all of it to QEMU as `-kernel`, `-initrd`, and `-append`. From there the goldfish/ranchu kernel boots, mounts the ramdisk, runs `init`, and `init` parses `init.ranchu.rc` and the bootconfig the host injected. Two guest daemons — `qemu-props` and `qemud` — then reach back across virtual hardware to pull the rest of the configuration the host could not fit into the command line. Eventually the framework finishes starting and a one-line message travels back over a pipe to tell the host process: boot is complete.
+When you launch the emulator, the host process does something deceptively involved for a few hundred milliseconds before any guest instruction runs. It picks a kernel image and reads the kernel's version out of the file. It assembles a kernel command line tailored to the AVD's hardware and feature flags. It packs a second blob of "userspace boot properties" into either the command line or a freshly rewritten ramdisk. Then it hands all of it to QEMU as `-kernel`, `-initrd`, and `-append`.
 
-This chapter follows that whole arc from the host side, because the host side is where the emulator source lives. The guest-side files (`init.ranchu.rc`, `fstab.ranchu`, the `qemu-props` and `qemud` binaries) ship from a separate AOSP repository, `device/generic/goldfish`, and are referenced here by name; everything that *prepares* their inputs and *consumes* their outputs is in the QEMU tree under `external/qemu`. We trace kernel-version detection, command-line assembly, the bootconfig format, the legacy `boot-properties` qemud service, and the `QemuMiscPipe` boot-complete handshake — all grounded in real source.
+From there the goldfish/ranchu kernel boots, mounts the ramdisk, and runs `init`. Then `init` parses `init.ranchu.rc` and the bootconfig the host injected. Two guest daemons, `qemu-props` and `qemud`, then reach back across virtual hardware. They pull the rest of the configuration that the host could not fit into the command line. Eventually the framework finishes starting. Then a one-line message travels back over a pipe to tell the host process that boot is complete.
+
+This chapter follows that whole arc from the host side, because the host side is where the emulator source lives. The guest-side files (`init.ranchu.rc`, `fstab.ranchu`, the `qemu-props` and `qemud` binaries) ship from a separate AOSP repository, `device/generic/goldfish`. This chapter references them by name. Everything that *prepares* their inputs and *consumes* their outputs is in the QEMU tree under `external/qemu`. We trace kernel-version detection, command-line assembly, the bootconfig format, the legacy `boot-properties` qemud service, and the `QemuMiscPipe` boot-complete handshake — all grounded in real source.
 
 ---
 
@@ -32,18 +34,20 @@ if (hw->disk_ramdisk_path) {
 }
 ```
 
-When the `AndroidbootProps` family of flags is on (modern API levels), the launcher reserves a writable path next to the data partition, named `initrd`, and arranges to write a modified ramdisk there. When the flag is off (older images), it passes the stock ramdisk untouched and instead stuffs the same properties directly onto the command line. Section 25.4 covers that fork in detail.
+When the `AndroidbootProps` family of flags is on (modern API levels), the launcher reserves a writable path named `initrd` next to the data partition. It arranges to write a modified ramdisk there. When the flag is off (older images), it passes the stock ramdisk untouched and instead stuffs the same properties directly onto the command line. Section 25.4 covers that fork in detail.
 
 ### 25.1.1 Goldfish and ranchu
 
-Two names recur. *Goldfish* is the original virtual hardware platform — a set of memory-mapped devices (the goldfish framebuffer, battery, audio, pipe, and so on) that the emulator and a matching kernel both understand. *Ranchu* is the newer, virtio-based machine type used by QEMU2, which keeps the goldfish pipe and a few goldfish devices but replaces most block and network hardware with virtio. The guest never sees a literal product board; it sees `androidboot.hardware=ranchu`, and the Android HAL layer keys off that string. That property is hard-coded by the host in `userspace-boot-properties.cpp`:
+Two names recur. *Goldfish* is the original virtual hardware platform. It is a set of memory-mapped devices (the goldfish framebuffer, battery, audio, pipe, and so on). The emulator and a matching kernel both understand these devices.
+
+*Ranchu* is the newer, virtio-based machine type that QEMU2 uses. It keeps the goldfish pipe and a few goldfish devices. It replaces most block and network hardware with virtio. The guest never sees a literal product board; it sees `androidboot.hardware=ranchu`, and the Android HAL layer keys off that string. That property is hard-coded by the host in `userspace-boot-properties.cpp`:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/userspace-boot-properties.cpp
 params.push_back({"androidboot.hardware", "ranchu"});
 ```
 
-This is what makes `init.ranchu.rc` and `fstab.ranchu` the files that get used: Android's init selects hardware-specific `.rc` and `fstab` files by the `ro.hardware` value, which derives from `androidboot.hardware`.
+This is what makes `init.ranchu.rc` and `fstab.ranchu` the files in use. Android's init selects hardware-specific `.rc` and `fstab` files by the `ro.hardware` value, which derives from `androidboot.hardware`.
 
 ### 25.1.2 Overview diagram
 
@@ -89,7 +93,7 @@ Before it can build a command line, the host reads the kernel's version straight
 
 ### 25.2.1 Reading the version from the image
 
-`android/kernel/kernel_utils.cpp` memory-maps the kernel file and looks for the version string in two ways: at the fixed offset the Linux boot protocol defines, and, failing that, by scanning for the literal `"Linux version "` banner. If the kernel is gzip-compressed, it decompresses first and retries.
+`android/kernel/kernel_utils.cpp` memory-maps the kernel file and looks for the version string in two ways. First, it checks the fixed offset that the Linux boot protocol defines. If that fails, it scans for the literal `"Linux version "` banner. If the kernel is gzip-compressed, it decompresses first and retries.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/kernel/kernel_utils.cpp
@@ -125,7 +129,7 @@ if (isX86ish) {
 }
 ```
 
-On kernels 5.4 and newer the host re-enables a single 8250 UART (newer kernels disable them by default). On x86 kernels older than 5.4 it disables kvmclock, because — per the in-source comment referencing bug 67565886 — the goldfish kernel's `clock_gettime()` could hang with two cores and kvmclock enabled, taking SurfaceFlinger down with it. This is exactly the kind of decision that requires knowing the kernel version, and it explains why the host bothers to parse the image at all.
+On kernels 5.4 and newer the host re-enables a single 8250 UART (newer kernels disable them by default). On x86 kernels older than 5.4 it disables kvmclock, because of a hang. The in-source comment references bug 67565886. According to that comment, the goldfish kernel's `clock_gettime()` could hang with two cores and kvmclock enabled, and this took SurfaceFlinger down with it. This is exactly the kind of decision that requires the kernel version. It explains why the host parses the image at all.
 
 Kernel-version detection: how the host derives version-specific command-line flags.
 
@@ -189,7 +193,7 @@ If verified-boot parameters are present they supply the `root=` device (a dm-ver
 
 ### 25.3.2 ChromeOS short-circuit
 
-There is one early return worth noting: if the target is ChromeOS (`isCros`), none of the Android logic applies and the function returns a fixed, terse command line — `root=/dev/sda3`, `cros_legacy`, `cros_debug`, and a console only when `-show-kernel` is set. This is the one place the same host code path serves a non-Android guest, and it bails out before touching any Android-specific parameter.
+There is one early return to note. If the target is ChromeOS (`isCros`), none of the Android logic applies. The function returns a fixed, terse command line: `root=/dev/sda3`, `cros_legacy`, `cros_debug`, and a console only when `-show-kernel` is set. This is the one place where the same host code path serves a non-Android guest. It returns before it touches any Android-specific parameter.
 
 ### 25.3.3 Serial ports and the console
 
@@ -235,7 +239,7 @@ flowchart TD
 
 ## 25.4 Userspace Boot Properties and the Bootconfig Fork
 
-Many things the guest needs to know — which GLES version to advertise, the GL transport name, the AVD serial number, the adb public key, foldable posture configuration — are not kernel concerns. They are Android *properties* read by userspace during early boot. The host computes them in `getUserspaceBootProperties` (`android/userspace-boot-properties.cpp`), which returns a list of key/value pairs.
+The guest needs to know many things. Examples are which GLES version to advertise, the GL transport name, the AVD serial number, the adb public key, and foldable posture configuration. These are not kernel concerns. They are Android *properties* read by userspace during early boot. The host computes them in `getUserspaceBootProperties` (`android/userspace-boot-properties.cpp`), which returns a list of key/value pairs.
 
 ### 25.4.1 Two naming schemes
 
@@ -257,7 +261,7 @@ if (fc::isEnabled(fc::AndroidbootProps) ||
 }
 ```
 
-The list it builds always contains `androidboot.hardware=ranchu` and an `androidboot.qemu=1` (or bare `qemu=1`) marker so the guest knows it is running under the emulator. It then conditionally appends dozens more: GLES version, vsync rate, the adb public key fetched via `pubkey_from_privkey`, the AVD name, foldable device-state XML, Vulkan and ANGLE settings, and so on. Just before returning, it deduplicates by key (warning on overrides) and logs every final property.
+The list it builds always contains `androidboot.hardware=ranchu` and an `androidboot.qemu=1` (or bare `qemu=1`) marker so the guest knows it is running under the emulator. It then conditionally appends dozens more properties. Examples are the GLES version, the vsync rate, and the adb public key fetched via `pubkey_from_privkey`. Others are the AVD name, foldable device-state XML, and Vulkan and ANGLE settings. Just before it returns, it deduplicates by key, warns on overrides, and logs every final property.
 
 ### 25.4.2 Where the properties go
 
@@ -281,7 +285,7 @@ if (fc::isEnabled(fc::AndroidbootProps) ||
 }
 ```
 
-When bootconfig is in play, the properties are written into a rewritten ramdisk (25.5) and the only thing added to the command line is the literal token `bootconfig`, which tells the Linux kernel to look for an appended bootconfig section in the initrd. When bootconfig is *not* in play, each `key=value` is appended to the command line directly. Either way the resulting list is passed as `userspaceBootProps` into `emulator_getKernelParameters`, which appends it at the very end.
+When bootconfig is in play, the properties are written into a rewritten ramdisk (25.5). The only thing added to the command line is the literal token `bootconfig`. This token tells the Linux kernel to look for an appended bootconfig section in the initrd. When bootconfig is *not* in play, each `key=value` is appended to the command line directly. Either way the resulting list is passed as `userspaceBootProps` into `emulator_getKernelParameters`, which appends it at the very end.
 
 Userspace boot property delivery: bootconfig versus command line.
 
@@ -319,7 +323,7 @@ The header `android/bootconfig.h` documents the exact layout in one line:
 //                                   ^ 4 byte aligned
 ```
 
-So the rewritten initrd is the original ramdisk, followed by the flattened key/value text, followed by alignment padding, a little-endian size, a little-endian checksum, and the literal magic `#BOOTCONFIG\n`. The kernel reads the trailer from the end backward.
+So the rewritten initrd starts with the original ramdisk. After it come the flattened key/value text, alignment padding, a little-endian size, a little-endian checksum, and the literal magic `#BOOTCONFIG\n`. The kernel reads the trailer from the end backward.
 
 ### 25.5.2 Building the blob
 
@@ -345,7 +349,7 @@ std::vector<char> buildBootconfigBlob(const size_t srcSize,
 }
 ```
 
-Note the alignment is computed against `srcSize + blob.size()`, the *combined* length of the source ramdisk plus the flattened bootconfig — the trailer must land on a 4-byte boundary measured from the start of the whole image, not just the bootconfig section.
+Note that the alignment is computed against `srcSize + blob.size()`. This is the *combined* length of the source ramdisk plus the flattened bootconfig. The trailer must land on a 4-byte boundary, measured from the start of the whole image and not just the bootconfig section.
 
 ### 25.5.3 Writing the new ramdisk
 
@@ -378,7 +382,7 @@ flowchart LR
 
 ## 25.6 Verified Boot Parameters
 
-For Play Store images and any image that keeps dm-verity enabled, the host injects verified-boot parameters that the kernel and `init` use to set up the verity device-mapper target and report the boot state. These are not hard-coded; they are read from a per-AVD text-proto file.
+The host injects verified-boot parameters for Play Store images and for any image that keeps dm-verity enabled. The kernel and `init` use these parameters to set up the verity device-mapper target and to report the boot state. These are not hard-coded; they are read from a per-AVD text-proto file.
 
 In `main.cpp` the launcher only loads them under specific conditions — a Play Store image, or no `-writable-system`, or dynamic partitions:
 
@@ -399,13 +403,13 @@ if (feature_is_enabled(kFeature_PlayStoreImage) ||
 }
 ```
 
-`getParametersFromFile` (in `android/verified-boot/load_config.cpp`) parses the file as a protobuf text format with a `SimpleErrorCollector` that logs parse errors, validates each parameter against an allow-list of characters, and rejects configs above `kMaxSupportedMajorVersion`. When the system is writable (an "unlocked" device) the host appends `androidboot.verifiedbootstate=orange`, which is the standard Android signal for an unlocked bootloader. The resulting list flows into *both* `getUserspaceBootProperties` (so it can supply the `root=` device) and `emulator_getKernelParameters`.
+`getParametersFromFile` (in `android/verified-boot/load_config.cpp`) parses the file as a protobuf text format. It uses a `SimpleErrorCollector` that logs parse errors. It also validates each parameter against an allow-list of characters and rejects configs above `kMaxSupportedMajorVersion`. When the system is writable (an "unlocked" device) the host appends `androidboot.verifiedbootstate=orange`, which is the standard Android signal for an unlocked bootloader. The resulting list flows into *both* `getUserspaceBootProperties` (so it can supply the `root=` device) and `emulator_getKernelParameters`.
 
 ---
 
 ## 25.7 init, init.ranchu.rc, and the Guest-Side Daemons
 
-Everything up to this point happens before the first guest instruction. Once QEMU starts the ranchu machine, the goldfish/ranchu kernel boots, mounts the ramdisk, and runs `/init`. Android's `init` reads `init.rc` and the hardware-specific `init.ranchu.rc` (selected by `ro.hardware=ranchu`), and mounts partitions per `fstab.ranchu`. These three files ship in the separate `device/generic/goldfish` repository and are not part of the emulator tree, but the host code is written specifically to feed them.
+Everything up to this point happens before the first guest instruction. Once QEMU starts the ranchu machine, the goldfish/ranchu kernel boots, mounts the ramdisk, and runs `/init`. Android's `init` reads `init.rc` and the hardware-specific `init.ranchu.rc` (selected by `ro.hardware=ranchu`), and mounts partitions per `fstab.ranchu`. These three files ship in the separate `device/generic/goldfish` repository and are not part of the emulator tree. The host code is written specifically to feed them.
 
 ### 25.7.1 What init.ranchu.rc starts
 
@@ -414,11 +418,11 @@ Everything up to this point happens before the first guest instruction. Once QEM
 - **`qemu-props`** — a one-shot daemon that connects to the host's `boot-properties` service, pulls the list of `qemu.*` properties, and calls `setprop` for each. This is the legacy delivery path for images that do *not* use bootconfig.
 - **`qemud`** — the guest end of the QEMU multiplexed pipe protocol, which brokers named-service connections (sensors, GSM, GPS, boot-properties, and more) over a single transport.
 
-For bootconfig-based images, `init` reads the `androidboot.*` keys directly out of `/proc/bootconfig` (populated by the kernel from the blob in 25.5), so `qemu-props` has less to do — but the qemud transport is still used by other services.
+For bootconfig-based images, `init` reads the `androidboot.*` keys directly out of `/proc/bootconfig`. The kernel populates it from the blob in 25.5. So `qemu-props` has less to do, but other services still use the qemud transport.
 
 ### 25.7.2 The qemud transport
 
-`qemud` is a multiplexer: a single host/guest channel carries many logical service connections, each addressed by a service name. The host registers the transport in `android/emulation/android_qemud.cpp`, initializing both the legacy serial-port path and the modern pipe path, because the host cannot know in advance which the guest will use:
+`qemud` is a multiplexer: a single host/guest channel carries many logical service connections, each addressed by a service name. The host registers the transport in `android/emulation/android_qemud.cpp`. It initializes both the legacy serial-port path and the modern pipe path, because it cannot know in advance which one the guest will use:
 
 ```cpp
 // Source: external/qemu/android/emu/hardware/src/android/emulation/android_qemud.cpp
@@ -448,7 +452,7 @@ static void _android_qemud_pipe_init(void) {
 }
 ```
 
-When the guest opens `/dev/goldfish_pipe` and writes `pipe:qemud:<service>`, the goldfish pipe layer routes it to these functions, which hand the connection to the named qemud service. Individual services register through `qemud_service_register`.
+When the guest opens `/dev/goldfish_pipe` and writes `pipe:qemud:<service>`, the goldfish pipe layer routes it to these functions. They hand the connection to the named qemud service. Individual services register through `qemud_service_register`.
 
 qemud multiplexing of named services over a single transport.
 
@@ -493,7 +497,7 @@ if (msglen == 4 && !memcmp(msg, "list", 4)) {
 }
 ```
 
-There is a subtle side effect here that matters for the whole chapter: receiving `list` is the host's signal that a *fresh* boot is underway, so it resets `guest_boot_completed` and `guest_data_partition_mounted` to false. This is why a guest-initiated reboot (which re-runs `qemu-props`, which re-sends `list`) correctly re-arms the boot-complete detection in 25.9.
+There is a subtle side effect here that matters for the whole chapter. Receiving `list` is the host's signal that a *fresh* boot is underway. So the host resets `guest_boot_completed` and `guest_data_partition_mounted` to false. This is why a guest-initiated reboot (which re-runs `qemu-props`, which re-sends `list`) correctly re-arms the boot-complete detection in 25.9.
 
 ### 25.8.2 Registration and seeding
 
@@ -578,11 +582,13 @@ static void bootCompleteFunction() {
 }
 ```
 
-The boot time is measured against `s_reset_request_uptime_ms`, which `signal_system_reset_was_requested()` stamps at each (re)boot, so the number is correct even after a reboot inside the guest. Before flipping the flag the host drops a `bootcompleted.ini` marker file in the AVD directory. Then, through adb, it tunes the booted system: it raises the screen-off timeout and the logcat buffer to 2M, enables auto-rotate on non-automotive devices, installs device-skin overlays for the AVD's hardware, configures foldable hinge/posture geometry, and applies any pending language/country/locale changes (restarting zygote if needed). If the AVD was launched purely to time a boot (`test_quitAfterBootTimeOut`), it shuts the VM down instead.
+The boot time is measured against `s_reset_request_uptime_ms`. `signal_system_reset_was_requested()` stamps this value at each (re)boot, so the number is correct even after a reboot inside the guest. Before the flag is flipped, the host drops a `bootcompleted.ini` marker file in the AVD directory.
+
+Then it tunes the booted system through adb. It raises the screen-off timeout and the logcat buffer to 2M, and it enables auto-rotate on non-automotive devices. It installs device-skin overlays for the AVD's hardware and configures foldable hinge/posture geometry. It also applies any pending language/country/locale changes and restarts zygote if needed. If the AVD was launched purely to time a boot (`test_quitAfterBootTimeOut`), it shuts the VM down instead.
 
 ### 25.9.3 The fallback path for old images
 
-Not every API level reports `bootcomplete` over the pipe. `android/emulation/control/ServiceUtils.cpp` provides a fallback for images before API 28: if the flag is not already set and the API level is low, it polls the guest property `dev.bootcomplete` over adb:
+Not every API level reports `bootcomplete` over the pipe. `android/emulation/control/ServiceUtils.cpp` provides a fallback for images before API 28. If the flag is not already set and the API level is low, it polls the guest property `dev.bootcomplete` over adb:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/control/ServiceUtils.cpp
@@ -602,7 +608,7 @@ if (!getConsoleAgents()->settings->guest_boot_completed() &&
 return getConsoleAgents()->settings->guest_boot_completed();
 ```
 
-So there are two detection mechanisms, chosen by API level: the modern pipe push (`bootcomplete` on `QemuMiscPipe`) for API 28 and up, and an adb `getprop dev.bootcomplete` poll for older images. Both converge on the same `guest_boot_completed` flag.
+So there are two detection mechanisms, and the API level decides which one applies. The modern pipe push (`bootcomplete` on `QemuMiscPipe`) serves API 28 and up. An adb `getprop dev.bootcomplete` poll serves older images. Both converge on the same `guest_boot_completed` flag.
 
 Boot-complete handshake and the API-level fallback.
 
@@ -714,13 +720,13 @@ find "$HOME/.android/avd/<name>.avd" -name bootcompleted.ini
 
 ## Summary
 
-- The host launcher (`android-qemu2-glue/main.cpp`) prepares three boot artifacts before QEMU starts: `-kernel` (the goldfish/ranchu image), `-initrd` (stock or bootconfig-rewritten ramdisk), and `-append` (the assembled command line).
-- The kernel version is parsed directly out of the image (`kernel_utils.cpp`) so the host can apply version-specific workarounds such as `8250.nr_uarts=1` on 5.4+ and `no-kvmclock` on older x86 kernels.
-- `emulator_getKernelParameters` layers the command line from image params, arch/version defaults, serial-console wiring, CMA, system-as-root root device, AVD params, and finally userspace boot props or the literal `bootconfig` token.
-- `getUserspaceBootProperties` computes Android properties (GLES version, GL transport, adb key, AVD name, foldable state, and more), always including `androidboot.hardware=ranchu`, under either the `androidboot.*` or legacy `qemu.*` naming scheme.
-- Modern images receive those properties through a Linux bootconfig blob appended to a rewritten ramdisk by `createRamdiskWithBootconfig`, with the exact `[ramdisk][kv][pad][size][csum][#BOOTCONFIG]` trailer; older images get them inline on the command line.
+- The host launcher (`android-qemu2-glue/main.cpp`) prepares three boot artifacts before QEMU starts. They are `-kernel` (the goldfish/ranchu image), `-initrd` (stock or bootconfig-rewritten ramdisk), and `-append` (the assembled command line).
+- The host parses the kernel version directly out of the image (`kernel_utils.cpp`). This lets it apply version-specific workarounds such as `8250.nr_uarts=1` on 5.4+ and `no-kvmclock` on older x86 kernels.
+- `emulator_getKernelParameters` layers the command line from several sources. In order, the sources are image params, arch/version defaults, serial-console wiring, and CMA. After them come the system-as-root root device, AVD params, and finally userspace boot props or the literal `bootconfig` token.
+- `getUserspaceBootProperties` computes Android properties (GLES version, GL transport, adb key, AVD name, foldable state, and more). The list always includes `androidboot.hardware=ranchu`. It uses either the `androidboot.*` or the legacy `qemu.*` naming scheme.
+- Modern images receive those properties through a Linux bootconfig blob. `createRamdiskWithBootconfig` appends the blob to a rewritten ramdisk, with the exact `[ramdisk][kv][pad][size][csum][#BOOTCONFIG]` trailer. Older images get the properties inline on the command line.
 - Verified-boot parameters are read from a per-AVD text-proto (`load_config.cpp`) for Play Store / dm-verity images and supply the `root=` device and verified-boot state.
-- Inside the guest, `init` selects `init.ranchu.rc` and `fstab.ranchu` by `ro.hardware=ranchu`; `qemu-props` pulls legacy properties from the host's `boot-properties` qemud service, and `qemud` multiplexes all named services over the goldfish pipe.
+- Inside the guest, `init` selects `init.ranchu.rc` and `fstab.ranchu` by `ro.hardware=ranchu`. `qemu-props` pulls legacy properties from the host's `boot-properties` qemud service. `qemud` multiplexes all named services over the goldfish pipe.
 - Sending `list` to `boot-properties` resets `guest_boot_completed` and `guest_data_partition_mounted`, re-arming detection on every (re)boot.
 - The framework signals completion by writing `bootcomplete` to `QemuMiscPipe`; `bootCompleteFunction` records the boot time, flips `guest_boot_completed`, drops `bootcompleted.ini`, and runs post-boot adb tuning. Images before API 28 fall back to polling `dev.bootcomplete` over adb.
 

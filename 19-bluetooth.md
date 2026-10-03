@@ -1,16 +1,20 @@
 # Chapter 19: Bluetooth
 
-The Android Emulator does not talk to any real Bluetooth radio. There is no physical antenna, no baseband chip, and no over-the-air RF. Instead the guest's Bluetooth stack speaks to a software controller called Rootcanal, a virtual HCI controller that implements the Host Controller Interface accurately enough that the guest's `android.hardware.bluetooth` HAL, the Bluetooth stack, and the apps above it cannot tell the difference. Rootcanal does not run inside QEMU. It is hosted by a separate process, `netsimd` (the network simulator daemon), and the guest reaches it over a chain of transports: a guest virtio serial port, a QEMU character device, a gRPC bidirectional stream, and finally Rootcanal's `TestModel`. The same machinery emulates Wi-Fi and UWB, so this chapter is really about one slice of netsim that happens to carry HCI.
+The Android Emulator does not talk to any real Bluetooth radio. There is no physical antenna, no baseband chip, and no over-the-air RF. Instead the guest's Bluetooth stack speaks to a software controller called Rootcanal. Rootcanal is a virtual HCI controller that implements the Host Controller Interface accurately. It is so accurate that the guest's `android.hardware.bluetooth` HAL, the Bluetooth stack, and the apps above it cannot tell the difference.
 
-The payoff of routing every controller through one daemon is multi-device emulation. Two emulators that point at the same `netsimd` instance land on the same Rootcanal phy mesh, so a phone AVD can discover and pair with a watch AVD, or with a synthetic `beacon` device, without any of them ever leaving the host. This chapter follows an HCI packet from `/dev/vhci` in the guest all the way to Rootcanal's `DualModeController`, then turns around and looks at the control plane: the netsim frontend gRPC API, the CLI, the BLE beacon devices, and the legacy GATT-over-gRPC path through `nimble_bridge`.
+Rootcanal does not run inside QEMU. A separate process, `netsimd` (the network simulator daemon), hosts it. The guest reaches it over a chain of transports. The chain has a guest virtio serial port, a QEMU character device, a gRPC bidirectional stream, and finally Rootcanal's `TestModel`.
+
+The same machinery emulates Wi-Fi and UWB, so this chapter is really about one slice of netsim that happens to carry HCI.
+
+The payoff of routing every controller through one daemon is multi-device emulation. Two emulators that point at the same `netsimd` instance land on the same Rootcanal phy mesh. So a phone AVD can discover and pair with a watch AVD, or with a synthetic `beacon` device. None of them ever leaves the host. This chapter follows an HCI packet from `/dev/vhci` in the guest all the way to Rootcanal's `DualModeController`. Then it looks at the control plane: the netsim frontend gRPC API, the CLI, the BLE beacon devices, and the legacy GATT-over-gRPC path through `nimble_bridge`.
 
 ---
 
 ## 19.1 Rootcanal: The Virtual HCI Controller
 
-Rootcanal lives in `tools/rootcanal/`. Its own README states the goal plainly: it is "a virtual Bluetooth Controller" whose emulation "is limited to features that have direct consequences on connected hosts," so "accurate implementation of HCI commands and events is thus critical to RootCanal's goal, while accurate emulation of the scheduler and base-band is out of scope" (`tools/rootcanal/README.md`).
+Rootcanal lives in `tools/rootcanal/`. Its own README states the goal plainly. It is "a virtual Bluetooth Controller" whose emulation "is limited to features that have direct consequences on connected hosts," so "accurate implementation of HCI commands and events is thus critical to RootCanal's goal, while accurate emulation of the scheduler and base-band is out of scope" (`tools/rootcanal/README.md`).
 
-The heart of Rootcanal is the `DualModeController`, declared in `tools/rootcanal/model/controller/dual_mode_controller.h`. A dual-mode controller supports both Bluetooth Classic (BR/EDR) and Bluetooth Low Energy (LE). It exposes eight HCI packet-handling entry points: four inbound handlers that consume packets from the host, and four outbound register-callbacks that route packets back to the host.
+The heart of Rootcanal is the `DualModeController`, declared in `tools/rootcanal/model/controller/dual_mode_controller.h`. A dual-mode controller supports both Bluetooth Classic (BR/EDR) and Bluetooth Low Energy (LE). It exposes eight HCI packet-handling entry points. Four inbound handlers consume packets from the host. Four outbound register-callbacks route packets back to the host.
 
 - `HandleCommand` consumes HCI command packets issued by the host.
 - `HandleAcl` consumes ACL (asynchronous connectionless) data packets.
@@ -38,7 +42,7 @@ void RegisterIsoChannel(
         const std::function<void(std::shared_ptr<std::vector<uint8_t>>)>& send_iso);
 ```
 
-A `DualModeController` by itself only knows how to react to HCI traffic. To become a usable controller it is subclassed by `HciDevice` (`tools/rootcanal/model/devices/hci_device.h`; `class HciDevice : public DualModeController`), which binds the controller's output channels to an `HciTransport` and routes inbound transport packets back into the controller. The constructor in `tools/rootcanal/model/devices/hci_device.cc` wires every channel direction:
+A `DualModeController` by itself only knows how to react to HCI traffic. `HciDevice` (`tools/rootcanal/model/devices/hci_device.h`; `class HciDevice : public DualModeController`) subclasses it to become a usable controller. It binds the controller's output channels to an `HciTransport`, and it routes inbound transport packets back into the controller. The constructor in `tools/rootcanal/model/devices/hci_device.cc` wires every channel direction:
 
 ```cpp
 // Source: tools/rootcanal/model/devices/hci_device.cc
@@ -56,11 +60,11 @@ transport_->RegisterCallbacks(
               HandleCommand(packet);
 ```
 
-So `HciDevice` is the seam: HCI bytes arriving from the transport are dispatched by type into the controller, and packets the controller emits flow back out the transport. Everything else in this chapter is about how those transport bytes get from the guest to this `HciDevice`.
+So `HciDevice` is the seam. It dispatches HCI bytes that arrive from the transport by type into the controller. Packets the controller emits flow back out the transport. Everything else in this chapter is about how those transport bytes get from the guest to this `HciDevice`.
 
 ### 19.1.1 The H4 Transport Protocol
 
-Bluetooth controllers historically attach over a UART, and the framing on that UART is the H4 protocol: a one-byte packet-type indicator followed by a type-specific preamble and payload. Rootcanal parses H4 with `H4Parser` in `tools/rootcanal/model/hci/h4_parser.h`. The parser is a small state machine with states `HCI_TYPE`, `HCI_PREAMBLE`, `HCI_PAYLOAD`, and `HCI_RECOVERY`, and it knows the preamble layout of each packet kind directly from the spec:
+Bluetooth controllers historically attach over a UART. The framing on that UART is the H4 protocol: a one-byte packet-type indicator followed by a type-specific preamble and payload. Rootcanal parses H4 with `H4Parser` in `tools/rootcanal/model/hci/h4_parser.h`. The parser is a small state machine with states `HCI_TYPE`, `HCI_PREAMBLE`, `HCI_PAYLOAD`, and `HCI_RECOVERY`. It knows the preamble layout of each packet kind directly from the spec:
 
 ```cpp
 // Source: tools/rootcanal/model/hci/h4_parser.h
@@ -71,7 +75,7 @@ static constexpr size_t COMMAND_LENGTH_OFFSET = 2;
 static constexpr size_t ACL_PREAMBLE_SIZE = 4;
 ```
 
-The parser takes five callbacks at construction time, one per packet type (command, event, ACL, SCO, ISO), and invokes the matching one when a complete packet has been assembled. This is the lowest common denominator that the emulator's QEMU glue, the netsim daemon, and Rootcanal all agree on, and it is why the same `H4Parser` class is copied into the QEMU glue tree as well.
+The parser takes five callbacks at construction time, one per packet type (command, event, ACL, SCO, ISO). It invokes the matching one when it assembles a complete packet. This is the lowest common denominator that the emulator's QEMU glue, the netsim daemon, and Rootcanal all agree on. For this reason the same `H4Parser` class is also copied into the QEMU glue tree.
 
 ```mermaid
 flowchart LR
@@ -105,7 +109,7 @@ link_ble_socket_server_ = open_server(&async_manager_, link_ble_port);
 connector_ = open_connector(&async_manager_);
 ```
 
-When a host connects to the HCI port, `SetUpHciServer` builds the same stack we saw in section 19.1: an `HciSocketTransport` wrapping the socket, optionally an `HciSniffer` for PCAP capture, an `HciDevice`, and finally `test_model_.AddHciConnection(device)` to register the controller with the model:
+When a host connects to the HCI port, `SetUpHciServer` builds the same stack that section 19.1 shows. The stack has an `HciSocketTransport` that wraps the socket, optionally an `HciSniffer` for PCAP capture, and an `HciDevice`. Finally `test_model_.AddHciConnection(device)` registers the controller with the model:
 
 ```cpp
 // Source: tools/rootcanal/desktop/test_environment.cc
@@ -117,11 +121,11 @@ auto device = HciDevice::Create(transport, properties);
 auto device_id = test_model_.AddHciConnection(device);
 ```
 
-The README confirms the integration story for the shipped emulator: "RootCanal is natively integrated in the Cuttlefish and Goldfish emulators. Bluetooth is enabled by default on these platforms. External hosts can connect to the HCI port 7300 to interact with the emulated device." Note that the emulator integration does *not* go through these raw TCP ports for the guest's own controller — the guest path is the gRPC packet streamer covered in sections 19.4 through 19.6. The TCP ports remain available for external test tooling and for connecting accessory devices.
+The README confirms the integration story for the shipped emulator: "RootCanal is natively integrated in the Cuttlefish and Goldfish emulators. Bluetooth is enabled by default on these platforms. External hosts can connect to the HCI port 7300 to interact with the emulated device." Note that the emulator integration does *not* go through these raw TCP ports for the guest's own controller. The guest path is the gRPC packet streamer that sections 19.4 through 19.6 cover. The TCP ports remain available for external test tooling and for connecting accessory devices.
 
 ### 19.2.1 The PCAP Sniffer
 
-The `HciSniffer` and `BaseBandSniffer` (`tools/rootcanal/model/hci/hci_sniffer.h`, `tools/rootcanal/model/devices/baseband_sniffer.h`) are transparent shims that tee traffic to a PCAP file. The standalone tool enables them with `--enable_hci_sniffer` and `--enable_baseband_sniffer`. The HCI sniffer captures everything the controller exchanges with its host; the baseband sniffer captures the link-layer packets exchanged between controllers on a phy, which is the only way to debug Rootcanal's own behavior. In the emulator the same capture capability is reached through netsim's capture API (section 19.8).
+The `HciSniffer` and `BaseBandSniffer` (`tools/rootcanal/model/hci/hci_sniffer.h`, `tools/rootcanal/model/devices/baseband_sniffer.h`) are transparent shims that tee traffic to a PCAP file. The standalone tool enables them with `--enable_hci_sniffer` and `--enable_baseband_sniffer`. The HCI sniffer captures everything the controller exchanges with its host. The baseband sniffer captures the link-layer packets that controllers exchange on a phy. This is the only way to debug Rootcanal's own behavior. In the emulator the same capture capability is reached through netsim's capture API (section 19.8).
 
 ---
 
@@ -144,9 +148,9 @@ The model's vocabulary for building topology is a handful of methods:
 - `AddDeviceToPhy(device_id, phy_id)` places a controller on a medium so it can hear traffic.
 - `RemoveDeviceFromPhy(device_id, phy_id)` takes it off again.
 
-The README explains the rule that makes multi-device work: "Controllers can exchange link layer packets only when they are part of the same phy. One controller can be added to multiple phys, the simplest example being BR/EDR and LE dual phys." So a normal dual-mode controller sits on *both* the BR/EDR phy and the LE phy, and any two controllers on the same phy can see each other's advertisements, scan requests, and connection traffic. There is no spatial model by default — every device on a phy is in range of every other — though the netsim layer adds RSSI computation on top (section 19.7).
+The README explains the rule that makes multi-device work: "Controllers can exchange link layer packets only when they are part of the same phy. One controller can be added to multiple phys, the simplest example being BR/EDR and LE dual phys." So a normal dual-mode controller sits on *both* the BR/EDR phy and the LE phy. Any two controllers on the same phy can see each other's advertisements, scan requests, and connection traffic. There is no spatial model by default, so every device on a phy is in range of every other. However, the netsim layer adds RSSI computation on top (section 19.7).
 
-The phy channels carry a simplified link-layer protocol defined in `tools/rootcanal/packets/link_layer_packets.pdl`. As the README warns, this protocol "simplifies the LL and LMP protocol packets defined in the Bluetooth specification to abstract over negotiation details," and it "can change in backward incompatible ways."
+The phy channels carry a simplified link-layer protocol defined in `tools/rootcanal/packets/link_layer_packets.pdl`. As the README warns, this protocol "simplifies the LL and LMP protocol packets defined in the Bluetooth specification to abstract over negotiation details." The README adds that it "can change in backward incompatible ways."
 
 ```mermaid
 flowchart TB
@@ -200,7 +204,7 @@ static int netsim_chr_write(Chardev* chr, const uint8_t* buf, int len) {
 }
 ```
 
-When the chardev opens, it spawns a detached thread to connect to netsim asynchronously, because "Directly opening the channel can take >2 seconds" — so QEMU never blocks waiting for the daemon. The connect routine builds a gRPC channel to the packet streamer, picks a protocol by device label, and creates the transport:
+When the chardev opens, it spawns a detached thread to connect to netsim asynchronously. The reason is that "Directly opening the channel can take >2 seconds". So QEMU never blocks while it waits for the daemon. The connect routine builds a gRPC channel to the packet streamer, picks a protocol by device label, and creates the transport:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/netsim/qemu-packet-stream-agent-impl.cpp
@@ -232,7 +236,7 @@ flowchart LR
 
 The `chardev-netsim` device is generic: it forwards bytes for Bluetooth, UWB, and Wi-Fi over the same gRPC `PacketStreamer` service. What differs per radio is the `PacketProtocol` that translates between the raw guest byte stream and the typed `PacketRequest`/`PacketResponse` protobufs. For Bluetooth that translator is `BluetoothPacketProtocol` in `external/qemu/android-qemu2-glue/netsim/BluetoothPacketProtocol.cpp`.
 
-On the guest-to-netsim direction, `forwardToPacketStreamer` feeds the byte stream into an `H4Parser` (the same parser from section 19.1.1, vendored into the glue) and, for each complete H4 packet, enqueues a typed `HCIPacket` protobuf:
+On the guest-to-netsim direction, `forwardToPacketStreamer` feeds the byte stream into an `H4Parser` (the same parser from section 19.1.1, vendored into the glue). For each complete H4 packet, it enqueues a typed `HCIPacket` protobuf:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/netsim/BluetoothPacketProtocol.cpp
@@ -245,9 +249,9 @@ BluetoothPacketProtocol(std::shared_ptr<DeviceInfo> deviceInfo)
       mDeviceInfo(deviceInfo) {}
 ```
 
-On the netsim-to-guest direction, `forwardToQemu` does the inverse: it takes an `HCIPacket` out of a `PacketResponse`, prepends the one-byte H4 type, and writes the H4 frame back toward the guest. The protobuf `HCIPacket` (`tools/netsim/proto/netsim/hci_packet.proto`) carries exactly the five HCI packet types — `COMMAND`, `ACL`, `SCO`, `EVENT`, `ISO` — plus the data bytes, so the wire format is type-tagged rather than relying on H4 framing across the gRPC hop.
+On the netsim-to-guest direction, `forwardToQemu` does the inverse. It takes an `HCIPacket` out of a `PacketResponse`, prepends the one-byte H4 type, and writes the H4 frame back toward the guest. The protobuf `HCIPacket` (`tools/netsim/proto/netsim/hci_packet.proto`) carries exactly the five HCI packet types — `COMMAND`, `ACL`, `SCO`, `EVENT`, `ISO` — plus the data bytes. So the wire format is type-tagged. It does not rely on H4 framing across the gRPC hop.
 
-The protocol also handles connection lifecycle. When the gRPC stream is established (`REMOTE_CONNECTED`), it sends an "initial info" registration packet describing the chip, and it injects a deliberate HCI Hardware Error event toward the guest so the Android stack resets cleanly:
+The protocol also handles connection lifecycle. When the gRPC stream is established (`REMOTE_CONNECTED`), it sends an "initial info" registration packet that describes the chip. It also injects a deliberate HCI Hardware Error event toward the guest, so the Android stack resets cleanly:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/netsim/BluetoothPacketProtocol.cpp
@@ -257,7 +261,7 @@ The protocol also handles connection lifecycle. When the gRPC stream is establis
 static const uint8_t constexpr reset_sequence[] = {0x04, 0x10, 0x01, 0x42};
 ```
 
-This `reset_sequence` matters for snapshots: when an emulator restores from a snapshot the netsim connection is rebuilt with a fresh, uninitialized Rootcanal controller, but the guest stack has no idea anything changed. Forcing a hardware-error event makes the guest re-initialize the controller from scratch (see also section 19.6.2). The `chip_info()` method even disables LE Connected Isochronous Stream for SDK 33 Play Store images that depend on older controller behavior — a real compatibility workaround keyed off `ro.build.version.sdk` (`apply_le_workaround_if_needed`).
+This `reset_sequence` matters for snapshots. When an emulator restores from a snapshot, the netsim connection is rebuilt with a fresh, uninitialized Rootcanal controller. The guest stack has no idea that anything changed. A forced hardware-error event makes the guest re-initialize the controller from scratch (see also section 19.6.2). The `chip_info()` method even disables LE Connected Isochronous Stream for SDK 33 Play Store images that depend on older controller behavior. This is a real compatibility workaround, keyed off `ro.build.version.sdk` (`apply_le_workaround_if_needed`).
 
 ### 19.5.1 The Registration Handshake
 
@@ -276,7 +280,7 @@ register_netsim(to_string(opts->packet_streamer_endpoint), name,
 
 ## 19.6 Inside netsim: Embedding Rootcanal
 
-`netsimd` is a hybrid Rust and C++ daemon under `tools/netsim/`. The Rust side owns device management and the gRPC servers; the C++ side embeds Rootcanal directly (not over TCP) and exposes it through a `cxx` FFI bridge. The FFI surface lives in `tools/netsim/rust/daemon/src/ffi.rs`:
+`netsimd` is a hybrid Rust and C++ daemon under `tools/netsim/`. The Rust side owns device management and the gRPC servers. The C++ side embeds Rootcanal directly (not over TCP) and exposes it through a `cxx` FFI bridge. The FFI surface lives in `tools/netsim/rust/daemon/src/ffi.rs`:
 
 ```rust
 // Source: tools/netsim/rust/daemon/src/ffi.rs
@@ -316,7 +320,7 @@ phy_low_energy_index_ = gTestModel->AddPhy(rootcanal::Phy::Type::LOW_ENERGY);
 
 ### 19.6.1 Adding a Controller
 
-When an emulator's gRPC stream sends its initial `ChipInfo`, the Rust `add_chip` path eventually calls into `bluetooth_facade::Add`. That function builds the full Rootcanal stack for one guest: an `HciPacketTransport`, an optional custom `ControllerProperties` from the supplied configuration protobuf, and an `HciDevice` registered with the model:
+When an emulator's gRPC stream sends its initial `ChipInfo`, the Rust `add_chip` path eventually calls into `bluetooth_facade::Add`. That function builds the full Rootcanal stack for one guest. The stack has an `HciPacketTransport`, an optional custom `ControllerProperties` from the supplied configuration protobuf, and an `HciDevice` registered with the model:
 
 ```cpp
 // Source: tools/netsim/src/hci/bluetooth_facade.cc
@@ -331,11 +335,11 @@ gAsyncManager->ExecAsync(
     });
 ```
 
-The returned `rootcanal_id` is the model's device identifier, and it is the handle the Rust layer uses for every subsequent operation. The facade keeps an `id_to_chip_info_` map from that id to per-device state: the chip model, tx/rx counters, and the controller proto. Note that `AddHciConnection` runs inside the `AsyncManager`'s task thread via `ExecAsync` — Rootcanal is single-threaded by design, and all model mutation is funneled onto that one thread to avoid data races.
+The returned `rootcanal_id` is the model's device identifier, and it is the handle the Rust layer uses for every subsequent operation. The facade keeps an `id_to_chip_info_` map from that id to per-device state: the chip model, tx/rx counters, and the controller proto. Note that `AddHciConnection` runs inside the `AsyncManager`'s task thread via `ExecAsync`. Rootcanal is single-threaded by design. All model mutation is funneled onto that one thread to avoid data races.
 
 ### 19.6.2 The Snapshot Quirk
 
-The facade unconditionally enables a Rootcanal "quirk" on the global `controller_proto_` during `Start()`, so every controller inherits it. When a custom controller proto is also supplied via `Add()`, the quirk is explicitly set again on the custom proto to ensure it is not overridden:
+The facade unconditionally enables a Rootcanal "quirk" on the global `controller_proto_` during `Start()`, so every controller inherits it. When a custom controller proto is also supplied via `Add()`, the quirk is explicitly set again on the custom proto, so that it is not overridden:
 
 ```cpp
 // Source: tools/netsim/src/hci/bluetooth_facade.cc
@@ -347,7 +351,7 @@ The facade unconditionally enables a Rootcanal "quirk" on the global `controller
 custom_proto.mutable_quirks()->set_hardware_error_before_reset(true);
 ```
 
-This is the controller-side companion to the `reset_sequence` injection in section 19.5. Together they make Bluetooth survive snapshot save/restore: the host re-creates a blank controller, and either the protocol layer injects a hardware-error event or the controller raises one the moment it sees a non-reset command, prompting the guest stack to re-run its initialization sequence.
+This is the controller-side companion to the `reset_sequence` injection in section 19.5. Together they make Bluetooth survive snapshot save/restore. The host re-creates a blank controller. Then either the protocol layer injects a hardware-error event, or the controller raises one the moment it sees a non-reset command. Either event prompts the guest stack to re-run its initialization sequence.
 
 ### 19.6.3 The Rust WirelessChip
 
@@ -403,7 +407,7 @@ flowchart TB
 
 Because netsim subclasses the phy layer, it can compute signal strength and packet statistics that plain Rootcanal does not. `SimPhyLayer` overrides `ComputeRssi` and `Send` to call into netsim's ranging code and to bump per-chip tx/rx counters. The RSSI computation lives in Rust's `ranging` module and is exposed to the C++ phy layer as the FFI helper `GetRssi(sender, receiver, link_kind, tx_power)` (`tools/netsim/rust/daemon/src/ffi.rs`), which `SimComputeRssi` calls. RSSI is derived from the configured device positions via a simple log-distance path-loss formula (`distance_to_rssi` in `ranging.rs`, `tx_power - 20*log10(distance)`), not a measured or environmental channel model.
 
-The per-controller counters feed the radio stats the daemon reports. The Rust `get_stats` builds two `NetsimRadioStats` records per controller — one `BLUETOOTH_LOW_ENERGY` and one `BLUETOOTH_CLASSIC` — copying the tx/rx counts out of the chip model and attaching any invalid packets that Rootcanal flagged:
+The per-controller counters feed the radio stats the daemon reports. The Rust `get_stats` builds two `NetsimRadioStats` records per controller, one `BLUETOOTH_LOW_ENERGY` and one `BLUETOOTH_CLASSIC`. It copies the tx/rx counts out of the chip model and attaches any invalid packets that Rootcanal flagged:
 
 ```rust
 // Source: tools/netsim/rust/daemon/src/wireless/bluetooth.rs
@@ -413,7 +417,7 @@ ble_stats_proto.set_rx_count(chip_proto.bt().low_energy.rx_count);
 classic_stats_proto.set_kind(netsim_radio_stats::Kind::BLUETOOTH_CLASSIC);
 ```
 
-Rootcanal can report malformed HCI traffic through an "invalid packet handler" registered on each `HciDevice` in the facade. Those reports cross the FFI as `report_invalid_packet_cxx` and land in a per-`rootcanal_id` ring buffer capped at five entries (`tools/netsim/rust/daemon/src/wireless/bluetooth.rs`), so a guest that bombards the controller with garbage shows up in the radio stats rather than silently breaking the link.
+Rootcanal can report malformed HCI traffic through an "invalid packet handler" registered on each `HciDevice` in the facade. Those reports cross the FFI as `report_invalid_packet_cxx` and land in a per-`rootcanal_id` ring buffer capped at five entries (`tools/netsim/rust/daemon/src/wireless/bluetooth.rs`). So a guest that bombards the controller with garbage shows up in the radio stats, and the link does not break silently.
 
 ---
 
@@ -428,7 +432,7 @@ Everything so far is the data plane — HCI packets moving between guest and con
 - `Reset` returns the whole simulation to its initial state.
 - `PatchCapture` / `ListCapture` / `GetCapture` control PCAP capture per chip.
 
-The CLI is the Rust binary under `tools/netsim/rust/cli/`. Its argument grammar (`tools/netsim/rust/cli/src/args.rs`) maps subcommands onto those RPCs: `radio` (control a device's radio state), `devices`, `capture` (aliased `pcap`), `reset`, `beacon`, `bumble`, and `link`. Device radio toggling is done via `radio`, not a top-level `patch`. The `radio` subcommand takes a `RadioType` of `Ble` or another radio and a status, then issues a `PatchDevice` that flips the corresponding atomic flag described in section 19.6.3 — which, in turn, adds or removes the controller from its phy.
+The CLI is the Rust binary under `tools/netsim/rust/cli/`. Its argument grammar (`tools/netsim/rust/cli/src/args.rs`) maps subcommands onto those RPCs: `radio` (control a device's radio state), `devices`, `capture` (aliased `pcap`), `reset`, `beacon`, `bumble`, and `link`. Device radio toggling is done via `radio`, not a top-level `patch`. The `radio` subcommand takes a `RadioType` of `Ble` or another radio and a status. Then it issues a `PatchDevice` that flips the corresponding atomic flag described in section 19.6.3. That change, in turn, adds or removes the controller from its phy.
 
 ```mermaid
 flowchart TB
@@ -444,17 +448,17 @@ flowchart TB
 
 ### 19.8.1 BLE Beacon Devices
 
-A beacon is a controller-less synthetic device that just advertises. Rootcanal ships a `Beacon` device (`tools/rootcanal/model/devices/beacon.h`) described in its header as a "Simple device that advertises with non-connectable advertising in general discoverable mode, and responds to LE scan requests." netsim wraps beacons as first-class CreateDevice targets: the model proto defines a `BleBeacon` message with advertise settings, advertise data, and optional GATT service definitions (`tools/netsim/proto/netsim/model.proto`), and the CLI exposes `beacon create ble`, `beacon patch`, and `beacon remove` (`tools/netsim/rust/cli/src/args.rs`).
+A beacon is a controller-less synthetic device that just advertises. Rootcanal ships a `Beacon` device (`tools/rootcanal/model/devices/beacon.h`). Its header describes it as a "Simple device that advertises with non-connectable advertising in general discoverable mode, and responds to LE scan requests." netsim wraps beacons as first-class CreateDevice targets. The model proto defines a `BleBeacon` message with advertise settings, advertise data, and optional GATT service definitions (`tools/netsim/proto/netsim/model.proto`). The CLI exposes `beacon create ble`, `beacon patch`, and `beacon remove` (`tools/netsim/rust/cli/src/args.rs`).
 
-A beacon lets you test scanning and discovery from a single emulator without a second AVD: create the beacon in netsim, and the guest's LE scanner will see its advertisements on the shared LE phy. The beacon implementation in netsim is in `tools/netsim/rust/daemon/src/bluetooth/beacon.rs`, and it sends link-layer LE packets through the same `RustBluetoothChip` FFI used for any Rust-implemented device (`SendLinkLayerLePacket`).
+A beacon lets you test scanning and discovery from a single emulator without a second AVD. Create the beacon in netsim. Then the guest's LE scanner will see its advertisements on the shared LE phy. The beacon implementation in netsim is in `tools/netsim/rust/daemon/src/bluetooth/beacon.rs`, and it sends link-layer LE packets through the same `RustBluetoothChip` FFI used for any Rust-implemented device (`SendLinkLayerLePacket`).
 
 ---
 
 ## 19.9 Multi-Device Bluetooth
 
-The architectural reason netsim hosts Rootcanal out-of-process is so that multiple AVDs can share one simulation. Each emulator's `register_netsim` is told a `packet_streamer_endpoint` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`); when several emulators target the same `netsimd`, every one of their controllers is added to the same two phys via `AddHciConnection` and `AddDeviceToPhy`. From Rootcanal's perspective there is no difference between "two emulators" and "two HCI connections" — they are just devices on a phy.
+The architectural reason netsim hosts Rootcanal out-of-process is so that multiple AVDs can share one simulation. Each emulator's `register_netsim` is told a `packet_streamer_endpoint` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`). When several emulators target the same `netsimd`, every one of their controllers is added to the same two phys via `AddHciConnection` and `AddDeviceToPhy`. From Rootcanal's perspective there is no difference between "two emulators" and "two HCI connections" — they are just devices on a phy.
 
-Concretely, the `stream_packets` RPC handler in `tools/netsim/rust/daemon/src/grpc_server/backend.rs` reads the first `initial_info` message, registers the chip, and then loops forwarding HCI packets for the life of the stream:
+Concretely, the `stream_packets` RPC handler in `tools/netsim/rust/daemon/src/grpc_server/backend.rs` reads the first `initial_info` message and registers the chip. Then it loops and forwards HCI packets for the life of the stream:
 
 ```rust
 // Source: tools/netsim/rust/daemon/src/grpc_server/backend.rs
@@ -468,7 +472,7 @@ while let Some(request) = packet_request.try_next().await? {
         wireless::handle_request(...);
 ```
 
-Each connection also gets a stable Bluetooth address. `handle_bluetooth_address` persists a MAC per AVD path: if the emulator did not supply an address, netsim generates one and stores it keyed by AVD path so the same virtual device keeps the same MAC across runs:
+Each connection also gets a stable Bluetooth address. `handle_bluetooth_address` persists a MAC per AVD path. If the emulator did not supply an address, netsim generates one and stores it keyed by AVD path. So the same virtual device keeps the same MAC across runs:
 
 ```rust
 // Source: tools/netsim/rust/daemon/src/grpc_server/backend.rs
@@ -520,7 +524,7 @@ service EmulatedBluetoothService {
 };
 ```
 
-The implementation (`external/qemu/android/android-grpc/services/bluetooth/server/src/android/emulation/bluetooth/EmulatedBluetoothService.cpp`) does not implement GATT itself. It serializes the `GattDevice` description to a temp file and launches a bundled helper process called `nimble_bridge`, returning the new process's PID as the device's callback identity:
+The implementation (`external/qemu/android/android-grpc/services/bluetooth/server/src/android/emulation/bluetooth/EmulatedBluetoothService.cpp`) does not implement GATT itself. It serializes the `GattDevice` description to a temp file and launches a bundled helper process called `nimble_bridge`. It returns the new process's PID as the device's callback identity:
 
 ```cpp
 // Source: .../bluetooth/server/src/android/emulation/bluetooth/EmulatedBluetoothService.cpp
@@ -533,13 +537,13 @@ response->mutable_callback_device_id()->set_identity(
         std::to_string(process->pid()));
 ```
 
-`nimble_bridge` (`external/qemu/android/bluetooth/nimble_bridge/`) embeds the Apache Mynewt NimBLE host stack and connects as its own controller, exposing the GATT services described in the proto. The companion `GattDeviceService` (`emulated_bluetooth_device.proto`) lets the registering client implement the device behavior: it receives `OnCharacteristicReadRequest`, `OnCharacteristicWriteRequest`, `OnCharacteristicObserveRequest`, and `OnConnectionStateChange` callbacks. The proto's own comment says such a device "will appear as a real bluetooth device" on "the rootcanal mesh," so this is really a convenience layer for spinning up custom peripherals that join the same phy mesh as everything else. It is the higher-level, profile-aware counterpart to the raw beacon devices of section 19.8.1.
+`nimble_bridge` (`external/qemu/android/bluetooth/nimble_bridge/`) embeds the Apache Mynewt NimBLE host stack and connects as its own controller and exposes the GATT services described in the proto. The companion `GattDeviceService` (`emulated_bluetooth_device.proto`) lets the registering client implement the device behavior: it receives `OnCharacteristicReadRequest`, `OnCharacteristicWriteRequest`, `OnCharacteristicObserveRequest`, and `OnConnectionStateChange` callbacks. The proto's own comment says such a device "will appear as a real bluetooth device" on "the rootcanal mesh." So this is really a convenience layer to spin up custom peripherals that join the same phy mesh as everything else. It is the higher-level, profile-aware counterpart to the raw beacon devices of section 19.8.1.
 
 ---
 
 ## 19.11 Try It
 
-The commands below assume an emulator and a built `netsim`/`netsimd` from the SDK's `emulator/` directory; adjust paths to your installation.
+The commands below assume an emulator and a built `netsim`/`netsimd` from the SDK's `emulator/` directory. Adjust paths to your installation.
 
 - Launch an emulator with Bluetooth emulation forced on, then sanity-check the host accelerator:
 
@@ -549,7 +553,7 @@ emulator -avd <your_avd> -feature BluetoothEmulation
 emulator -accel-check
 ```
 
-- Use the netsim CLI to list the simulated devices and their Bluetooth chips (run from the SDK `emulator/` directory where `netsim` lives):
+- Use the netsim CLI to list the simulated devices and their Bluetooth chips. Run it from the SDK `emulator/` directory where `netsim` lives:
 
 ```bash
 ./netsim devices
@@ -578,7 +582,7 @@ emulator -accel-check
 ./netsim capture get <device_name>   # writes a pcap you can open in Wireshark
 ```
 
-- Build and run a standalone Rootcanal to see the four TCP ports from section 19.2, then connect an HCI client to port 6402:
+- Build and run a standalone Rootcanal to see the four TCP ports from section 19.2. Then connect an HCI client to port 6402:
 
 ```bash
 source build/envsetup.sh
@@ -587,19 +591,19 @@ m root-canal
 ./out/host/linux-x86/bin/root-canal --enable_hci_sniffer
 ```
 
-- For multi-device testing, start two emulators pointed at the same `netsimd` and run `./netsim devices` — both controllers will appear on the same mesh and can discover each other.
+- For multi-device testing, start two emulators that point at the same `netsimd`. Run `./netsim devices`. Both controllers will appear on the same mesh and can discover each other.
 
 ---
 
 ## Summary
 
-- The emulator has no real Bluetooth hardware; the guest stack talks to Rootcanal, a software HCI controller in `tools/rootcanal/` whose `DualModeController` accurately implements HCI commands and events while leaving the baseband out of scope.
-- `HciDevice` subclasses `DualModeController` (`tools/rootcanal/model/devices/hci_device.cc`) and binds all eight HCI channels (command, ACL, SCO, ISO inbound; event, ACL, SCO, ISO outbound) to an `HciTransport`; the H4 protocol frames the byte stream and `H4Parser` reassembles it.
+- The emulator has no real Bluetooth hardware. The guest stack talks to Rootcanal, a software HCI controller in `tools/rootcanal/`. Its `DualModeController` accurately implements HCI commands and events, and it leaves the baseband out of scope.
+- `HciDevice` subclasses `DualModeController` (`tools/rootcanal/model/devices/hci_device.cc`) and binds all eight HCI channels (command, ACL, SCO, ISO inbound; event, ACL, SCO, ISO outbound) to an `HciTransport`. The H4 protocol frames the byte stream, and `H4Parser` reassembles it.
 - Rootcanal's `TestModel` owns two phys, `LOW_ENERGY` and `BR_EDR`; controllers on the same phy can exchange link-layer packets, which is the entire mechanism behind multi-device emulation.
-- The guest reaches Rootcanal through a transport chain: a virtio serial port named `bluetooth`, a `chardev-netsim` QEMU character device, a gRPC `PacketStreamer` stream, and finally netsim's embedded Rootcanal — set up in `external/qemu/android-qemu2-glue/main.cpp` only when `kFeature_BluetoothEmulation` is on.
-- `BluetoothPacketProtocol` translates between the H4 byte stream and typed `HCIPacket` protobufs, and injects a hardware-error reset sequence on (re)connect so the guest stack re-initializes cleanly across snapshots.
-- `netsimd` is a Rust+C++ daemon; the Rust `Bluetooth` `WirelessChip` drives an embedded Rootcanal `TestModel` through a `cxx` FFI (`bluetooth_add`, `handle_bt_request`, `add_device_to_phy`), and toggling a radio simply adds or removes the controller from its phy.
-- The control plane is a separate `FrontendService` gRPC API (`ListDevice`, `PatchDevice`, `CreateDevice`, capture RPCs) driven by the netsim CLI and web UI; BLE beacons and the legacy `nimble_bridge` GATT path let you add synthetic peripherals to the same mesh.
+- The guest reaches Rootcanal through a transport chain. The chain has a virtio serial port named `bluetooth`, a `chardev-netsim` QEMU character device, a gRPC `PacketStreamer` stream, and finally netsim's embedded Rootcanal. This chain is set up in `external/qemu/android-qemu2-glue/main.cpp` only when `kFeature_BluetoothEmulation` is on.
+- `BluetoothPacketProtocol` translates between the H4 byte stream and typed `HCIPacket` protobufs. It also injects a hardware-error reset sequence on (re)connect, so the guest stack re-initializes cleanly across snapshots.
+- `netsimd` is a Rust+C++ daemon. The Rust `Bluetooth` `WirelessChip` drives an embedded Rootcanal `TestModel` through a `cxx` FFI (`bluetooth_add`, `handle_bt_request`, `add_device_to_phy`). A radio toggle simply adds or removes the controller from its phy.
+- The control plane is a separate `FrontendService` gRPC API (`ListDevice`, `PatchDevice`, `CreateDevice`, capture RPCs) driven by the netsim CLI and web UI. BLE beacons and the legacy `nimble_bridge` GATT path let you add synthetic peripherals to the same mesh.
 
 ### Key Source Files
 

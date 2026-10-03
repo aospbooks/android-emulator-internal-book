@@ -1,14 +1,18 @@
 # Chapter 16: Camera
 
-A guest app that opens `Camera2` or `CameraX` expects real pixels — a preview surface, a YUV capture stream, the device tilting the view as the phone tilts. There is no physical sensor behind the emulator, so the host has to manufacture those frames. It does so in one of two ways: by rendering a 3D *virtual scene* whose viewpoint is driven by the same physical model that powers the accelerometer and gyroscope, or by forwarding frames captured from a real webcam plugged into the host. Either way, the frames are produced host-side, converted to a guest-friendly pixel format, and shipped across a qemud pipe channel to the goldfish camera HAL inside the guest.
+A guest app that opens `Camera2` or `CameraX` expects real pixels. It expects a preview surface, a YUV capture stream, and a view that tilts as the phone tilts. There is no physical sensor behind the emulator, so the host has to manufacture those frames.
 
-This chapter follows a frame from the moment the AVD configuration is read, through the host-side camera service that registers the `camera` qemud service, into the per-camera capture backends (virtual scene and V4L2 webcam), through the libyuv-based format conversion, and finally over one of three wire protocols that decide how the converted pixels reach guest memory. The whole pipeline lives in `external/qemu/android/android-emu/android/camera/`, with the scene renderer rooted in `external/qemu/android/android-emu/android/virtualscene/` and a gRPC control surface in `external/qemu/android/android-grpc/`.
+It does this in one of two ways. It can render a 3D *virtual scene*. The same physical model that powers the accelerometer and gyroscope drives the viewpoint of this scene. Or it can forward frames from a real webcam plugged into the host.
+
+In both cases the host produces the frames. It converts them to a pixel format that suits the guest. Then it sends them across a qemud pipe channel to the goldfish camera HAL inside the guest.
+
+This chapter follows a frame through the whole pipeline, from the moment the AVD configuration is read. The frame goes through the host-side camera service that registers the `camera` qemud service. Next it goes into the per-camera capture backends (virtual scene and V4L2 webcam) and through the libyuv-based format conversion. Last, it goes over one of three wire protocols. These protocols decide how the converted pixels reach guest memory. The whole pipeline lives in `external/qemu/android/android-emu/android/camera/`, with the scene renderer rooted in `external/qemu/android/android-emu/android/virtualscene/` and a gRPC control surface in `external/qemu/android/android-grpc/`.
 
 ---
 
 ## 16.1 Source Selection at AVD Boot
 
-The camera subsystem comes up exactly once, during machine setup. In `external/qemu/vl.c:4754` the emulator calls `android_camera_service_init()`, defined in `external/qemu/android/android-emu/android/camera/camera-service.cpp:1874`. That function does almost nothing itself — it constructs a single static `CameraService` object, and "all the interesting things happen in the ctor."
+The camera subsystem comes up exactly once, during machine setup. In `external/qemu/vl.c:4754` the emulator calls `android_camera_service_init()`, defined in `external/qemu/android/android-emu/android/camera/camera-service.cpp:1874`. That function does almost nothing itself. It constructs a single static `CameraService` object, and "all the interesting things happen in the ctor."
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-service.cpp
@@ -22,7 +26,7 @@ The constructor reads two strings from the AVD hardware config — `hw_camera_ba
 
 ### 16.1.1 The Seven Camera Source Types
 
-Every frame producer is classified by a `CameraSourceType` enum in `external/qemu/android/android-emu/android/camera/camera-common.h:159`. There are seven of them: `kWebcam` (a real host camera), `kVirtualScene` (the 3D scene), `kVideoPlayback`, `kVideofile`, `kImagefile`, `kImage360`, and `kEnvironment` (the environment scene defined in `environment.ini`). The constructor's `if`/`else` ladder in `camera-service.cpp:514` decides which one applies for each direction, then calls either `virtualscenecameraSetup` or `webcamSetup` to register a `CameraInfo` record.
+Every frame producer is classified by a `CameraSourceType` enum in `external/qemu/android/android-emu/android/camera/camera-common.h:159`. There are seven of them: `kWebcam` (a real host camera), `kVirtualScene` (the 3D scene), `kVideoPlayback`, `kVideofile`, `kImagefile`, `kImage360`, and `kEnvironment`. This last source is the environment scene defined in `environment.ini`. The constructor's `if`/`else` ladder in `camera-service.cpp:514` decides which one applies for each direction. Then it calls either `virtualscenecameraSetup` or `webcamSetup` to register a `CameraInfo` record.
 
 ```c
 // Source: external/qemu/android/android-emu/android/camera/camera-common.h
@@ -37,11 +41,11 @@ typedef enum CameraSourceType {
 } CameraSourceType;
 ```
 
-All of the file-backed and scene sources (everything except `kWebcam`) share one backend: the virtual scene renderer. The constructor routes them all through `virtualscenecameraSetup`, varying only the device name string ("environment", "videoplayback", "videofile", "imagefile", "image360", optionally suffixed with a filename). Only `kWebcam` uses the host capture path.
+All of the file-backed and scene sources (everything except `kWebcam`) share one backend: the virtual scene renderer. The constructor routes them all through `virtualscenecameraSetup`. Only the device name string changes ("environment", "videoplayback", "videofile", "imagefile", "image360", optionally suffixed with a filename). Only `kWebcam` uses the host capture path.
 
 ### 16.1.2 Telling the Guest Which Cameras Are Fake
 
-After registering its qemud service, the constructor also publishes a boot property so the guest's legacy SurfaceFlinger fake-camera logic knows which cameras are software-emulated. The string `qemu.sf.fake_camera` is set to `both`, `back`, `front`, or `none` depending on which directions use the `emulated` software camera (`camera-service.cpp:584`). The property setter lives in `external/qemu/android/emu/hardware/src/android/boot-properties.c:177`.
+The constructor registers its qemud service. It also publishes a boot property, so that the guest's legacy SurfaceFlinger fake-camera logic knows which cameras are software-emulated. The string `qemu.sf.fake_camera` is set to `both`, `back`, `front`, or `none` depending on which directions use the `emulated` software camera (`camera-service.cpp:584`). The property setter lives in `external/qemu/android/emu/hardware/src/android/boot-properties.c:177`.
 
 ```c
 // Source: external/qemu/android/emu/hardware/src/android/boot-properties.c
@@ -69,7 +73,7 @@ flowchart TD
 
 ## 16.2 The CameraInfo Vtable Abstraction
 
-Each registered camera is a `CameraInfo` struct (`camera-common.h:204`) carrying a name, direction (`front`/`back`), sensor orientation, an array of supported `frame_sizes`, a preferred `pixel_format`, and — crucially — a pointer to a `CameraInfoVtbl`. The vtable is the polymorphism boundary between the generic service and the per-source capture code.
+Each registered camera is a `CameraInfo` struct (`camera-common.h:204`). It carries a name, a direction (`front`/`back`), a sensor orientation, and an array of supported `frame_sizes`. It also has a preferred `pixel_format` and (most important) a pointer to a `CameraInfoVtbl`. The vtable is the polymorphism boundary between the generic service and the per-source capture code.
 
 ```c
 // Source: external/qemu/android/android-emu/android/camera/camera-common.h
@@ -91,9 +95,9 @@ There are exactly two vtable instances. The virtual-scene vtable in `camera-serv
 
 ### 16.2.1 Frame Dimensions and Preferred Format
 
-`virtualscenecameraSetup` advertises a fixed list of resolutions to the guest (`camera-service.cpp:759`): `640x480`, `352x288`, `320x240`, `1280x720`, and `1280x960`. The comment explains a notable omission — `176x144` is disabled because the RGB-to-YUV converter "produces a broken image" and "writes outside of the image memory range" at that size. The scene camera's preferred capture format is `V4L2_PIX_FMT_RGB32` (`camera-virtualscene.cpp:31`), because the scene is rendered into an RGBA8 framebuffer and converted from there.
+`virtualscenecameraSetup` advertises a fixed list of resolutions to the guest (`camera-service.cpp:759`): `640x480`, `352x288`, `320x240`, `1280x720`, and `1280x960`. The comment explains a notable omission. `176x144` is disabled because the RGB-to-YUV converter "produces a broken image" and "writes outside of the image memory range" at that size. The scene camera's preferred capture format is `V4L2_PIX_FMT_RGB32` (`camera-virtualscene.cpp:31`), because the scene is rendered into an RGBA8 framebuffer and converted from there.
 
-For webcams, the supported resolutions come from the device itself: `webcamSetup` copies a `CameraInfo` produced by `camera_enumerate_devices`, which probed the real V4L2 device for its frame sizes.
+For webcams, the supported resolutions come from the device itself. `webcamSetup` copies a `CameraInfo` that `camera_enumerate_devices` produced. That function probed the real V4L2 device for its frame sizes.
 
 The vtable dispatch for a single captured frame
 
@@ -123,11 +127,11 @@ QemudService* serv = qemud_service_register(kServiceCamera, 0,
         this, &connectStatic, nullptr, nullptr);
 ```
 
-A qemud service can host many simultaneous client channels. The camera service distinguishes two kinds of connection by inspecting the connection parameters in `CameraService::connect` (`camera-service.cpp:679`). A connection with *no* parameters is a *factory* client: it only answers the `list` query, returning the catalog of registered cameras. A connection *with* parameters (which must include `name=<device>`) is a *per-camera* client that opens one `CameraDevice` and streams frames.
+A qemud service can host many simultaneous client channels. The camera service tells two kinds of connection apart. It inspects the connection parameters in `CameraService::connect` (`camera-service.cpp:679`). A connection with *no* parameters is a *factory* client. It only answers the `list` query and returns the catalog of registered cameras. A connection *with* parameters (which must include `name=<device>`) is a *per-camera* client that opens one `CameraDevice` and streams frames.
 
 ### 16.3.1 The Frame Wire Format
 
-Replies are length-prefixed. `sendPayloadSize` writes an 8-character lowercase hex byte count (`camera-service.cpp:116`), then the payload follows. A reply payload begins with a three-byte prefix: `ok` or `ko` for success or failure, followed by either a NUL or a `:` indicating whether data follows (`camera-service.cpp:122`).
+Replies are length-prefixed. `sendPayloadSize` writes an 8-character lowercase hex byte count (`camera-service.cpp:116`), then the payload follows. A reply payload begins with a three-byte prefix. The prefix is `ok` or `ko` for success or failure, followed by a NUL or a `:`. The last byte shows whether data follows (`camera-service.cpp:122`).
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-service.cpp
@@ -135,7 +139,7 @@ constexpr size_t kReplyPrefixSize = 3;
 constexpr uint8_t kOkReplyData[kReplyPrefixSize] = {'o', 'k', ':'};
 ```
 
-Incoming queries are NUL-separated and parsed by `QueryParser` (`camera-service.cpp:846`), which splits a query into a verb (`connect`, `start`, `frame`, `stop`, `disconnect`, or for the newer protocols `configure`, `capture`) and a parameter string of `key=value` tokens separated by spaces. `getTokenValueStr` (`camera-service.cpp:152`) pulls individual values like `dim=640x480` or `pix=...` out of that string.
+Incoming queries are NUL-separated. `QueryParser` (`camera-service.cpp:846`) parses them. It splits a query into a verb and a parameter string. The verb is `connect`, `start`, `frame`, `stop`, `disconnect`, or for the newer protocols `configure` or `capture`. The parameter string has `key=value` tokens separated by spaces. `getTokenValueStr` (`camera-service.cpp:152`) pulls individual values like `dim=640x480` or `pix=...` out of that string.
 
 ### 16.3.2 The Factory `list` Query
 
@@ -147,7 +151,7 @@ int len = ::snprintf(buf, sizeof(buf), "name=%s channel=%u pix=%u "
                      "dir=%s sensor_orientation=%u framedims=%ux%u", ...);
 ```
 
-The guest HAL parses these lines to discover how many cameras exist, their facing, sensor orientation, native pixel format, and the resolutions they support — then opens a per-camera channel for each one it wants to use.
+The guest HAL parses these lines to discover how many cameras exist. It also learns their facing, sensor orientation, native pixel format, and supported resolutions. Then it opens a per-camera channel for each camera it wants to use.
 
 qemud channel topology for the camera service
 
@@ -183,17 +187,19 @@ enum class CameraClientProtocol : int {
 };
 ```
 
-The selection is policy-driven, not negotiated: if the `Minigbm` feature flag is on, the client is `MINIGBM`; otherwise, if the AVD API level is above 29 (Android 11, API 30 and above; Android 10 is API 29 and uses SERIAL), it is `GAS`; otherwise it falls back to `SERIAL` (`camera-service.cpp:1795`). Each protocol gets its own client class, all created in `CameraService::cameraClientCreate` (`camera-service.cpp:1807`) after resolving the camera by name and calling its vtable `open`.
+The selection is policy-driven, not negotiated. If the `Minigbm` feature flag is on, the client is `MINIGBM`. Otherwise, if the AVD API level is above 29, it is `GAS`. API 30 and above is Android 11. Android 10 is API 29 and uses SERIAL. In all other cases it falls back to `SERIAL` (`camera-service.cpp:1795`).
+
+Each protocol gets its own client class. `CameraService::cameraClientCreate` (`camera-service.cpp:1807`) creates all of them, after it resolves the camera by name and calls its vtable `open`.
 
 ### 16.4.1 SERIAL — Copy Pixels Through the Pipe
 
-`SerialCameraClient` (`camera-service.cpp:1101`) is the original protocol. The guest sends `start dim=WxH pix=F`, the client allocates an internal video buffer and a separate RGBA32 preview buffer (`start3`, `camera-service.cpp:1291`), and each `frame` query specifies how many `video=` and `preview=` bytes it wants. The captured frame is converted into those host buffers, then the *entire payload is copied byte-for-byte down the pipe* (`camera-service.cpp:1223`). Simple, but every frame crosses the virtio-serial boundary as a full memcpy.
+`SerialCameraClient` (`camera-service.cpp:1101`) is the original protocol. The guest sends `start dim=WxH pix=F`. The client allocates an internal video buffer and a separate RGBA32 preview buffer (`start3`, `camera-service.cpp:1291`). Each `frame` query specifies how many `video=` and `preview=` bytes it wants. The captured frame is converted into those host buffers, then the *entire payload is copied byte-for-byte down the pipe* (`camera-service.cpp:1223`). Simple, but every frame crosses the virtio-serial boundary as a full memcpy.
 
-Note that the start path validates that a conversion path exists *before* capturing: `start3` rejects with `CLIENT_START_RESULT_NO_PIXEL_CONVERSION` unless `has_converter` confirms a path from the camera's native format to both the requested format and `V4L2_PIX_FMT_RGB32` (`camera-service.cpp:1294`).
+Note that the start path validates that a conversion path exists *before* it captures. `start3` rejects with `CLIENT_START_RESULT_NO_PIXEL_CONVERSION` unless `has_converter` confirms a path from the camera's native format to both the requested format and `V4L2_PIX_FMT_RGB32` (`camera-service.cpp:1294`).
 
 ### 16.4.2 GAS — Write Into Shared Guest Memory
 
-`GasCameraClient` (`camera-service.cpp:1328`) eliminates the copy. "GAS" is the goldfish address space: a region of memory shared between guest and host. The guest's `frame` query carries an `offset=` into that region; the host translates it to a host pointer and uses it directly as the conversion target framebuffer.
+`GasCameraClient` (`camera-service.cpp:1328`) eliminates the copy. "GAS" is the goldfish address space: a region of memory shared between guest and host. The guest's `frame` query carries an `offset=` into that region. The host translates it to a host pointer and uses it directly as the conversion target framebuffer.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-service.cpp
@@ -206,7 +212,7 @@ The host obtains `mGasGetHostPtr` and `mGasPhysAddrStart` from `get_address_spac
 
 ### 16.4.3 MINIGBM — Write Into virtio-gpu Buffers
 
-`MinigbmCameraClient` (`camera-service.cpp:1492`) is the modern path used when gfxstream/minigbm is enabled. It splits configuration from capture. A `configure streams=id:WxH@F,...` query (`camera-service.cpp:1531`) registers one or more guest streams, allocating a host staging buffer per stream and mapping the Android format to a V4L2 format — `RGBA_8888` becomes `V4L2_PIX_FMT_RGB32`, and `YCBCR_420_888` becomes `V4L2_PIX_FMT_NV12` (`camera-service.cpp:1562`). A later `capture bufs=id:handle,...` query (`camera-service.cpp:1632`) names a virtio-gpu resource handle per stream. After conversion into the host staging buffer, the pixels are pushed into the guest's virtio-gpu resource via gfxstream's `stream_renderer_transfer_write_iov` (`camera-service.cpp:1734`).
+`MinigbmCameraClient` (`camera-service.cpp:1492`) is the modern path used when gfxstream/minigbm is enabled. It splits configuration from capture. A `configure streams=id:WxH@F,...` query (`camera-service.cpp:1531`) registers one or more guest streams and allocates a host staging buffer per stream. It also maps the Android format to a V4L2 format: `RGBA_8888` becomes `V4L2_PIX_FMT_RGB32`, and `YCBCR_420_888` becomes `V4L2_PIX_FMT_NV12` (`camera-service.cpp:1562`). A later `capture bufs=id:handle,...` query (`camera-service.cpp:1632`) names a virtio-gpu resource handle per stream. After conversion into the host staging buffer, the pixels are pushed into the guest's virtio-gpu resource via gfxstream's `stream_renderer_transfer_write_iov` (`camera-service.cpp:1734`).
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-service.cpp
@@ -214,7 +220,7 @@ stream_renderer_transfer_write_iov(bi.second, 0, 0, 0, 0,
                                    &box, 0, &framebuffer, 1);
 ```
 
-This lets the camera frame land in the same graphics buffer the guest GPU stack already manages, so the preview can be composited without an extra copy.
+This lets the camera frame land in the same graphics buffer that the guest GPU stack already manages. The preview can then be composited without an extra copy.
 
 How each protocol delivers pixels
 
@@ -231,11 +237,11 @@ flowchart TD
 
 ## 16.5 The Virtual Scene Camera
 
-When the camera source is not a webcam, frames come from a rendered 3D scene. The vtable functions in `camera-virtualscene.cpp` are thin shims over `RenderedCameraDevice` (in `camera-virtualscene-utils.cpp`), which in turn drives the virtual environment renderer (`ver/virtual_environment_renderer.h`) and a `VirtualSceneManager` that owns the OpenGL scene.
+When the camera source is not a webcam, frames come from a rendered 3D scene. The vtable functions in `camera-virtualscene.cpp` are thin shims over `RenderedCameraDevice` (in `camera-virtualscene-utils.cpp`). This class in turn drives the virtual environment renderer (`ver/virtual_environment_renderer.h`) and a `VirtualSceneManager` that owns the OpenGL scene.
 
 ### 16.5.1 Owned vs. Environment Scenes
 
-`RenderedCameraDevice::startCapturing` (`camera-virtualscene-utils.cpp:64`) parses the device name to decide which scene to use. The separator character is `|` (`camera-virtualscene.cpp:51`), so a name like `environment|back` splits into a mode (`environment`) and an argument (`back`). If the mode is `environment`, the device joins the *global* environment scene shared across cameras via `VirtualSceneManager::addSceneUser()`. Otherwise it *creates and owns* a scene with `ver_create_scene` — and if creation fails, it falls back to a solid magenta error color (`#FF00FF`) so the guest at least gets visibly-wrong pixels rather than a crash (`camera-virtualscene-utils.cpp:106`).
+`RenderedCameraDevice::startCapturing` (`camera-virtualscene-utils.cpp:64`) parses the device name to decide which scene to use. The separator character is `|` (`camera-virtualscene.cpp:51`), so a name like `environment|back` splits into a mode (`environment`) and an argument (`back`). If the mode is `environment`, the device joins the *global* environment scene shared across cameras via `VirtualSceneManager::addSceneUser()`. Otherwise it *creates and owns* a scene with `ver_create_scene`. If creation fails, it falls back to a solid magenta error color (`#FF00FF`). This way the guest at least gets visibly-wrong pixels rather than a crash (`camera-virtualscene-utils.cpp:106`).
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/camera/camera-virtualscene-utils.cpp
@@ -280,7 +286,7 @@ physicalModel_getTransform(android_physical_model_instance(), &position.x,
                            &rotationEulerDegrees.z, &timestamp);
 ```
 
-Tilt the emulated device (via the extended controls or the sensor automation), and the scene visibly rotates, because the gyroscope and the camera are reading the same pose. The projection matrix is built from idealized camera intrinsics in `projectionMatrixForCameraIntrinsics` (`SceneCamera.cpp:37`), and the front camera gets an extra 180-degree Y rotation so it mirrors the back camera (`camera-virtualscene-utils.cpp:185`).
+Tilt the emulated device (via the extended controls or the sensor automation). The scene visibly rotates, because the gyroscope and the camera read the same pose. The projection matrix is built from idealized camera intrinsics in `projectionMatrixForCameraIntrinsics` (`SceneCamera.cpp:37`). The front camera gets an extra 180-degree Y rotation so that it mirrors the back camera (`camera-virtualscene-utils.cpp:185`).
 
 Virtual scene frame pipeline
 
@@ -306,11 +312,13 @@ When the source is a `webcam<N>`, frames come from a real device. The capture co
 
 ### 16.6.1 Enumeration
 
-`camera_enumerate_devices` (`camera-capture-linux.c:1096`) walks `/dev/video0` through `/dev/video{N}`, opening each, issuing `VIDIOC_QUERYCAP` to confirm it is a capture device, and using `VIDIOC_ENUM_FMT` and `VIDIOC_ENUM_FRAMESIZES` to discover supported formats and resolutions. Per the comment in `camera-capture.h:127`, the guest framework ultimately wants YV12, so the host prefers a native format the device already exposes to "spare some CPU cycles on the conversion." This enumeration is also what `-webcam-list` prints, via `android_camera_list_webcams` (`camera-list.cpp:26`).
+`camera_enumerate_devices` (`camera-capture-linux.c:1096`) walks `/dev/video0` through `/dev/video{N}` and opens each device. It issues `VIDIOC_QUERYCAP` to confirm that the device is a capture device. It uses `VIDIOC_ENUM_FMT` and `VIDIOC_ENUM_FRAMESIZES` to discover supported formats and resolutions. The comment in `camera-capture.h:127` says that the guest framework ultimately wants YV12. So the host prefers a native format that the device already exposes, to "spare some CPU cycles on the conversion." This enumeration is also what `-webcam-list` prints, via `android_camera_list_webcams` (`camera-list.cpp:26`).
 
 ### 16.6.2 Three I/O Methods
 
-A V4L2 device can deliver frames three ways, captured by the `CameraIoType` enum (`camera-capture-linux.c:78`): `CAMERA_IO_MEMMAP` (memory-mapped buffers queued/dequeued with `VIDIOC_QBUF`/`VIDIOC_DQBUF`), `CAMERA_IO_USERPTR` (driver writes into user-supplied buffers), and `CAMERA_IO_DIRECT` (plain `read()` from the device fd). `camera_device_start_capturing` (`camera-capture-linux.c:842`) sets the format with `VIDIOC_S_FMT`, then tries to set up mmap framebuffers via `VIDIOC_REQBUFS` (`camera-capture-linux.c:335`), falling back to other I/O types if the device cannot mmap, and finally starts the stream with `VIDIOC_STREAMON`.
+A V4L2 device can deliver frames in three ways. The `CameraIoType` enum (`camera-capture-linux.c:78`) lists them. `CAMERA_IO_MEMMAP` uses memory-mapped buffers queued/dequeued with `VIDIOC_QBUF`/`VIDIOC_DQBUF`. `CAMERA_IO_USERPTR` has the driver write into user-supplied buffers. `CAMERA_IO_DIRECT` uses plain `read()` from the device fd.
+
+`camera_device_start_capturing` (`camera-capture-linux.c:842`) sets the format with `VIDIOC_S_FMT`. Then it tries to set up mmap framebuffers via `VIDIOC_REQBUFS` (`camera-capture-linux.c:335`). If the device cannot mmap, it falls back to other I/O types. Finally it starts the stream with `VIDIOC_STREAMON`.
 
 ### 16.6.3 Reading a Frame
 
@@ -345,11 +353,11 @@ stateDiagram-v2
 
 ## 16.7 Pixel Format Conversion
 
-No matter the source, frames arrive in some host format (RGBA8 from the scene, or whatever the webcam negotiated) and must reach the guest in the format it asked for — typically YV12/NV12 for the capture stream and RGB32 for preview. The conversion machinery is in `camera-format-converters.c`, fronted by `convert_frame` (`camera-format-converters.c:2234`).
+No matter the source, frames arrive in some host format (RGBA8 from the scene, or whatever the webcam negotiated). They must reach the guest in the format it asked for. This is typically YV12/NV12 for the capture stream and RGB32 for preview. The conversion machinery is in `camera-format-converters.c`, fronted by `convert_frame` (`camera-format-converters.c:2234`).
 
 ### 16.7.1 Fast Path and Slow Path
 
-`convert_frame` has two implementations behind it. The *fast path*, `convert_frame_fast` (`camera-format-converters.c:2042`), uses Google's libyuv: it converts the source into I420 as an intermediate, rotates and crops to match the requested aspect ratio, optionally rescales with `I420Scale`, applies exposure compensation by scaling Y values, and finally emits the destination format with `ConvertFromI420` (or a manual U/V swap for YV12 via `I420Copy`). The fast path is only taken when white balance is a no-op (all scales equal `1.0`) and the format pair is libyuv-supported (`camera-format-converters.c:2257`).
+`convert_frame` has two implementations behind it. The *fast path*, `convert_frame_fast` (`camera-format-converters.c:2042`), uses Google's libyuv. It converts the source into I420 as an intermediate, then rotates and crops to match the requested aspect ratio. It optionally rescales with `I420Scale` and applies exposure compensation by scaling Y values. Finally it emits the destination format with `ConvertFromI420` (or a manual U/V swap for YV12 via `I420Copy`). The fast path is only taken when white balance is a no-op (all scales equal `1.0`) and the format pair is libyuv-supported (`camera-format-converters.c:2257`).
 
 ```c
 // Source: external/qemu/android/android-emu/android/camera/camera-format-converters.c
@@ -362,15 +370,15 @@ if (r_scale == 1.0f && g_scale == 1.0f && b_scale == 1.0f &&
 }
 ```
 
-If the fast path is skipped or fails, `convert_frame` falls back to `convert_frame_slow` (`camera-format-converters.c:1804`), a per-pixel loop driven by a table of format descriptors. That table (`camera-format-converters.c:1622`) carries RGB descriptors (`_ARGB32`, `_RGB32`) and YUV descriptors (`_YV12`, `_NV12`, `_NV21`, and others) with load/save callbacks and an `RGB32ToYUV`/`YUVToRGB32` color math core (`camera-format-converters.c:185`). The slow path supports a much wider format list but, per the inline note at `camera-format-converters.c:2267`, does not rotate frames correctly (bug 260913366).
+If the fast path is skipped or fails, `convert_frame` falls back to `convert_frame_slow` (`camera-format-converters.c:1804`), a per-pixel loop driven by a table of format descriptors. That table (`camera-format-converters.c:1622`) carries RGB descriptors (`_ARGB32`, `_RGB32`) and YUV descriptors (`_YV12`, `_NV12`, `_NV21`, and others). The descriptors come with load/save callbacks and an `RGB32ToYUV`/`YUVToRGB32` color math core (`camera-format-converters.c:185`). The slow path supports a much wider format list but, per the inline note at `camera-format-converters.c:2267`, does not rotate frames correctly (bug 260913366).
 
 ### 16.7.2 White Balance and Exposure
 
-The per-frame scalars — `r_scale`/`g_scale`/`b_scale` (white balance) and `exp_comp` (exposure) — flow all the way from the guest query through `readFrameImpl` into the converter. White balance is applied as a multiply on each RGB channel in the slow path; exposure is applied in the fast path by scaling the luminance plane (`camera-format-converters.c:2145`). Because non-unity white balance forces the slow path, the common steady-state case (neutral white balance) stays on libyuv.
+The per-frame scalars — `r_scale`/`g_scale`/`b_scale` (white balance) and `exp_comp` (exposure) — flow all the way from the guest query through `readFrameImpl` into the converter. White balance is applied as a multiply on each RGB channel in the slow path. Exposure is applied in the fast path by scaling the luminance plane (`camera-format-converters.c:2145`). Because non-unity white balance forces the slow path, the common steady-state case (neutral white balance) stays on libyuv.
 
 ### 16.7.3 A Staging Buffer Per Client
 
-Both paths need scratch space — the I420 intermediate, the rotated copy, the rescaled copy. Rather than allocating per frame, each client owns a persistent `mStagingFramebuffer` whose pointer and size are passed into `convert_frame` via the `ClientFrame` struct (`camera-common.h:130`). `resize_staging` grows it only when a larger frame appears, so steady-state capture does no heap allocation in the hot path.
+Both paths need scratch space — the I420 intermediate, the rotated copy, the rescaled copy. Instead of allocating per frame, each client owns a persistent `mStagingFramebuffer` whose pointer and size are passed into `convert_frame` via the `ClientFrame` struct (`camera-common.h:130`). `resize_staging` grows it only when a larger frame appears, so steady-state capture does no heap allocation in the hot path.
 
 The convert_frame decision
 
@@ -398,17 +406,21 @@ int android_camera_sensors_get_coarse_orientation(int orientation) {
 }
 ```
 
-The capture backends pass each frame's `sensor_orientation` through `get_coarse_orientation` before handing it to `convert_frame` (see `camera-capture-linux.c:1041` and `camera-virtualscene.cpp:100`). Inside `convert_frame`, the final rotation is computed differently for front and back cameras (`camera-format-converters.c:2253`) so both produce an upright image regardless of how the emulated device is held. Frame timestamps are likewise adjusted by `android_sensors_get_time_offset()` before being sent (`camera-service.cpp:1230`), keeping camera timestamps on the same timeline as sensor events.
+The capture backends pass each frame's `sensor_orientation` through `get_coarse_orientation` before they hand it to `convert_frame` (see `camera-capture-linux.c:1041` and `camera-virtualscene.cpp:100`). Inside `convert_frame`, the final rotation is computed differently for front and back cameras (`camera-format-converters.c:2253`). This way both produce an upright image regardless of how the emulated device is held. Frame timestamps are likewise adjusted by `android_sensors_get_time_offset()` before they are sent (`camera-service.cpp:1230`). This keeps camera timestamps on the same timeline as sensor events.
 
 ## 16.9 Snapshots and Metrics
 
-Because the camera service is a qemud client, it participates in snapshotting. Each client class implements `save`/`load` (e.g. `SerialCameraClient::save` at `camera-service.cpp:1261`, `MinigbmCameraClient` at `camera-service.cpp:1742`), persisting whether capture was started and the active dimensions/format or stream list. On load, the client re-issues `startCapturingImpl` with the saved parameters so a restored snapshot resumes streaming transparently — for the minigbm client, it even rebuilds the stream table and restarts capture at the max resolution (`camera-service.cpp:1749`).
+Because the camera service is a qemud client, it takes part in snapshots. Each client class implements `save`/`load` (e.g. `SerialCameraClient::save` at `camera-service.cpp:1261`, `MinigbmCameraClient` at `camera-service.cpp:1742`). These methods persist whether capture was started and the active dimensions/format or stream list. On load, the client re-issues `startCapturingImpl` with the saved parameters. A restored snapshot then resumes streaming transparently. The minigbm client even rebuilds the stream table and restarts capture at the max resolution (`camera-service.cpp:1749`).
 
-The service also reports usage metrics. `camera-metrics.cpp` records a session start with source type, direction, and resolution (`startCapturingImpl`, `camera-service.cpp:940`), a start result code, and a frame count at session stop (`camera-service.cpp:991`). The `ClientStartResult` codes in `camera-common.h:240` — success, parameter mismatch, unknown pixel format, no conversion, out of memory — are exactly what gets reported and what the guest sees as the `ko:` reason string.
+The service also reports usage metrics. `camera-metrics.cpp` records a session start with source type, direction, and resolution (`startCapturingImpl`, `camera-service.cpp:940`), a start result code, and a frame count at session stop (`camera-service.cpp:991`). The `ClientStartResult` codes in `camera-common.h:240` are success, parameter mismatch, unknown pixel format, no conversion, and out of memory. These codes are exactly what the service reports, and what the guest sees as the `ko:` reason string.
 
 ## 16.10 Inside the Virtual Environment Renderer
 
-Section 16.5 treated `ver_create_scene` and `ver_render_view` as opaque calls. They are the public surface of `android/ver`, the virtual environment renderer that now sits under every non-webcam camera source and under the emulator's environment scene. It builds as its own CMake target, `virtual_environment_renderer` (`external/qemu/android/android-emu/android-emu.cmake:217`), publishes exactly one include directory (`android/ver/include`), and keeps the scene graph, the renderer backends, and the raw image sources private under `android/ver/src`. Everything inside is in `namespace android::ver`; the exported API is a flat set of `ver_*` free functions operating on opaque handles, which is what lets the camera's C-flavored code drive a C++ renderer. The boundary is not fully C yet — the header still passes `std::vector`, `std::function`, and `std::filesystem::path`, and only the webcam-enumeration block is wrapped in `ANDROID_BEGIN_HEADER` for C callers, with a standing `TODO(virtualscene-library): remove the namespace and other C++ usages` at `virtual_environment_renderer_types.h:35`.
+Section 16.5 treated `ver_create_scene` and `ver_render_view` as opaque calls. They are the public surface of `android/ver`, the virtual environment renderer that now sits under every non-webcam camera source and under the emulator's environment scene. It builds as its own CMake target, `virtual_environment_renderer` (`external/qemu/android/android-emu/android-emu.cmake:217`). It publishes exactly one include directory (`android/ver/include`). It keeps the scene graph, the renderer backends, and the raw image sources private under `android/ver/src`.
+
+Everything inside is in `namespace android::ver`. The exported API is a flat set of `ver_*` free functions that operate on opaque handles. This is what lets the camera's C-flavored code drive a C++ renderer.
+
+The boundary is not fully C yet. The header still passes `std::vector`, `std::function`, and `std::filesystem::path`. Only the webcam-enumeration block is wrapped in `ANDROID_BEGIN_HEADER` for C callers. A standing `TODO(virtualscene-library): remove the namespace and other C++ usages` is at `virtual_environment_renderer_types.h:35`.
 
 ### 16.10.1 Initialization and the ScenesManager
 
@@ -425,11 +437,11 @@ resourceBasePaths.push_back(resourcesBasePath);
 vulkanBasePath = launcherDir / "lib64" / "vulkan";
 ```
 
-Scene files are therefore resolved first against the AVD's own content directory and then against the emulator's `resources` folder, in that order. `ver_initialize` itself does nothing but hand those values to `ScenesManager` (`external/qemu/android/android-emu/android/ver/src/virtual_environment_renderer.cpp:284`), a class of statics that owns every `Scene` and every `RendererView` in the process (`ver/src/ScenesManager.h:36`). The handles the camera code carries around are just those objects' pointers, `reinterpret_cast` to opaque struct types at the API edge (`virtual_environment_renderer.cpp:303`).
+Scene files are therefore resolved first against the AVD's own content directory and then against the emulator's `resources` folder, in that order. `ver_initialize` itself does nothing but hand those values to `ScenesManager` (`external/qemu/android/android-emu/android/ver/src/virtual_environment_renderer.cpp:284`). It is a class of statics that owns every `Scene` and every `RendererView` in the process (`ver/src/ScenesManager.h:36`). The handles the camera code carries around are just those objects' pointers, `reinterpret_cast` to opaque struct types at the API edge (`virtual_environment_renderer.cpp:303`).
 
 ### 16.10.2 Scene Modes Decide How Much Renderer You Get
 
-A scene is described entirely by a `SceneConfig`: a mode and a string argument (`ver/include/ver/virtual_environment_renderer_types.h:64`). There are eight modes, and `modeFromString` is what maps the camera device-name strings from 16.1.1 onto them — `virtualscene` and `mesh3d` both become `Mesh3D` (`virtual_environment_renderer_types.h:102`).
+A scene is described entirely by a `SceneConfig`: a mode and a string argument (`ver/include/ver/virtual_environment_renderer_types.h:64`). There are eight modes. `modeFromString` maps the camera device-name strings from 16.1.1 onto them. For example, `virtualscene` and `mesh3d` both become `Mesh3D` (`virtual_environment_renderer_types.h:102`).
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/ver/include/ver/virtual_environment_renderer_types.h
@@ -445,15 +457,15 @@ enum class Mode {
 };
 ```
 
-A set of static predicates on the same struct turns the mode into behavior, and they are consulted from both the renderer and the UI: `modeRequiresRenderer` is true only for `Mesh3D`, `Image360`, and `StreetView` (`:174`); `modeSupportsSceneControls` matches that same trio (`:203`); `modeSupportsCameraTranslation` is `Mesh3D` alone (`:221`); and `modeHasDynamicContents` is `StreetView` alone (`:214`).
+A set of static predicates on the same struct turns the mode into behavior. Both the renderer and the UI consult them. `modeRequiresRenderer` is true only for `Mesh3D`, `Image360`, and `StreetView` (`:174`). `modeSupportsSceneControls` matches that same trio (`:203`). `modeSupportsCameraTranslation` is `Mesh3D` alone (`:221`). `modeHasDynamicContents` is `StreetView` alone (`:214`).
 
-`ScenesManager::renderView` (`virtual_environment_renderer.cpp:90`) branches on the same distinction. The three 3D modes ask the `Scene` for a renderable list and call `Renderer::render`; `ImageFile`, `VideoFile`, `Color`, and `Webcam` never touch a graphics context at all — they scale the scene's current RGBA overlay straight into the view's framebuffer with libyuv through `ImageScaler` (`virtual_environment_renderer.cpp:156`), using `AspectFitZoom` except for the 1x1 solid-color case, which uses `ScaleToFill`. That is why `-camera-back imagefile:picture.png` costs no GPU resources.
+`ScenesManager::renderView` (`virtual_environment_renderer.cpp:90`) branches on the same distinction. The three 3D modes ask the `Scene` for a renderable list and call `Renderer::render`. `ImageFile`, `VideoFile`, `Color`, and `Webcam` never touch a graphics context at all. They scale the scene's current RGBA overlay straight into the view's framebuffer with libyuv through `ImageScaler` (`virtual_environment_renderer.cpp:156`). They use `AspectFitZoom`, except for the 1x1 solid-color case, which uses `ScaleToFill`. That is why `-camera-back imagefile:picture.png` costs no GPU resources.
 
-Before any of that, `renderView` consults the view's cache: if the scene's version hash and frame time both match what the view last rendered, it invokes the finish callback and returns without re-rendering (`virtual_environment_renderer.cpp:106`). The hash is `mObjectsVersion` XORed with the scene's address (`ver/src/Scene.cpp:572`), and `mObjectsVersion` is bumped by every structural change — loading a poster, changing its scale, releasing resources.
+Before any of that, `renderView` consults the view's cache. If the scene's version hash and frame time both match what the view last rendered, it invokes the finish callback. Then it returns without rendering again (`virtual_environment_renderer.cpp:106`). The hash is `mObjectsVersion` XORed with the scene's address (`ver/src/Scene.cpp:572`). Every structural change bumps `mObjectsVersion`: a poster load, a scale change, or a resource release.
 
 ### 16.10.3 Two Renderer Backends, Vulkan First
 
-`Renderer::create` (`ver/src/Renderer.cpp:237`) is the whole backend policy. There is no feature flag and no AVD setting: Vulkan is tried first and GLES is the fallback, with an environment variable to force either one.
+`Renderer::create` (`ver/src/Renderer.cpp:237`) is the whole backend policy. There is no feature flag and no AVD setting. Vulkan is tried first and GLES is the fallback. An environment variable can force either one.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/ver/src/Renderer.cpp
@@ -468,7 +480,7 @@ if (vulkanRenderer) {
 dprint("VER: Could not create Vulkan renderer, falling back to GLES renderer.");
 ```
 
-`RendererVulkan` asks for API 1.3 (`ver/src/RendererVulkan.cpp:95`) and renders offscreen into a 1024x1024 color image using dynamic rendering rather than a swapchain. At the end of `render` it transitions that image to `TRANSFER_SRC`, copies it into a host-visible staging buffer with `vkCmdCopyImageToBuffer` (`RendererVulkan.cpp:1669`), maps it, and scales it into the `RendererView`'s RGBA8 cache (`RendererVulkan.cpp:1687`) — which is exactly the buffer `ver_render_view_get_framebuffer` hands to `convert_frame` back in 16.5.2.
+`RendererVulkan` asks for API 1.3 (`ver/src/RendererVulkan.cpp:95`) and renders offscreen into a 1024x1024 color image. It uses dynamic rendering rather than a swapchain. At the end of `render` it transitions that image to `TRANSFER_SRC`. Then it copies the image into a host-visible staging buffer with `vkCmdCopyImageToBuffer` (`RendererVulkan.cpp:1669`). It maps the buffer and scales the pixels into the `RendererView`'s RGBA8 cache (`RendererVulkan.cpp:1687`). This cache is exactly the buffer that `ver_render_view_get_framebuffer` hands to `convert_frame` back in 16.5.2.
 
 Neither backend links against a Vulkan loader. The headers are vendored under `ver/src/third_party/vulkan`, included with `VK_NO_PROTOTYPES` (`ver/src/VulkanDispatch.h:60`), and every entry point is resolved at runtime through `VulkanDispatchTable::initDriver` (`VulkanDispatch.h:162`). Driver discovery tries the emulator's own `lib64/vulkan` folder before the system search path, and prefers the bundled lavapipe software rasterizer over whatever the host installed:
 
@@ -488,7 +500,7 @@ if (!driverFolder.empty()) {
 }
 ```
 
-`tryLoad` accepts either `vkGetInstanceProcAddr` or the ICD-level `vk_icdGetInstanceProcAddr`, so a bare ICD with no loader in front of it still works. `initInstance` and `initDevice` then fill the rest of the table, with `vkCmdBeginRendering` falling back to its `KHR` alias when the driver only exposes the extension form.
+`tryLoad` accepts either `vkGetInstanceProcAddr` or the ICD-level `vk_icdGetInstanceProcAddr`, so a bare ICD with no loader in front of it still works. `initInstance` and `initDevice` then fill the rest of the table. `vkCmdBeginRendering` falls back to its `KHR` alias when the driver only exposes the extension form.
 
 ```mermaid
 flowchart TD
@@ -509,23 +521,29 @@ flowchart TD
 
 ### 16.10.4 Scene Objects, glTF, and Posters
 
-A `Scene` holds a list of `SceneObject`s (`ver/src/SceneObject.h:33`), each carrying a model transform, a list of `Renderable`s, a bounding box, and a virtual `setAnimationTime`. Two subclasses exist. `PosterSceneObject` is a unit quad clamped between a 20 cm minimum (`virtual_environment_renderer_types.h:43`) and the per-location maximum size (`ver/src/PosterSceneObject.h:28`). `MeshSceneObject` loads geometry from `.obj`, `.gltf`, or `.glb` (`ver/src/MeshSceneObject.cpp:958`), and also synthesizes the 64-segment UV sphere used by the panoramic modes (`MeshSceneObject.cpp:971`).
+A `Scene` holds a list of `SceneObject`s (`ver/src/SceneObject.h:33`). Each object has a model transform, a list of `Renderable`s, a bounding box, and a virtual `setAnimationTime`. Two subclasses exist. `PosterSceneObject` is a unit quad clamped between a 20 cm minimum (`virtual_environment_renderer_types.h:43`) and the per-location maximum size (`ver/src/PosterSceneObject.h:28`). `MeshSceneObject` loads geometry from `.obj`, `.gltf`, or `.glb` (`ver/src/MeshSceneObject.cpp:958`), and also synthesizes the 64-segment UV sphere used by the panoramic modes (`MeshSceneObject.cpp:971`).
 
-glTF 2.0 support is compiled in from a vendored tinygltf — `MeshSceneObject.cpp` is the single translation unit that defines `TINYGLTF_IMPLEMENTATION` (`MeshSceneObject.cpp:22`), and the build exposes it as an interface target that links the emulator's shared nlohmann JSON library rather than tinygltf's bundled copy (`external/qemu/android/third_party/CMakeLists.txt:124`). `loadGltf` (`MeshSceneObject.cpp:309`) reads the node hierarchy, skins with their inverse bind matrices, animation channels, and the `JOINTS_0`/`WEIGHTS_0` attributes of each skinned primitive. Playback is deliberately minimal: `setAnimationTime` (`MeshSceneObject.cpp:1034`) plays animation 0, loops it with `fmod` over the clip duration, skins the base vertices on the CPU, and pushes the result back with `Renderer::updateMesh`. `Scene::update` drives it with the scene's own frame time in seconds (`Scene.cpp:531`), so pausing animations from the UI freezes mesh animation and video playback together.
+glTF 2.0 support is compiled in from a vendored tinygltf. `MeshSceneObject.cpp` is the single translation unit that defines `TINYGLTF_IMPLEMENTATION` (`MeshSceneObject.cpp:22`). The build exposes tinygltf as an interface target that links the emulator's shared nlohmann JSON library rather than tinygltf's bundled copy (`external/qemu/android/third_party/CMakeLists.txt:124`). `loadGltf` (`MeshSceneObject.cpp:309`) reads the node hierarchy, skins with their inverse bind matrices, animation channels, and the `JOINTS_0`/`WEIGHTS_0` attributes of each skinned primitive.
+
+Playback is deliberately minimal. `setAnimationTime` (`MeshSceneObject.cpp:1034`) plays animation 0 and loops it with `fmod` over the clip duration. It skins the base vertices on the CPU and pushes the result back with `Renderer::updateMesh`. `Scene::update` drives it with the scene's own frame time in seconds (`Scene.cpp:531`). If animations are paused from the UI, mesh animation and video playback freeze together.
 
 Posters are a `Mesh3D`-only feature — `Scene::createPosterLocation` rejects every other mode outright (`Scene.cpp:600`), which is why `-virtualscene-poster` has no effect on an `imagefile` or `image360` camera.
 
 ### 16.10.5 Street View Scenes
 
-`Mode::StreetView` renders a live 360-degree panorama on the same sphere mesh as `Image360`. It is off unless `ANDROID_EMU_ENABLE_STREETVIEW` is `1` (`Scene.cpp:168`), and it is the one mode whose argument is not a file, so `configArgumentFileExists` returns true unconditionally for it (`Scene.cpp:128`). At scene creation the code reads the current emulated GPS position, resolves a Maps key from `android::location::MapsKey` (preferring the user key over the Android Studio one, `Scene.cpp:211`), and then walks three fallbacks: stitch tiles fetched through the Map Tiles API with `fetch360Panorama`, fall back to a single static Street View image with `downloadStaticImage`, and finally fall back to the bundled `default360.jpg` (`Scene.cpp:224`).
+`Mode::StreetView` renders a live 360-degree panorama on the same sphere mesh as `Image360`. It is off unless `ANDROID_EMU_ENABLE_STREETVIEW` is `1` (`Scene.cpp:168`). It is the one mode whose argument is not a file, so `configArgumentFileExists` returns true unconditionally for it (`Scene.cpp:128`). At scene creation the code reads the current emulated GPS position. It resolves a Maps key from `android::location::MapsKey` (it prefers the user key over the Android Studio one, `Scene.cpp:211`).
 
-The endpoints are collected as constants in `ver/src/StreetViewUtils.cpp:63` — session creation, tile and Maps metadata, tiles, static imagery — and responses are parsed with `nlohmann/json` (`StreetViewUtils.cpp:28`), the same shared library the tinygltf target links. Error logs run URLs through `redactApiKey` first, so a failed download never prints the caller's Maps key. Because `modeHasDynamicContents` is true for this mode alone, `VirtualSceneManager::onLocationChanged` re-creates the whole scene when the emulated location moves (`external/qemu/android/android-emu/android/virtualscene/VirtualSceneManager.cpp:949`).
+Then it works through three options in order. First it stitches tiles fetched through the Map Tiles API with `fetch360Panorama`. Next, it falls back to a single static Street View image with `downloadStaticImage`. Finally it falls back to the bundled `default360.jpg` (`Scene.cpp:224`).
+
+The endpoints are collected as constants in `ver/src/StreetViewUtils.cpp:63`. They cover session creation, tile and Maps metadata, tiles, and static imagery. Responses are parsed with `nlohmann/json` (`StreetViewUtils.cpp:28`), the same shared library that the tinygltf target links. Error logs run URLs through `redactApiKey` first, so a failed download never prints the caller's Maps key. Because `modeHasDynamicContents` is true for this mode alone, `VirtualSceneManager::onLocationChanged` re-creates the whole scene when the emulated location moves (`external/qemu/android/android-emu/android/virtualscene/VirtualSceneManager.cpp:949`).
 
 ### 16.10.6 What VirtualSceneManager Still Owns
 
-With rendering moved into `ver`, `VirtualSceneManager` is left as the policy layer for the single *environment* scene. It reads `environment.ini` through `avdInfo_getEnvironmentIni`, refuses any `version` other than 1, and parses `scene.mode` as `mode:argument` split on the first colon (`VirtualSceneManager.cpp:273`), with `background.blurAmount` and `background.enabled` controlling the transparent-display background view. If `ver_create_scene` fails for the configured mode, it retries with a hardcoded fallback of `Mode::ImageFile` plus `default.jpg` before giving up (`VirtualSceneManager.cpp:447`).
+With rendering moved into `ver`, `VirtualSceneManager` is left as the policy layer for the single *environment* scene. It reads `environment.ini` through `avdInfo_getEnvironmentIni` and refuses any `version` other than 1. It parses `scene.mode` as `mode:argument` split on the first colon (`VirtualSceneManager.cpp:273`). The values `background.blurAmount` and `background.enabled` control the transparent-display background view. If `ver_create_scene` fails for the configured mode, it retries with a hardcoded fallback of `Mode::ImageFile` plus `default.jpg` before it gives up (`VirtualSceneManager.cpp:447`).
 
-It also reference-counts scene users. `addSceneUser` (`VirtualSceneManager.cpp:699`) is what the `kEnvironment` camera path from 16.5.1 calls: on the first user it loads renderer resources, replays the stored poster locations and poster settings into the scene, and starts the 30 Hz scene update thread (`kUpdatePerSecond`, `VirtualSceneManager.cpp:63`); on the last `removeSceneUser` it unloads them again. Each transition also pushes `modeSupportsSceneControls(ver_scene_get_mode(...))` to the UI (`VirtualSceneManager.cpp:730`), which is how the extended controls know whether to offer scene navigation at all — and `modeSupportsCameraTranslation` further decides whether that navigation includes WASD translation or only rotation. Finally, `getEnvironment` (`VirtualSceneManager.cpp:976`) reflects the resolved configuration back out as `version`, `scene.mode`, `background.blurAmount`, and `background.enabled` key/value pairs for callers that want to read the environment without owning it.
+It also reference-counts scene users. `addSceneUser` (`VirtualSceneManager.cpp:699`) is what the `kEnvironment` camera path from 16.5.1 calls. On the first user it loads renderer resources, replays the stored poster locations and poster settings into the scene. It also starts the 30 Hz scene update thread (`kUpdatePerSecond`, `VirtualSceneManager.cpp:63`). On the last `removeSceneUser` it unloads them again.
+
+Each transition also pushes `modeSupportsSceneControls(ver_scene_get_mode(...))` to the UI (`VirtualSceneManager.cpp:730`). This is how the extended controls know whether to offer scene navigation at all. `modeSupportsCameraTranslation` further decides whether that navigation includes WASD translation or only rotation. Finally, `getEnvironment` (`VirtualSceneManager.cpp:976`) reflects the resolved configuration back out as `version`, `scene.mode`, `background.blurAmount`, and `background.enabled` key/value pairs. Callers can use these pairs to read the environment without owning it.
 
 ## 16.11 Try It
 
@@ -555,7 +573,7 @@ emulator -avd <name> -camera-back imagefile:/path/to/picture.png
 emulator -avd <name> -verbose -show-kernel 2>&1 | grep -i camera
 ```
 
-- Load a poster into the virtual scene to confirm the scene path is live, then open the camera app and tilt the device with the extended controls — the rendered view should track the gyroscope:
+- Load a poster into the virtual scene to confirm that the scene path is live. Then open the camera app and tilt the device with the extended controls. The rendered view should track the gyroscope:
 
 ```bash
 emulator -avd <name> -camera-back virtualscene -virtualscene-poster wall=/path/to/poster.png
@@ -563,16 +581,16 @@ emulator -avd <name> -camera-back virtualscene -virtualscene-poster wall=/path/t
 
 ## Summary
 
-- The camera subsystem comes up once at boot when `android_camera_service_init` (called from `external/qemu/vl.c`) constructs a `CameraService` that reads `hw_camera_back`/`hw_camera_front` and registers a `camera` qemud service.
-- Every frame source is a `CameraInfo` with a `CameraInfoVtbl`; there are two vtables — virtual scene and webcam capture — and seven `CameraSourceType` values, six of which (all but `kWebcam`) flow through the virtual scene renderer.
-- The guest talks to the host over the `camera` qemud channel using a length-prefixed `ok:`/`ko:` protocol; a parameterless connection is a factory client answering `list`, while a `name=`-bearing connection streams one camera.
-- Pixels reach the guest by one of three protocols chosen by feature flag and API level: SERIAL copies bytes through the pipe, GAS writes into the goldfish address space at a guest-supplied offset, and MINIGBM transfers into a virtio-gpu resource handle via gfxstream.
-- The virtual scene camera renders a 3D scene whose viewpoint is driven by `physicalModel_getTransform`, so the preview moves with the emulated accelerometer and gyroscope; failed scenes fall back to solid magenta.
-- Host webcam passthrough on Linux uses V4L2 with mmap/userptr/direct I/O, enumerating `/dev/video*` and preferring a native format close to the guest's YV12 need.
-- `convert_frame` takes a libyuv fast path (I420 intermediate) when white balance is neutral and the format pair is supported, otherwise a per-pixel slow path; a persistent staging buffer keeps the steady state allocation-free.
-- Orientation and timestamps are coupled to the sensors subsystem so frames stay upright and on the same clock as sensor events, and each client class implements save/load so capture survives snapshots.
-- Scene rendering lives in the `android/ver` library (`namespace android::ver`), reached through opaque `ver_*` handles: `ScenesManager` owns every `Scene` and `RendererView`, `SceneConfig::Mode` decides whether a mode needs a GPU at all, and `Renderer::create` picks Vulkan first and falls back to GLES, with `VER_RENDERER_BACKEND` forcing either.
-- `ver` vendors its own Vulkan headers and resolves entry points through a runtime dispatch table that searches the emulator's `lib64/vulkan` folder first, loads glTF 2.0 meshes and skinned animation via a vendored tinygltf, and fetches Street View panoramas over the Maps APIs; `VirtualSceneManager` is now just the policy layer that reads `environment.ini`, reference-counts users of the shared environment scene, and tells the UI which scene controls apply.
+- The camera subsystem comes up once at boot. `android_camera_service_init` (called from `external/qemu/vl.c`) constructs a `CameraService`. This object reads `hw_camera_back`/`hw_camera_front` and registers a `camera` qemud service.
+- Every frame source is a `CameraInfo` with a `CameraInfoVtbl`. There are two vtables: virtual scene and webcam capture. There are also seven `CameraSourceType` values. Six of them (all but `kWebcam`) flow through the virtual scene renderer.
+- The guest talks to the host over the `camera` qemud channel. The channel uses a length-prefixed `ok:`/`ko:` protocol. A parameterless connection is a factory client that answers `list`. A `name=`-bearing connection streams one camera.
+- Pixels reach the guest by one of three protocols. A feature flag and the API level decide which one. SERIAL copies bytes through the pipe. GAS writes into the goldfish address space at a guest-supplied offset. MINIGBM transfers into a virtio-gpu resource handle via gfxstream.
+- The virtual scene camera renders a 3D scene whose viewpoint is driven by `physicalModel_getTransform`. The preview therefore moves with the emulated accelerometer and gyroscope. Failed scenes fall back to solid magenta.
+- Host webcam passthrough on Linux uses V4L2 with mmap/userptr/direct I/O. It enumerates `/dev/video*` and prefers a native format close to the guest's YV12 need.
+- `convert_frame` takes a libyuv fast path (I420 intermediate) when white balance is neutral and the format pair is supported. Otherwise it takes a per-pixel slow path. A persistent staging buffer keeps the steady state allocation-free.
+- Orientation and timestamps are coupled to the sensors subsystem. This keeps frames upright and on the same clock as sensor events. Each client class implements save/load, so capture survives snapshots.
+- Scene rendering lives in the `android/ver` library (`namespace android::ver`). It is reached through opaque `ver_*` handles. `ScenesManager` owns every `Scene` and `RendererView`. `SceneConfig::Mode` decides whether a mode needs a GPU at all. `Renderer::create` picks Vulkan first and falls back to GLES. `VER_RENDERER_BACKEND` can force either one.
+- `ver` vendors its own Vulkan headers. It resolves entry points through a runtime dispatch table that searches the emulator's `lib64/vulkan` folder first. It loads glTF 2.0 meshes and skinned animation via a vendored tinygltf. It also fetches Street View panoramas over the Maps APIs. `VirtualSceneManager` is now just the policy layer. It reads `environment.ini`, reference-counts users of the shared environment scene, and tells the UI which scene controls apply.
 
 ### Key Source Files
 

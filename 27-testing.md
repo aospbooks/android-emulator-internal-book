@@ -1,8 +1,10 @@
 # Chapter 27: Testing
 
-The emulator is a large, multi-language host program — a fork of QEMU wrapped in a C++ control plane, a Vulkan/GLES rendering server, gRPC services, a Qt UI, and a guest-facing pipe layer. A bug in any one of those layers can silently corrupt a snapshot, drop a frame, or hang a boot. The codebase defends against that with three concentric rings of tests: googletest-based unit tests compiled alongside the binaries, host-side end-to-end tests written in pytest that launch a real emulator and drive it through ADB and gRPC, and Mobly snippet tests that run real Android APIs inside the guest under host control. All three rings are wired into the same Python build orchestrator that produces the SDK package, so a `ctest` failure or a failing e2e suite can break a presubmit just as readily as a compile error.
+The emulator is a large, multi-language host program. It is a fork of QEMU wrapped in a C++ control plane. It also has a Vulkan/GLES rendering server, gRPC services, a Qt UI, and a guest-facing pipe layer. A bug in any one of those layers can silently corrupt a snapshot, drop a frame, or hang a boot. The codebase defends against that with three concentric rings of tests.
 
-This chapter walks the test pyramid from the bottom up: how a `_unittest.cpp` file becomes a `ctest` target, how mock console agents let host code run without a real VM, how gfxstream renders against SwiftShader in a headless container, how the pytest harness boots an AVD and asserts on its behavior, and how Mobly bridges host Python to guest Java. Every mechanism here is grounded in a file you can open in the tree.
+The first ring is googletest-based unit tests compiled alongside the binaries. The second ring is host-side end-to-end tests written in pytest. They launch a real emulator and drive it through ADB and gRPC. The third ring is Mobly snippet tests that run real Android APIs inside the guest under host control. All three rings are wired into the same Python build orchestrator that produces the SDK package. So a `ctest` failure or a failing e2e suite can break a presubmit just as readily as a compile error.
+
+This chapter walks the test pyramid from the bottom up. First it shows how a `_unittest.cpp` file becomes a `ctest` target and how mock console agents let host code run without a real VM. Then it shows how gfxstream renders against SwiftShader in a headless container. Last, it shows how the pytest harness boots an AVD and asserts on its behavior, and how Mobly bridges host Python to guest Java. Every mechanism here is grounded in a file you can open in the tree.
 
 ---
 
@@ -12,13 +14,13 @@ The emulator's tests fall into three tiers, each with a different cost, scope, a
 
 The bottom tier is the largest: googletest/gmock unit tests that link against a single library, run in milliseconds, and never start a VM. There are dozens of `*_unittest.cpp` files under `external/qemu/android/android-emu/` alone, plus a parallel set in `hardware/google/gfxstream/`. They are compiled into per-component test executables, registered with CMake's `add_test`, and run by `ctest`.
 
-The middle tier is the gfxstream rendering tests. These still use googletest, but they pull in a software GPU (SwiftShader for both GLES and Vulkan) and an off-screen window, so they exercise the real rendering pipeline without hardware. They are registered in `hardware/google/gfxstream/host/CMakeLists.txt`, with source files spread across `host/` (e.g. `frame_buffer_unittest.cpp`, `vsync_thread_unittest.cpp`), `host/tests/` (GLES and GLSnapshot suites), `host/features/`, and `host/vulkan/`; they are registered with CMake's `gtest_discover_tests`.
+The middle tier is the gfxstream rendering tests. These still use googletest, but they pull in a software GPU (SwiftShader for both GLES and Vulkan) and an off-screen window. So they exercise the real rendering pipeline without hardware. They are registered in `hardware/google/gfxstream/host/CMakeLists.txt`. Their source files are spread across `host/` (e.g. `frame_buffer_unittest.cpp`, `vsync_thread_unittest.cpp`), `host/tests/` (GLES and GLSnapshot suites), `host/features/`, and `host/vulkan/`. They use CMake's `gtest_discover_tests` for registration.
 
-The top tier is the host-side end-to-end suite under `external/adt-infra/pytest/test_embedded/`. These tests launch an actual `emulator` process against a downloaded system image, wait for boot, then assert on guest behavior through ADB shell commands, the telnet console, gRPC, and Mobly RPC. They are slow (a single boot test can take minutes) and gate presubmit through named test suites.
+The top tier is the host-side end-to-end suite under `external/adt-infra/pytest/test_embedded/`. These tests launch an actual `emulator` process against a downloaded system image and wait for boot. Then they assert on guest behavior through ADB shell commands, the telnet console, gRPC, and Mobly RPC. They are slow (a single boot test can take minutes) and gate presubmit through named test suites.
 
 ### 27.1.1 Three rings, one orchestrator
 
-What ties the rings together is `external/qemu/android/build/python/cmake.py`, the Python entry point invoked by `external/qemu/android/rebuild.sh`. That file is a thin wrapper that imports and calls `external/qemu/android/build/python/aemu/cmake.py`, where `get_tasks()` assembles a list of `BuildTask` objects — compile, then `CTestTask`, then `IntegrationTestTask` — so the same command that builds the emulator also runs its tests.
+What ties the rings together is `external/qemu/android/build/python/cmake.py`, the Python entry point invoked by `external/qemu/android/rebuild.sh`. That file is a thin wrapper that imports and calls `external/qemu/android/build/python/aemu/cmake.py`. There, `get_tasks()` assembles a list of `BuildTask` objects: compile, then `CTestTask`, then `IntegrationTestTask`. So the same command that builds the emulator also runs its tests.
 
 The test pyramid, from cheapest to most expensive
 
@@ -46,13 +48,13 @@ flowchart TB
   E2E -->|"real emulator boot"| SLOW["minutes"]
 ```
 
-The number of unit-test targets dwarfs everything above it — there are over fifty `android_add_test` registrations across `external/qemu/android/` (in `android-emu-base`, `android-emu`, the `emu/*` component libraries, the gRPC services, the WebRTC stack, and bundled third-party libraries). That ratio is deliberate: the cheap tests catch most regressions, and the expensive e2e suite catches the integration bugs the unit tests structurally cannot.
+The number of unit-test targets dwarfs everything above it. There are over fifty `android_add_test` registrations across `external/qemu/android/`. They are in `android-emu-base`, `android-emu`, the `emu/*` component libraries, the gRPC services, the WebRTC stack, and bundled third-party libraries. That ratio is deliberate: the cheap tests catch most regressions, and the expensive e2e suite catches the integration bugs the unit tests structurally cannot.
 
 ## 27.2 Anatomy of a googletest Unit Test
 
 A unit test in this tree is an ordinary googletest file. It includes `<gtest/gtest.h>`, declares `TEST` or `TEST_F` cases, and uses `EXPECT_*`/`ASSERT_*` macros. The googletest and gmock sources are vendored in `external/googletest/` (pinned to a specific upstream commit in `external/googletest/METADATA`).
 
-A representative example is the ADB host-server test, which spins up a fake server thread and checks the exact bytes the emulator sends to register itself.
+A representative example is the ADB host-server test. It spins up a fake server thread and checks the exact bytes the emulator sends to register itself.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/AdbHostServer_unittest.cpp
@@ -68,7 +70,7 @@ TEST(AdbHostServer, notify) {
 }
 ```
 
-The string `0012host:emulator:7648` is the wire-format ADB request the emulator sends to `adb server` to announce its console port — a four-hex-digit length prefix followed by the command. Asserting on the literal bytes turns a protocol contract into a test that fails loudly if anyone changes the format.
+The string `0012host:emulator:7648` is the wire-format ADB request the emulator sends to `adb server` to announce its console port. The request has a four-hex-digit length prefix followed by the command. An assertion on the literal bytes turns a protocol contract into a test that fails loudly if anyone changes the format.
 
 ### 27.2.1 TestSystem and TestTempDir
 
@@ -85,7 +87,7 @@ TEST(AdbHostServer, getClientPortWithEnvironmentOverride) {
 }
 ```
 
-The companion `TestTempDir` (in `android/base/testing/TestTempDir.h`) creates a unique scratch directory and deletes it on destruction, and `TestEvent` provides a thread-synchronization primitive for tests that need to wait on an asynchronous callback. The header comment for `TestSystem` documents the path-resolution rules: relative paths resolve from a default current directory of `/home`, and the launcher, app-data, and home directories are not created automatically.
+The companion `TestTempDir` (in `android/base/testing/TestTempDir.h`) creates a unique scratch directory and deletes it on destruction. `TestEvent` provides a thread-synchronization primitive for tests that need to wait on an asynchronous callback. The header comment for `TestSystem` documents the path-resolution rules. Relative paths resolve from a default current directory of `/home`. The launcher, app-data, and home directories are not created automatically.
 
 ### 27.2.2 Fixtures and test suites
 
@@ -109,7 +111,7 @@ flowchart LR
 
 ## 27.3 Mocking the Console Agents
 
-Most host code does not call the VM directly; it goes through *console agents* — structs of function pointers (`QAndroidVmOperations`, `QAndroidEmulatorWindowAgent`, `QAndroidMultiDisplayAgent`, `QAndroidGlobalVarsAgent`, and more) obtained from `getConsoleAgents()`. In a real run those agents are backed by QEMU and the UI. In a unit test there is no QEMU and no UI, so the tests inject mock agents instead.
+Most host code does not call the VM directly. It goes through *console agents* — structs of function pointers (`QAndroidVmOperations`, `QAndroidEmulatorWindowAgent`, `QAndroidMultiDisplayAgent`, `QAndroidGlobalVarsAgent`, and more) obtained from `getConsoleAgents()`. In a real run those agents are backed by QEMU and the UI. In a unit test there is no QEMU and no UI, so the tests inject mock agents instead.
 
 The mocks live under `external/qemu/android/android-emu/android/emulation/testing/`. `MockAndroidVmOperations.h` generates gmock methods from the real struct signatures with a macro so the mock stays in sync with the interface it shadows.
 
@@ -129,7 +131,7 @@ public:
 };
 ```
 
-`decltype(QAndroidVmOperations::name)` reads the function-pointer type straight out of the real agent struct, so if someone changes the signature of `snapshotSave` the mock fails to compile rather than drifting out of sync.
+`decltype(QAndroidVmOperations::name)` reads the function-pointer type straight out of the real agent struct. So if someone changes the signature of `snapshotSave`, the mock fails to compile and does not drift out of sync.
 
 ### 27.3.1 Injecting mocks through a custom test main
 
@@ -146,7 +148,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-This `main` lives in the `android-emu-test-launcher` library (`external/qemu/android/android-emu/android-emu.cmake`, around line 610). Any test executable that needs working console agents links against that library, and its comment is explicit: *link against this library if you need to make any calls to getConsoleAgents()*. The factory also injects fakes for the AVD info, command-line options, and user config so that code which reads those globals does not dereference null.
+This `main` lives in the `android-emu-test-launcher` library (`external/qemu/android/android-emu/android-emu.cmake`, around line 610). Any test executable that needs working console agents links against that library. Its comment is explicit: *link against this library if you need to make any calls to getConsoleAgents()*. The factory also injects fakes for the AVD info, command-line options, and user config so that code which reads those globals does not dereference null.
 
 Console-agent injection in unit tests versus production
 
@@ -195,8 +197,8 @@ Three details matter here. The executable is marked `NODISTRIBUTE`, so test bina
 
 - An `ASAN_OPTIONS` value read from `external/qemu/android/asan_overrides`, so AddressSanitizer behaves uniformly across tests.
 - An `LLVM_PROFILE_FILE` set to `<test-name>.profraw`, which is what makes per-test coverage collection possible (see 27.9.1).
-- A `TIMEOUT` property of 600 seconds set on every registered test, which becomes the operative per-test limit (a per-test `TIMEOUT` property takes precedence over ctest's `--timeout` default; see 27.5).
-- Platform-specific Qt library search paths (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on Windows) so tests that touch the Qt UI can find the Qt runtime.
+- A `TIMEOUT` property of 600 seconds set on every registered test. It becomes the operative per-test limit (a per-test `TIMEOUT` property takes precedence over ctest's `--timeout` default; see 27.5).
+- Platform-specific Qt library search paths (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on Windows). Tests that touch the Qt UI use them to find the Qt runtime.
 
 ### 27.4.2 Bundling many test files into one target
 
@@ -208,7 +210,7 @@ android_add_test(TARGET android-emu_unittests
                  SRC ${android-emu_unittests_common})
 ```
 
-That one target links against `android-emu`, the `android-emu-test-launcher` (for the mock-injecting `main`), the protobuf library, and the cmdline/hardware testing helpers. The `android_copy_test_files` / `android_copy_test_dir` helpers stage golden images and a `test-sdk` directory next to the binary so tests can load fixtures relative to their working directory. There is a `-DENABLE_QT_TESTS=ON` guard: tests that depend on Qt are skipped unless that flag is set, because the build agents do not always have a display.
+That one target links against `android-emu`, the `android-emu-test-launcher` (for the mock-injecting `main`), the protobuf library, and the cmdline/hardware testing helpers. The `android_copy_test_files` / `android_copy_test_dir` helpers stage golden images and a `test-sdk` directory next to the binary so tests can load fixtures relative to their working directory. There is a `-DENABLE_QT_TESTS=ON` guard. Tests that depend on Qt are skipped unless that flag is set, because the build agents do not always have a display.
 
 ## 27.5 Running Unit Tests with ctest
 
@@ -227,7 +229,7 @@ Command(
 ).in_directory(self.destination).with_environment(env).run()
 ```
 
-The JUnit file is written to `testlogs/test_results.xml` under the distribution directory specifically so the *test scraper* on CI can find it. The `--timeout 180` value is only a default for tests that have no `TIMEOUT` property of their own; because `android_add_default_test_properties` sets a `TIMEOUT` property of 600 seconds on every registered test (see 27.4.1), and a per-test `TIMEOUT` property takes precedence over the `--timeout` default, the effective per-test limit here is 600 seconds, not 180.
+The JUnit file is written to `testlogs/test_results.xml` under the distribution directory specifically so the *test scraper* on CI can find it. The `--timeout 180` value is only a default for tests that have no `TIMEOUT` property of their own. `android_add_default_test_properties` sets a `TIMEOUT` property of 600 seconds on every registered test (see 27.4.1). A per-test `TIMEOUT` property takes precedence over the `--timeout` default. So the effective per-test limit here is 600 seconds, not 180.
 
 ### 27.5.1 Retry-and-report on failure
 
@@ -244,7 +246,7 @@ except CommandFailedException:
     ).in_directory(self.destination).with_environment(env).run()
 ```
 
-`--rerun-failed` reuses ctest's record of the previous run, and `--output-on-failure` dumps each failing test's stdout/stderr inline. This second pass is about diagnosability, not flakiness masking — the build still fails, but the logs now contain the failure details rather than a bare pass/fail count.
+`--rerun-failed` reuses ctest's record of the previous run, and `--output-on-failure` dumps each failing test's stdout/stderr inline. This second pass is about diagnosability, not flakiness masking. The build still fails, but the logs now contain the failure details rather than a bare pass/fail count.
 
 ### 27.5.2 The SwiftShader software-GPU environment
 
@@ -287,7 +289,7 @@ sequenceDiagram
 
 ## 27.6 gfxstream Rendering Tests
 
-gfxstream — the GLES/Vulkan rendering server in `hardware/google/gfxstream/` — has its own test suite that goes beyond pure unit testing: it renders real frames against a software GPU and compares results. The tests are gated behind the `ENABLE_VKCEREAL_TESTS` CMake option and registered with `gtest_discover_tests` (which queries each binary for its individual `TEST` cases) via a local `discover_tests` helper.
+gfxstream is the GLES/Vulkan rendering server in `hardware/google/gfxstream/`. It has its own test suite that goes beyond pure unit testing. The suite renders real frames against a software GPU and compares results. The tests are gated behind the `ENABLE_VKCEREAL_TESTS` CMake option. A local `discover_tests` helper registers them with `gtest_discover_tests` (which queries each binary for its individual `TEST` cases).
 
 ```cmake
 # Source: hardware/google/gfxstream/host/CMakeLists.txt
@@ -307,7 +309,9 @@ target_link_libraries(
 discover_tests(OpenglRender_unittests)
 ```
 
-That file registers five test executables via `discover_tests`. Three of them are the GLES suites: `gfxstream_backend_unittests` (backend and feature-flag tests), `OpenglRender_unittests` (basic GLES rendering), and `OpenglRender_snapshot_unittests` (a large suite that saves and restores GL state across snapshots — `tests/GLSnapshot*_unittest.cpp`). The other two cover the Vulkan path: `Vulkan_unittests` (which ships `vulkan/testdata/*.png` golden images, copied to `testdata` at build time) and `Vulkan_integrationtests`. The snapshot tests are the most valuable here because GL state restoration is exactly the kind of thing a unit test cannot reach but an integration-style render-and-compare test can.
+That file registers five test executables via `discover_tests`. Three of them are the GLES suites. `gfxstream_backend_unittests` covers backend and feature-flag tests. `OpenglRender_unittests` covers basic GLES rendering. `OpenglRender_snapshot_unittests` is a large suite that saves and restores GL state across snapshots (`tests/GLSnapshot*_unittest.cpp`).
+
+The other two cover the Vulkan path: `Vulkan_unittests` (which ships `vulkan/testdata/*.png` golden images, copied to `testdata` at build time) and `Vulkan_integrationtests`. The snapshot tests are the most valuable here, because GL state restoration is exactly the kind of thing a unit test cannot reach but an integration-style render-and-compare test can.
 
 ### 27.6.1 The graphics test environment
 
@@ -323,11 +327,11 @@ bool IsGraphicsTestEnvironmentProvidingVulkanDriver();
 }  // namespace gfxstream
 ```
 
-`SetupGraphicsTestEnvironment` initializes the software driver the test will render against, and `IsGraphicsTestEnvironmentProvidingVulkanDriver` lets a test skip itself when no Vulkan driver is available. The `FrameBufferTest` fixture in `frame_buffer_unittest.cpp` pulls in `OSWindow`, `SampleApplication`, and `ShaderUtils` from `host/testlibs/` to create an actual rendering target. On Linux the `OpenglRender_unittests` target additionally links `x11_testing_support` and is compiled with `GFXSTREAM_HAS_X11=1` so it can create the off-screen X11 surface even in a headless container.
+`SetupGraphicsTestEnvironment` initializes the software driver the test will render against, and `IsGraphicsTestEnvironmentProvidingVulkanDriver` lets a test skip itself when no Vulkan driver is available. The `FrameBufferTest` fixture in `frame_buffer_unittest.cpp` pulls in `OSWindow`, `SampleApplication`, and `ShaderUtils` from `host/testlibs/` to create an actual rendering target. On Linux the `OpenglRender_unittests` target additionally links `x11_testing_support` and is compiled with `GFXSTREAM_HAS_X11=1`. This lets it create the off-screen X11 surface even in a headless container.
 
 ### 27.6.2 Why software rendering matters for CI
 
-Because the tests run against SwiftShader rather than a vendor GPU, they are deterministic and reproducible on any build machine — the same code path the `CTestTask` SwiftShader environment sets up for `android-emu`'s graphics tests. That determinism is what lets golden-image comparison tests (render a known scene, compare pixels to a checked-in `.png`) be trusted; a real GPU's driver-specific rounding would make pixel-exact golden tests fragile.
+Because the tests run against SwiftShader rather than a vendor GPU, they are deterministic and reproducible on any build machine. This is the same code path that the `CTestTask` SwiftShader environment sets up for `android-emu`'s graphics tests. That determinism is what lets golden-image comparison tests (render a known scene, compare pixels to a checked-in `.png`) be trusted. A real GPU's driver-specific rounding would make pixel-exact golden tests fragile.
 
 gfxstream rendering test against a software GPU
 
@@ -363,7 +367,9 @@ py.run([
 ])
 ```
 
-The task runs in two modes. When a distribution directory exists it mimics CI (`run_from_dist`); otherwise it tests a local build (`run_from_build`), first checking that `emulator` and `fishtank` binaries are actually installed and raising `EmulatorDistributionNotFoundException` if not. It also refuses to run when cross-compiling (you cannot run an aarch64 emulator on an x86 build host) and, on macOS, skips entirely if `system_profiler` reports no attached display. In `cmake.py` the `IntegrationTestTask` is registered but `.enable(False)` — the inline comment says *Enable the integration tests by default once they are stable enough* — so the full e2e run is opt-in for local builds while CI drives `run_tests.py` directly.
+The task runs in two modes. When a distribution directory exists, it mimics CI (`run_from_dist`). Otherwise it tests a local build (`run_from_build`). It first checks that `emulator` and `fishtank` binaries are actually installed. If they are not, it raises `EmulatorDistributionNotFoundException`. It also refuses to run when the build is a cross-compile (you cannot run an aarch64 emulator on an x86 build host).
+
+On macOS, it also skips entirely if `system_profiler` reports no attached display. In `cmake.py` the `IntegrationTestTask` is registered but `.enable(False)`. The inline comment says *Enable the integration tests by default once they are stable enough*. So the full e2e run is opt-in for local builds while CI drives `run_tests.py` directly.
 
 ### 27.7.1 A real boot test
 
@@ -379,7 +385,7 @@ async def has_network(adb):
     return False
 ```
 
-The harness wraps the running emulator in helper classes under `external/adt-infra/pytest/test_embedded/src/emu/`. `BaseEmulator` (in `src/emu/emulator.py`) exposes `launch`, `wait_for_boot`, `has_booted`, `console`, `start_activity`, and a `mobly` accessor, while the concrete `Emulator` subclass actually spawns the process and waits for ADB to come online. Tests request these through pytest fixtures — `avd`, `adb_shell`, `emulator_log`, `mbs` — defined in `tests/fixtures/emulator_fixtures.py` and `tests/fixtures/mobly_fixtures.py`, with the emulator-level fixtures scoped to `module` so one boot is shared across the tests in a file.
+The harness wraps the running emulator in helper classes under `external/adt-infra/pytest/test_embedded/src/emu/`. `BaseEmulator` (in `src/emu/emulator.py`) exposes `launch`, `wait_for_boot`, `has_booted`, `console`, `start_activity`, and a `mobly` accessor. The concrete `Emulator` subclass actually spawns the process and waits for ADB to come online. Tests request these through pytest fixtures: `avd`, `adb_shell`, `emulator_log`, and `mbs`. The fixtures are defined in `tests/fixtures/emulator_fixtures.py` and `tests/fixtures/mobly_fixtures.py`. The emulator-level fixtures are scoped to `module`, so one boot is shared across the tests in a file.
 
 ### 27.7.2 Suites, markers, and AVD configurations
 
@@ -395,7 +401,7 @@ What actually runs in presubmit is controlled by JSON suite definitions in `exte
 }
 ```
 
-The `-m adb` flag selects tests carrying the `adb` pytest marker. Markers are registered programmatically in `tests/fixtures/markers.py` — `adb`, `boot`, `console`, `graphics`, `snapshot`, `multidisplay`, `e2e`, `slow`, `flaky`, and OS-skip markers like `skipos`, among many others. A suite can pin a specific API level, attach launch flags (for example `-feature GuestAngle -feature VulkanNativeSwapchain` to force a particular graphics path), and run the same tests across multiple device shapes (foldable, resizable, tablet, wear, XR). `test_runner.py` reads the JSON, matches enabled suites against the requested `--test_suite` name regex, and launches an emulator per `avd_config` before handing control to pytest.
+The `-m adb` flag selects tests that carry the `adb` pytest marker. Markers are registered programmatically in `tests/fixtures/markers.py` — `adb`, `boot`, `console`, `graphics`, `snapshot`, `multidisplay`, `e2e`, `slow`, `flaky`, and OS-skip markers like `skipos`, among many others. A suite can pin a specific API level. It can attach launch flags (for example `-feature GuestAngle -feature VulkanNativeSwapchain` to force a particular graphics path). It can also run the same tests across multiple device shapes (foldable, resizable, tablet, wear, XR). `test_runner.py` reads the JSON, matches enabled suites against the requested `--test_suite` name regex, and launches an emulator per `avd_config` before handing control to pytest.
 
 End-to-end test flow from suite definition to assertion
 
@@ -431,7 +437,7 @@ public class WifiManagerSnippet implements Snippet {
 }
 ```
 
-Each `@Rpc`-annotated method becomes a callable RPC. The snippet classes cover networking, Bluetooth (`BluetoothAdapterSnippet`, GATT client/server), telephony and SMS, audio, media, storage, accounts, and notifications — each wrapping the corresponding `android.*` manager so a host test can drive a real framework API on the guest.
+Each `@Rpc`-annotated method becomes a callable RPC. The snippet classes cover networking, Bluetooth (`BluetoothAdapterSnippet`, GATT client/server), telephony and SMS, audio, media, storage, accounts, and notifications. Each class wraps the corresponding `android.*` manager. So a host test can drive a real framework API on the guest.
 
 ### 27.8.1 Host-to-guest RPC plumbing
 
@@ -485,7 +491,7 @@ flowchart LR
 
 ## 27.9 Build-Tooling Integration and Coverage
 
-All of the above is orchestrated by the Python build system, so tests are not a separate step you remember to run — they are tasks in the build graph. `external/qemu/android/rebuild.sh` finds the bundled Python interpreter and hands off to `build/python/cmake.py`, a thin wrapper that imports `aemu/cmake.py` where `get_tasks()` assembles the task list including `CTestTask`, `EmugenTestTask`, `GenEntriesTestTask`, `CoverageReportTask`, and `IntegrationTestTask`. The `--test_jobs` argument (defaulting to the host CPU count) controls test parallelism, and `run_tests` is automatically disabled when cross-compiling.
+All of the above is orchestrated by the Python build system. So tests are not a separate step you remember to run: they are tasks in the build graph. `external/qemu/android/rebuild.sh` finds the bundled Python interpreter and hands off to `build/python/cmake.py`, a thin wrapper that imports `aemu/cmake.py`. There, `get_tasks()` assembles the task list including `CTestTask`, `EmugenTestTask`, `GenEntriesTestTask`, `CoverageReportTask`, and `IntegrationTestTask`. The `--test_jobs` argument (which defaults to the host CPU count) controls test parallelism, and `run_tests` is automatically disabled when cross-compiling.
 
 ### 27.9.1 Code coverage
 
@@ -505,7 +511,7 @@ It locates `llvm-profdata` and `llvm-cov` from the version-matched Clang in `pre
 
 ### 27.9.2 The acceleration sanity check
 
-A lightweight smoke test that complements the unit tests is `AccelerationCheckTask`, which simply runs the shipped `emulator-check` tool to confirm the build can detect a hypervisor on the host.
+A lightweight smoke test that complements the unit tests is `AccelerationCheckTask`. It simply runs the shipped `emulator-check` tool to confirm the build can detect a hypervisor on the host.
 
 ```python
 # Source: external/qemu/android/build/python/aemu/tasks/unit_tests.py
@@ -516,7 +522,7 @@ class AccelerationCheckTask(BuildTask):
                  / "emulator-check", "accel"]).run()
 ```
 
-`emulator-check` is built from `external/qemu/android/emu/check/` (its own logic — `hypervisor_check.cpp`, `hw_gpu_check.cpp`, `disk_space_check.cpp` — has a `compatibility_check_unittest.cpp` of its own). In the current `cmake.py` this task is commented out of the default task list, but it remains the canonical one-line proof that an emulator binary is functional on a given host.
+`emulator-check` is built from `external/qemu/android/emu/check/` (its own logic — `hypervisor_check.cpp`, `hw_gpu_check.cpp`, `disk_space_check.cpp` — has a `compatibility_check_unittest.cpp` of its own). In the current `cmake.py` this task is commented out of the default task list. But it remains the canonical one-line proof that an emulator binary is functional on a given host.
 
 The build graph: where tests sit among the tasks
 
@@ -539,7 +545,9 @@ flowchart TB
 
 ## 27.10 emu-dev-cli: Chasing Flaky Tests and Running the Verifier
 
-Everything above is invoked either by hand or by the build orchestrator. A newer developer-facing wrapper sits on top of both: `emu-dev-cli`, a Python CLI under `hardware/google/aemu/tools/emu-dev-cli/`. It fetches prebuilt binaries, creates AVDs, launches them, and — the parts that belong in this chapter — chases a flaky CI test down to a local reproduction and drives the verifier suites. `src/__main__.py` is a plain `argparse` program whose top-level subcommands are registered one per module at lines 69 to 79 — `crash`, `create`, `cts`, `docs`, `fetch-build`, `flakiness`, `init`, `launch`, `source-directory`, and `update`, plus the installer's own. It ships as a small C++ launcher (`src/launcher.cpp`) that locates the compiled Python beside itself, so the Bazel `cc_binary` at `BUILD.bazel:37` produces one installable executable that carries the `py_binary` backend as data.
+Everything above is invoked either by hand or by the build orchestrator. A newer developer-facing wrapper sits on top of both: `emu-dev-cli`, a Python CLI under `hardware/google/aemu/tools/emu-dev-cli/`. It fetches prebuilt binaries, creates AVDs, and launches them. It also chases a flaky CI test down to a local reproduction and drives the verifier suites. Those last two functions belong in this chapter.
+
+`src/__main__.py` is a plain `argparse` program. Its top-level subcommands are registered one per module at lines 69 to 79. They are `crash`, `create`, `cts`, `docs`, `fetch-build`, `flakiness`, `init`, `launch`, `source-directory`, and `update`, plus the installer's own. It ships as a small C++ launcher (`src/launcher.cpp`) that locates the compiled Python beside itself. So the Bazel `cc_binary` at `BUILD.bazel:37` produces one installable executable that carries the `py_binary` backend as data.
 
 ### 27.10.1 The flakiness suite
 
@@ -584,9 +592,11 @@ else:
     flags.append("--runs_per_test=1")
 ```
 
-`--runs_per_test=N` is ctest's `--repeat` equivalent in Bazel: it runs the same test N times in one invocation and fails if any run fails, which is how an intermittent failure is converted into a deterministic one. The wall-clock budget scales with the sanitizer, because a TSAN binary is several times slower than a plain one: `calculate_stress_test_timeout` (`ath_api.py:130`) computes 180 seconds plus 12 seconds per iteration, multiplied by 3.5 for a TSAN target and 2.5 for ASAN, with a 300-second floor.
+`--runs_per_test=N` is ctest's `--repeat` equivalent in Bazel. It runs the same test N times in one invocation and fails if any run fails. This is how an intermittent failure is converted into a deterministic one. The wall-clock budget scales with the sanitizer, because a TSAN binary is several times slower than a plain one. `calculate_stress_test_timeout` (`ath_api.py:130`) computes 180 seconds plus 12 seconds per iteration. It multiplies the result by 3.5 for a TSAN target and 2.5 for ASAN, with a 300-second floor.
 
-`triage` (`src/commands/flakiness/triage.py`) is the step that decides whether a flake is already known. For each record returned by `query_ath_flaky_tests` it asks `BuganizerClient.find_existing_open_bug` whether component 1016880 already has an open issue naming that target; if so the record is marked `EXISTING_BUG_OPEN` and nothing is filed. Otherwise it writes a markdown report per test into the triage sandbox directory and files a bug only when `--auto-file` is passed. `fix` (`src/commands/flakiness/fix.py`) closes the loop from the other end: `resolve_test_target_for_bug` recovers the Bazel target out of the bug's `[Flaky Test] <target> failing on ...` title, runs the same stress command with a default of 50 iterations, and records a CL upload step only when that run passed (`fix.py:206`).
+`triage` (`src/commands/flakiness/triage.py`) is the step that decides whether a flake is already known. For each record returned by `query_ath_flaky_tests` it asks `BuganizerClient.find_existing_open_bug` whether component 1016880 already has an open issue that names that target. If so, the record is marked `EXISTING_BUG_OPEN` and nothing is filed. Otherwise it writes a markdown report per test into the triage sandbox directory and files a bug only when `--auto-file` is passed.
+
+`fix` (`src/commands/flakiness/fix.py`) closes the loop from the other end. `resolve_test_target_for_bug` recovers the Bazel target out of the bug's `[Flaky Test] <target> failing on ...` title. Then it runs the same stress command with a default of 50 iterations. It records a CL upload step only when that run passed (`fix.py:206`).
 
 ### 27.10.2 ETS-Verifier and remote execution
 
@@ -601,7 +611,7 @@ else:
     target = f"@goldfish_test//xts:ets-verifier.{subname}"
 ```
 
-`--module` is matched against the `run_*.sh` scripts in the verifier directory — exact name first, then `<name>_test`, then a substring match — so `--module vibrations` resolves without anyone maintaining a module list (`cts.py:325` to `:346`). Adding `--rbe` swaps the local run for Remote Build Execution:
+`--module` is matched against the `run_*.sh` scripts in the verifier directory. The match tries the exact name first, then `<name>_test`, then a substring match. So `--module vibrations` resolves without anyone maintaining a module list (`cts.py:325` to `:346`). Add `--rbe` to swap the local run for Remote Build Execution:
 
 ```python
 # Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/cts.py
@@ -613,9 +623,9 @@ cmd = [
 ]
 ```
 
-Three details in that command line are worth reading. `--nocache_test_results` is there because a verifier module drives a real booted emulator, so a cached pass would assert nothing about the current build. `--flaky_test_attempts=8` concedes that UI automation against a booting device carries the same flake profile the pytest tier in 27.7 lives with. And `--config=ants` together with `--config=sponge` publishes the run to the same result services the CI bots report into, rather than leaving it local to the developer's machine.
+Three details in that command line are worth reading. `--nocache_test_results` is there because a verifier module drives a real booted emulator, so a cached pass would assert nothing about the current build. `--flaky_test_attempts=8` concedes that UI automation against a booting device carries the same flake profile the pytest tier in 27.7 lives with. And `--config=ants` together with `--config=sponge` publishes the run to the same result services the CI bots report into. It does not leave the run local to the developer's machine.
 
-Two further flags support writing the automation rather than running it. `--test-builder-mode` runs `@goldfish_test//xts:cts-verifier-automation-dev` with `--dev_mode` and a per-module script name, an interactive session for building a module's automation; `--collect-tests` drives the same target with `--collect_tests` to scroll the CtsVerifier activity list on a live device and refresh the coverage matrix (`cts.py:302` to `:320`).
+Two further flags support writing the automation rather than running it. `--test-builder-mode` runs `@goldfish_test//xts:cts-verifier-automation-dev` with `--dev_mode` and a per-module script name. This gives an interactive session to build a module's automation. `--collect-tests` drives the same target with `--collect_tests`. The goal is to scroll the CtsVerifier activity list on a live device and refresh the coverage matrix (`cts.py:302` to `:320`).
 
 ## 27.11 Try It
 
@@ -673,17 +683,17 @@ python3 external/adt-infra/pytest/test_embedded/run_tests.py \
 
 ## Summary
 
-- The emulator's tests form a three-tier pyramid: googletest unit tests (fast, no VM), gfxstream rendering tests against a software GPU, and pytest end-to-end tests that boot a real emulator.
+- The emulator's tests form a three-tier pyramid. The tiers are googletest unit tests (fast, no VM), gfxstream rendering tests against a software GPU, and pytest end-to-end tests that boot a real emulator.
 - Unit tests stay hermetic through `TestSystem`/`TestTempDir` (a fake filesystem and environment) and through mock console agents injected by a custom `main` in the `android-emu-test-launcher`.
 - gmock mocks like `MockAndroidVmOperations` derive their method signatures from the real agent structs via `decltype`, so the interface and its mock cannot silently drift apart.
 - `android_add_test` in `android.cmake` registers each test with `add_test`, emits per-test JUnit XML, builds at `-O0`, and applies uniform ASan, coverage, timeout, and Qt-path properties.
-- `CTestTask` runs everything under `ctest` with a 600-second per-test timeout (the `TIMEOUT` property set by `android_add_default_test_properties` overrides the 180 s `--timeout` default), sets up a SwiftShader software GPU for graphics tests, and reruns failures with full output for diagnosability.
+- `CTestTask` runs everything under `ctest` with a 600-second per-test timeout. It also sets up a SwiftShader software GPU for graphics tests and reruns failures with full output for diagnosability. The `TIMEOUT` property set by `android_add_default_test_properties` overrides the 180 s `--timeout` default.
 - gfxstream tests render real frames against SwiftShader (deterministic and headless) and include a large GL-snapshot save/restore suite gated by `ENABLE_VKCEREAL_TESTS`.
-- The pytest e2e suite boots AVDs described by JSON suite configs, selects tests by marker (`-m adb`, `-m graphics`, etc.), and asserts on guest behavior through ADB, the console, and gRPC.
-- Mobly Bundled Snippets expose guest Android APIs as `@Rpc` methods so host Python tests can drive real framework calls and verify results over logcat or UiAutomator.
+- The pytest e2e suite boots AVDs described by JSON suite configs. It selects tests by marker (`-m adb`, `-m graphics`, etc.). It asserts on guest behavior through ADB, the console, and gRPC.
+- Mobly Bundled Snippets expose guest Android APIs as `@Rpc` methods. So host Python tests can drive real framework calls and verify results over logcat or UiAutomator.
 - Tests are tasks in the Python build graph driven by `rebuild.sh` and `cmake.py`, including coverage merging via `llvm-profdata`/`llvm-cov` from per-test `.profraw` files.
-- `emu-dev-cli flakiness` closes the loop on a flaky CI test: it aggregates Android Test Hub invocations into per-test failure rates, fetches the logs, reproduces locally with `--runs_per_test` plus the failing bot's sanitizer config, deduplicates against Buganizer component 1016880, and verifies a fix over 50 stress iterations before preparing a Gerrit CL.
-- `emu-dev-cli cts run-cts-verifier` resolves Tradefed `ets-verifier` Bazel targets by default; `--rbe` runs them on Remote Build Execution with `--nocache_test_results` and `--flaky_test_attempts=8`, and `--test-builder-mode` / `--collect-tests` exist for authoring new module automation rather than running it.
+- `emu-dev-cli flakiness` closes the loop on a flaky CI test. It aggregates Android Test Hub invocations into per-test failure rates and fetches the logs. It reproduces it locally with `--runs_per_test` plus the failing bot's sanitizer config. It deduplicates against Buganizer component 1016880. It verifies a fix over 50 stress iterations before it prepares a Gerrit CL.
+- `emu-dev-cli cts run-cts-verifier` resolves Tradefed `ets-verifier` Bazel targets by default. `--rbe` runs them on Remote Build Execution with `--nocache_test_results` and `--flaky_test_attempts=8`. `--test-builder-mode` and `--collect-tests` exist to write new module automation, not to run it.
 
 ### Key Source Files
 

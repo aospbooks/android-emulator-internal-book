@@ -1,14 +1,20 @@
 # Chapter 26: Cuttlefish and crosvm
 
-Every other chapter in this book follows the QEMU-based Android Emulator: a single `emulator` process that hosts the QEMU machine, the `android-emu` control plane, and the UI all under one roof, talking to the guest through Goldfish pipes. Cuttlefish is the other virtual device that Google ships, and it is built on a different foundation. Instead of QEMU it uses crosvm, the Rust virtual machine monitor from the ChromeOS project. Instead of one fat process it uses a fleet of small host processes orchestrated by an init-style supervisor. Instead of Goldfish pipes it talks to the guest over virtio-vsock and virtio-console. Cuttlefish is the reference virtual device for AOSP development and continuous integration; it is what runs on Google's server farms when a CL has to be booted on a real Android build.
+Every other chapter in this book follows the QEMU-based Android Emulator. It is a single `emulator` process that hosts the QEMU machine, the `android-emu` control plane, and the UI all under one roof. It talks to the guest through Goldfish pipes. Cuttlefish is the other virtual device that Google ships, and it is built on a different foundation. Instead of QEMU it uses crosvm, the Rust virtual machine monitor from the ChromeOS project. 
 
-This chapter walks the Cuttlefish host stack as a sibling to the emulator. We follow the launch path from `cvd start` through `assemble_cvd` and `run_cvd` into the crosvm command line, study the vsock-based control plane and the per-device process supervisor, and then look at the three big components Cuttlefish shares with the QEMU emulator: gfxstream for graphics, RootCanal for Bluetooth, and a WebRTC streamer for the display. Throughout, we contrast each design decision against the equivalent in `external/qemu`. The Cuttlefish host source lives under `device/google/cuttlefish/`; the guest payload under `device/google/cuttlefish/guest/`; the shared graphics backend under `hardware/google/gfxstream/`.
+Instead of one fat process it uses a fleet of small host processes orchestrated by an init-style supervisor. Instead of Goldfish pipes it talks to the guest over virtio-vsock and virtio-console. Cuttlefish is the reference virtual device for AOSP development and continuous integration. It is what runs on Google's server farms when a CL has to be booted on a real Android build.
+
+This chapter walks the Cuttlefish host stack as a sibling to the emulator. We follow the launch path from `cvd start` through `assemble_cvd` and `run_cvd` into the crosvm command line. We study the vsock-based control plane and the per-device process supervisor. Then we look at the three big components that Cuttlefish shares with the QEMU emulator. They are gfxstream for graphics, RootCanal for Bluetooth, and a WebRTC streamer for the display.
+
+Throughout, we contrast each design decision against the equivalent in `external/qemu`. The Cuttlefish host source lives under `device/google/cuttlefish/`; the guest payload under `device/google/cuttlefish/guest/`; the shared graphics backend under `hardware/google/gfxstream/`.
 
 ---
 
 ## 26.1 Two Virtual Devices, One Android
 
-Android has two officially supported "virtual devices": the QEMU-based emulator (codename Goldfish/Ranchu) and Cuttlefish (codename Vsoc, "virtual system on chip", which is why the device targets are named `vsoc_x86_64`, `vsoc_arm64`, and so on; see the directory list under `device/google/cuttlefish/`). They exist for different audiences. The emulator is a developer-facing product with a polished UI, snapshots, and an extended-controls panel; Cuttlefish is an infrastructure-facing reference device designed to boot arbitrary AOSP builds at scale on Linux servers, with no hard dependency on a graphical desktop.
+Android has two officially supported "virtual devices". They are the QEMU-based emulator (codename Goldfish/Ranchu) and Cuttlefish. The codename of Cuttlefish is Vsoc, "virtual system on chip". This is why the device targets have the names `vsoc_x86_64`, `vsoc_arm64`, and so on (see the directory list under `device/google/cuttlefish/`).
+
+The two exist for different audiences. The emulator is a developer-facing product with a polished UI, snapshots, and an extended-controls panel. Cuttlefish is an infrastructure-facing reference device. It is designed to boot arbitrary AOSP builds at scale on Linux servers, with no hard dependency on a graphical desktop.
 
 The two share a surprising amount of code. RootCanal (the virtual Bluetooth controller) is integrated into both — its own README states "RootCanal is natively integrated in the Cuttlefish and Goldfish emulators" (`tools/rootcanal/README.md`). gfxstream is the host-side graphics renderer for both. The netsim packet hub and the modem simulator are likewise reused. What differs is the substrate: the virtual machine monitor, the guest transport, and the process model.
 
@@ -27,11 +33,13 @@ The following table maps the major subsystems.
 | Bluetooth | RootCanal | RootCanal (shared) |
 | Display surface | Qt UI / gRPC | WebRTC streamer to a browser |
 
-The crosvm `VmManager` even keeps a QEMU backend alongside it: `device/google/cuttlefish/host/libs/vm_manager/qemu_manager.cpp` is a sibling of `crosvm_manager.cpp`, and `GetVmManager` in `vm_manager.cpp` picks between `kCrosvm`, `kQemu`, and `kGem5` modes. Crosvm is the default and the one this chapter follows.
+The crosvm `VmManager` even keeps a QEMU backend alongside it. The file `device/google/cuttlefish/host/libs/vm_manager/qemu_manager.cpp` is a sibling of `crosvm_manager.cpp`, and `GetVmManager` in `vm_manager.cpp` picks between `kCrosvm`, `kQemu`, and `kGem5` modes. Crosvm is the default and the one this chapter follows.
 
 ### 26.1.2 Why crosvm instead of QEMU
 
-Crosvm is a from-scratch VMM written in Rust, originally for running Linux apps on ChromeOS. For Cuttlefish it offers three properties that matter at infrastructure scale: a small, memory-safe, security-sandboxed codebase (crosvm runs each virtio device in a seccomp jail); a clean separation of devices into out-of-process "vhost-user" backends; and first-class support for virtio-vsock and the rutabaga/gfxstream graphics path. The cost is that crosvm does not present a single integrated UI the way the emulator's Qt frontend does, which is exactly why Cuttlefish layers a separate WebRTC streamer on top.
+Crosvm is a from-scratch VMM written in Rust, originally for running Linux apps on ChromeOS. For Cuttlefish it offers three properties that matter at infrastructure scale. The first is a small, memory-safe, security-sandboxed codebase (crosvm runs each virtio device in a seccomp jail). The second is a clean separation of devices into out-of-process "vhost-user" backends. The third is first-class support for virtio-vsock and the rutabaga/gfxstream graphics path.
+
+The cost is that crosvm does not present a single integrated UI, as the emulator's Qt frontend does. This is exactly why Cuttlefish layers a separate WebRTC streamer on top.
 
 ```mermaid
 flowchart LR
@@ -56,7 +64,9 @@ flowchart LR
 
 ## 26.2 The Host Orchestration Stack
 
-A Cuttlefish device is not one process. Booting it walks through three host binaries, each with a narrow job, and ends with a supervisor babysitting a dozen or more children. The entry point a user types is `cvd` (or the legacy `launch_cvd`), which is shipped in the separate `android-cuttlefish` host-package repository — `device/google/cuttlefish/README.md` directs all host-tooling work there. The in-tree `host/commands/start/` binary is the classic launcher and the clearest illustration of the handoff, so we follow it.
+A Cuttlefish device is not one process. The boot of a device walks through three host binaries, each with a narrow job. It ends with a supervisor that babysits a dozen or more children. 
+
+The entry point a user types is `cvd` (or the legacy `launch_cvd`). It is shipped in the separate `android-cuttlefish` host-package repository. The file `device/google/cuttlefish/README.md` directs all host-tooling work there. The in-tree `host/commands/start/` binary is the classic launcher and the clearest illustration of the handoff, so we follow it.
 
 ### 26.2.1 start: claim instances, fork assemble_cvd then run_cvd
 
@@ -68,7 +78,7 @@ std::string AssemblerPath() { return SubtoolPath("assemble_cvd"); }
 std::string RunnerPath() { return SubtoolPath("run_cvd"); }
 ```
 
-The launcher first runs `assemble_cvd`, feeding it the available-files report on stdin and reading its stdout to discover the generated config path.
+The launcher first runs `assemble_cvd`. It feeds the process the available-files report on stdin and reads its stdout to discover the generated config path.
 
 ```cpp
 // Source: device/google/cuttlefish/host/commands/start/main.cc
@@ -84,7 +94,7 @@ for (const auto& line : android::base::Tokenize(assembler_output, "\n")) {
 }
 ```
 
-Once the config is written and the `CUTTLEFISH_CONFIG_FILE` environment variable points at it, the launcher forks one `run_cvd` per instance and waits for all of them.
+After the config is written, the `CUTTLEFISH_CONFIG_FILE` environment variable points at it. Then the launcher forks one `run_cvd` per instance and waits for all of them.
 
 ```cpp
 // Source: device/google/cuttlefish/host/commands/start/main.cc
@@ -107,7 +117,7 @@ The emulator has no equivalent standalone phase; option parsing, AVD-config load
 
 ### 26.2.3 run_cvd: the per-device init
 
-`device/google/cuttlefish/host/commands/run_cvd/main.cc` is described by its own README as an "Init-style manager for processes relating to running a particular Cuttlefish Android device" (`device/google/cuttlefish/host/commands/run_cvd/README.md`). It uses the Fruit dependency-injection framework to assemble a graph of `CommandSource` objects — each one knows how to build the command line for one host process — and then hands the resulting commands to a process monitor.
+`device/google/cuttlefish/host/commands/run_cvd/main.cc` is described by its own README as an "Init-style manager for processes relating to running a particular Cuttlefish Android device" (`device/google/cuttlefish/host/commands/run_cvd/README.md`). It uses the Fruit dependency-injection framework to assemble a graph of `CommandSource` objects. Each object knows how to build the command line for one host process. Then it hands the resulting commands to a process monitor.
 
 The wiring lives in `runCvdComponent`, and its ordering comment is a window into the lifecycle dependencies.
 
@@ -146,7 +156,7 @@ sequenceDiagram
 
 ## 26.3 The CommandSource Graph and the Process Monitor
 
-`run_cvd` does not start crosvm directly. It collects a list of `MonitorCommand` objects from every enabled `CommandSource` and gives them to a `ProcessMonitor`, which forks them, supervises them, and restarts the ones marked restartable. The list is long because every Cuttlefish "device feature" — the modem simulator, the GNSS proxy, the tombstone receiver, the WebRTC streamer, the kernel-log monitor, RootCanal, and crosvm itself — is its own process.
+`run_cvd` does not start crosvm directly. It collects a list of `MonitorCommand` objects from every enabled `CommandSource` and gives them to a `ProcessMonitor`. The monitor forks them, supervises them, and restarts the ones marked restartable. The list is long because every Cuttlefish "device feature" is its own process. The features are the modem simulator, the GNSS proxy, the tombstone receiver, the WebRTC streamer, the kernel-log monitor, RootCanal, and crosvm itself.
 
 ### 26.3.1 Collecting commands
 
@@ -227,7 +237,7 @@ void AddVhostUser(const std::string& type, const std::string& socket_path,
 
 ### 26.4.2 The crosvm run command
 
-`StartCommands` opens with `crosvm run` and a control socket, optionally wrapping the binary in a process-restarter so a guest-requested reboot re-execs crosvm instead of killing the device.
+`StartCommands` opens with `crosvm run` and a control socket. Optionally, it wraps the binary in a process-restarter, so a guest-requested reboot re-execs crosvm and does not kill the device.
 
 ```cpp
 // Source: device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp
@@ -243,7 +253,7 @@ crosvm_cmd.Cmd().AddParameter("--mem=", instance.memory_mb());
 CF_EXPECT(crosvm_cmd.AddCpus(instance.cpus(), instance.vcpu_config_path()));
 ```
 
-From there it appends memory, CPUs, disks (`AddReadWriteDisk` / `AddReadOnlyDisk`, capped at `VmManager::kMaxDisks` which is 3), the GPU device, the vsock device, twenty virtio-console ports, audio, optional virtiofs, the pflash on x86, and finally the bootloader BIOS — which the code comments insist must be the last parameter.
+From there it appends memory, CPUs, disks (`AddReadWriteDisk` / `AddReadOnlyDisk`, capped at `VmManager::kMaxDisks` which is 3), the GPU device, the vsock device, and twenty virtio-console ports. It also appends audio, optional virtiofs, and the pflash on x86. Finally it appends the bootloader BIOS. The code comments insist that this must be the last parameter.
 
 ```cpp
 // Source: device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp
@@ -287,7 +297,7 @@ flowchart TB
 
 ## 26.5 vsock and virtio-console: The Guest Transport
 
-This is the deepest break from the emulator. The QEMU emulator multiplexes almost all host/guest communication over Goldfish "qemu pipes" — a custom virtual device where the guest opens `/dev/qemu_pipe` and names a service (`qemud:`, sensors, GPS); `external/qemu/android/android-emu/android/` is full of `qemud` references (`hw-sensors.cpp`, `car.cpp`, `qemu-setup.cpp`). Cuttlefish uses two upstream virtio transports instead: virtio-vsock for socket-style services and virtio-console for stream-style links.
+This is the deepest break from the emulator. The QEMU emulator multiplexes almost all host/guest communication over Goldfish "qemu pipes". A qemu pipe is a custom virtual device where the guest opens `/dev/qemu_pipe` and names a service (`qemud:`, sensors, GPS). The directory `external/qemu/android/android-emu/android/` is full of `qemud` references (`hw-sensors.cpp`, `car.cpp`, `qemu-setup.cpp`). Cuttlefish uses two upstream virtio transports instead: virtio-vsock for socket-style services and virtio-console for stream-style links.
 
 ### 26.5.1 Each device gets a vsock CID
 
@@ -309,7 +319,7 @@ if (instance.vsock_guest_cid() >= 2) {
 }
 ```
 
-The CID comes straight from the per-instance config (`vsock_guest_cid()` in `cuttlefish_config_instance.cpp`). Because each instance has its own CID, multiple Cuttlefish devices coexist on one host without port collisions — a key requirement for the CI use case where dozens run side by side.
+The CID comes straight from the per-instance config (`vsock_guest_cid()` in `cuttlefish_config_instance.cpp`). Because each instance has its own CID, multiple Cuttlefish devices coexist on one host without port collisions. This is a key requirement for the CI use case where dozens run side by side.
 
 ### 26.5.2 socket_vsock_proxy bridges vsock to TCP
 
@@ -352,7 +362,7 @@ For services that are naturally byte streams rather than sockets, Cuttlefish use
 static const int kDefaultNumHvcs = 20;
 ```
 
-`StartCommands` wires each port to a host FIFO with `AddHvcReadOnly`, `AddHvcReadWrite`, or — for disabled features — `AddHvcSink`, a do-nothing port that keeps the PCI numbering stable. The kernel log goes out `/dev/hvc0` to `kernel_log_monitor`, logcat out `/dev/hvc2`, and keymint, gatekeeper, oemlock, and the sensors control/data channels each get their own port. The code even asserts the total adds up.
+`StartCommands` wires each port to a host FIFO with `AddHvcReadOnly`, `AddHvcReadWrite`, or — for disabled features — `AddHvcSink`, a do-nothing port that keeps the PCI numbering stable. The kernel log goes out `/dev/hvc0` to `kernel_log_monitor`, and logcat goes out `/dev/hvc2`. Keymint, gatekeeper, oemlock, and the sensors control/data channels each get their own port. The code even asserts the total adds up.
 
 ```cpp
 // Source: device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp
@@ -439,7 +449,7 @@ case ActionsCase::kSnapshotTake: {
 }
 ```
 
-This is structurally similar in purpose to the emulator's telnet/gRPC console (Chapter on the control plane), but the mechanics differ: the emulator console runs in-process and exposes a text/gRPC protocol; Cuttlefish's launcher monitor is a separate process boundary using a compact binary protocol over a UNIX socket, with the heavy lifting of suspend/snapshot delegated downward to crosvm's own control socket.
+This is structurally similar in purpose to the emulator's telnet/gRPC console (Chapter on the control plane). The mechanics differ. The emulator console runs in-process and exposes a text/gRPC protocol. Cuttlefish's launcher monitor is a separate process boundary. It uses a compact binary protocol over a UNIX socket. The heavy lifting of suspend/snapshot is delegated downward to crosvm's own control socket.
 
 ```mermaid
 sequenceDiagram
@@ -463,7 +473,7 @@ sequenceDiagram
 
 ## 26.7 Shared Graphics: gfxstream on crosvm
 
-Cuttlefish renders guest graphics with gfxstream, the same host renderer the emulator uses, but it plugs in through crosvm's virtio-gpu and rutabaga path rather than living inside the VMM. The connecting API is `stream_renderer_init` and friends, declared in `hardware/google/gfxstream/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h`; the context types like `gfxstream-gles` and `gfxstream-vulkan` are selected by crosvm (see 26.7.1).
+Cuttlefish renders guest graphics with gfxstream, the same host renderer the emulator uses. It plugs in through crosvm's virtio-gpu and rutabaga path. It does not live inside the VMM. The connecting API is `stream_renderer_init` and friends, declared in `hardware/google/gfxstream/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h`; the context types like `gfxstream-gles` and `gfxstream-vulkan` are selected by crosvm (see 26.7.1).
 
 ### 26.7.1 Configuring the GPU device
 
@@ -493,7 +503,7 @@ CF_EXPECT(gfxstream_transport == "virtio-gpu-asg" ||
 
 ### 26.7.2 vhost-user GPU as its own process
 
-When `enable_gpu_vhost_user()` is set, Cuttlefish runs the GPU renderer as a separate crosvm `device gpu` process and connects the main VM to it over a vhost-user socket. This is the cleanest expression of crosvm's out-of-process device model: the renderer crash-isolates from the VMM.
+When `enable_gpu_vhost_user()` is set, Cuttlefish runs the GPU renderer as a separate crosvm `device gpu` process. It connects the main VM to it over a vhost-user socket. This is the cleanest expression of crosvm's out-of-process device model: the renderer crash-isolates from the VMM.
 
 ```cpp
 // Source: device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp
@@ -508,7 +518,7 @@ The device process exposes a Wayland socket for frames (`--wayland-sock=`), whic
 
 ### 26.7.3 Contrast with the emulator
 
-In the emulator, gfxstream is loaded in-process and frames flow to the Qt UI through the in-process renderer; the emulator does not need a vhost-user boundary because there is only one process. Cuttlefish's split lets the renderer run, crash, and be restarted independently, and lets a headless server omit any local display entirely.
+In the emulator, gfxstream is loaded in-process and frames flow to the Qt UI through the in-process renderer. The emulator does not need a vhost-user boundary because there is only one process. Cuttlefish's split lets the renderer run, crash, and be restarted independently, and lets a headless server omit any local display entirely.
 
 ```mermaid
 flowchart LR
@@ -549,7 +559,9 @@ rootcanal.AddParameter("--hci_port=", config_.rootcanal_hci_port());
 rootcanal.AddParameter("--link_port=", config_.rootcanal_link_port());
 ```
 
-`RootCanalBinary()` resolves to the host package's `rootcanal` (`device/google/cuttlefish/host/libs/config/known_paths.cpp`). The guest's HCI traffic can reach RootCanal via one of two independent host-side mechanisms: either through `/dev/hvc5` (the bt_fifo), where a `BluetoothConnector` (`TcpConnector`) binary relays the HCI stream directly to RootCanal's HCI TCP port; or through a vsock connection, where the `socket_vsock_proxy` (`hci_vsock_proxy`) in `root_canal.cpp` bridges vsock to that same TCP port. The `socket_vsock_proxy` relays described in 26.5 also serve the test, link, and link-BLE RootCanal ports independently of the hvc5 path.
+`RootCanalBinary()` resolves to the host package's `rootcanal` (`device/google/cuttlefish/host/libs/config/known_paths.cpp`). The guest's HCI traffic can reach RootCanal via one of two independent host-side mechanisms. The first is `/dev/hvc5` (the bt_fifo). There, a `BluetoothConnector` (`TcpConnector`) binary relays the HCI stream directly to RootCanal's HCI TCP port. The second is a vsock connection. There, the `socket_vsock_proxy` (`hci_vsock_proxy`) in `root_canal.cpp` bridges vsock to that same TCP port.
+
+The `socket_vsock_proxy` relays described in 26.5 also serve the test, link, and link-BLE RootCanal ports independently of the hvc5 path.
 
 ### 26.8.2 The modem simulator
 
@@ -565,7 +577,7 @@ A headless Cuttlefish on a server still needs a screen, so the display is delive
 
 ### 26.9.1 The streamer reads frames and forwards input
 
-The WebRTC binary takes a frame server fd plus input fds (touch, mouse, keyboard, rotary), connecting the host renderer's output and the browser's input to the guest's virtio input devices.
+The WebRTC binary takes a frame server fd plus input fds (touch, mouse, keyboard, rotary). It connects the host renderer's output and the browser's input to the guest's virtio input devices.
 
 ```cpp
 // Source: device/google/cuttlefish/host/commands/run_cvd/launch/streamer.cpp
@@ -574,7 +586,7 @@ cmd.AddParameter("-keyboard_fd=", ...);
 cmd.AddParameter("-frame_server_fd=", frames_server_);
 ```
 
-Inside the streamer, frames are pulled through a `WaylandScreenConnector` — the same Wayland socket the gfxstream GPU device process exposes (26.7.2) — and pushed into the WebRTC video track (`device/google/cuttlefish/host/frontend/webrtc/main.cpp`).
+Inside the streamer, frames are pulled through a `WaylandScreenConnector` from the same Wayland socket that the gfxstream GPU device process exposes (26.7.2). Then they are pushed into the WebRTC video track (`device/google/cuttlefish/host/frontend/webrtc/main.cpp`).
 
 ### 26.9.2 The operator and signaling server
 
@@ -590,7 +602,7 @@ if (instance_.start_webrtc_sig_server()) {
 }
 ```
 
-The operator code lives under `device/google/cuttlefish/host/frontend/webrtc_operator/` and `operator_proxy/`. The webrtc README notes that "some functionality is crosvm-specific and some is QEMU-specific" — meaning the streaming frontend is shared, but a few paths only light up under one VMM. This is the cleanest illustration of Cuttlefish's philosophy: the substrate is crosvm, but the user-visible surfaces (graphics, input, streaming) are factored to be VMM-agnostic.
+The operator code lives under `device/google/cuttlefish/host/frontend/webrtc_operator/` and `operator_proxy/`. The webrtc README notes that "some functionality is crosvm-specific and some is QEMU-specific". This means the streaming frontend is shared, but a few paths only light up under one VMM. This is the cleanest illustration of Cuttlefish's philosophy: the substrate is crosvm, but the user-visible surfaces (graphics, input, streaming) are factored to be VMM-agnostic.
 
 ```mermaid
 flowchart LR
@@ -617,11 +629,11 @@ Pulling the threads together, three differences define Cuttlefish relative to th
 
 The differences are VMM, transport, and process model.
 
-1. **crosvm versus QEMU.** Cuttlefish drives crosvm via `CrosvmManager::StartCommands`, building a `crosvm run` command line with out-of-process vhost-user devices and a seccomp sandbox. The emulator embeds QEMU in the `emulator` process. Both implement the same `VmManager` abstraction in Cuttlefish's tree, so QEMU remains a selectable backend, but crosvm is the default and the focus of new work.
+1. **crosvm versus QEMU.** Cuttlefish drives crosvm via `CrosvmManager::StartCommands`. It builds a `crosvm run` command line with out-of-process vhost-user devices and a seccomp sandbox. The emulator embeds QEMU in the `emulator` process. Both implement the same `VmManager` abstraction in Cuttlefish's tree, so QEMU remains a selectable backend. Crosvm is the default and the focus of new work.
 2. **vsock and virtio-console versus Goldfish pipes.** Cuttlefish uses upstream virtio transports — a per-instance vsock CID plus twenty fixed virtio-console ports — bridged to host TCP tools by `socket_vsock_proxy`. The emulator uses the custom Goldfish/qemu-pipe device and its `qemud:` multiplexer. Vsock makes many independent instances trivial to host; Goldfish pipes are tightly coupled to QEMU.
 3. **A host orchestration fleet versus one process.** Cuttlefish boots through `cvd`/`start` -> `assemble_cvd` -> `run_cvd`, and `run_cvd` supervises a dozen-plus host processes through a `ProcessMonitor`, controlled over a launcher monitor socket. The emulator is a single self-contained binary. The fleet model is what lets crosvm crash-isolate devices and what makes Cuttlefish suitable for large-scale CI.
 
-What stays the same is everything above the substrate: the Android guest image, gfxstream graphics, RootCanal Bluetooth, the modem simulator, netsim, and a WebRTC display surface. Cuttlefish is best understood not as a different emulator but as a different way of hosting the same Android virtual device.
+What stays the same is everything above the substrate. This is the Android guest image, gfxstream graphics, RootCanal Bluetooth, the modem simulator, netsim, and a WebRTC display surface. Cuttlefish is best understood not as a different emulator but as a different way of hosting the same Android virtual device.
 
 ```mermaid
 flowchart TB
@@ -651,22 +663,22 @@ These commands assume an AOSP checkout with a `vsoc_x86_64` (or similar) lunch t
 - Read the twenty fixed virtio-console assignments and the disk/HVC accounting: open `device/google/cuttlefish/host/libs/vm_manager/vm_manager.h` and find `kDefaultNumHvcs`
 - See exactly how the crosvm command line is built: open `device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp` and read `StartCommands`
 - Confirm KVM is available before launching: `grep -c -w "vmx\|svm" /proc/cpuinfo` (per `device/google/cuttlefish/README.md`)
-- Launch a device and watch the three-stage handoff in the logs: run `launch_cvd` (or `cvd start`) and observe `assemble_cvd` then `run_cvd` in the launcher log
+- Launch a device with `launch_cvd` (or `cvd start`). Observe `assemble_cvd` and then `run_cvd` in the launcher log to watch the three-stage handoff
 - Drive the launcher control plane directly: `cvd status` (status action), `stop_cvd` (the `kStop` action over the monitor socket)
 - Inspect the generated config that `assemble_cvd` emitted, including `vsock_guest_cid`: open the `cuttlefish_config.json` printed by the launcher
 - Open the WebRTC display in a browser by pointing it at the signaling server's `-http_server_port` value
 
 ## Summary
 
-- Cuttlefish is Android's reference virtual device for AOSP development and CI; it is built on crosvm rather than the QEMU used by the emulator, but boots the same Android guest.
-- The host boot path is three binaries: `start`/`cvd` claims instances, `assemble_cvd` (`device/google/cuttlefish/host/commands/assemble_cvd/`) compiles flags and images into `cuttlefish_config.json` and disks, and `run_cvd` (`.../run_cvd/`) is the per-device init.
-- `run_cvd` builds a Fruit-injected graph of `CommandSource` objects — one per host process — and hands them to a `ProcessMonitor` that forks and supervises crosvm plus a dozen device processes.
-- `CrosvmManager::StartCommands` (`device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp`) builds a `crosvm run` command via `CrosvmBuilder`, adding memory, CPUs, up to three disks, a vsock device, twenty virtio-console ports, the GPU, and a seccomp sandbox.
-- The guest transport is upstream virtio: a per-instance vsock CID and fixed virtio-console (HVC) ports, with `socket_vsock_proxy` bridging vsock to host TCP — replacing the emulator's Goldfish qemu-pipe mechanism.
-- The launcher exposes a control plane over a UNIX monitor socket using a one-byte `LauncherAction` enum (`stop`, `status`, `restart`, `powerwash`) plus protobuf-carried extended actions (suspend, resume, snapshot, screen recording).
-- gfxstream renders graphics through crosvm's virtio-gpu/rutabaga path, often as an isolated vhost-user GPU process exposing a Wayland frames socket; RootCanal, the modem simulator, and netsim are shared verbatim with the emulator.
-- The display is delivered over WebRTC from a host streamer to a browser, with an operator/signaling server, making headless server-side Cuttlefish practical.
-- Cuttlefish differs from the emulator in three places — VMM (crosvm vs QEMU), transport (vsock vs Goldfish pipes), and process model (a supervised host fleet vs one process) — while sharing the guest image and the high-level virtual hardware.
+- Cuttlefish is Android's reference virtual device for AOSP development and CI. It is built on crosvm rather than the QEMU used by the emulator, but it boots the same Android guest.
+- The host boot path is three binaries. `start`/`cvd` claims instances. `assemble_cvd` (`device/google/cuttlefish/host/commands/assemble_cvd/`) compiles flags and images into `cuttlefish_config.json` and disks. `run_cvd` (`.../run_cvd/`) is the per-device init.
+- `run_cvd` builds a Fruit-injected graph of `CommandSource` objects, one per host process. It hands them to a `ProcessMonitor` that forks and supervises crosvm plus a dozen device processes.
+- `CrosvmManager::StartCommands` (`device/google/cuttlefish/host/libs/vm_manager/crosvm_manager.cpp`) builds a `crosvm run` command via `CrosvmBuilder`. The command adds memory, CPUs, up to three disks, a vsock device, twenty virtio-console ports, the GPU, and a seccomp sandbox.
+- The guest transport is upstream virtio: a per-instance vsock CID and fixed virtio-console (HVC) ports. `socket_vsock_proxy` bridges vsock to host TCP. This replaces the emulator's Goldfish qemu-pipe mechanism.
+- The launcher exposes a control plane over a UNIX monitor socket. It uses a one-byte `LauncherAction` enum (`stop`, `status`, `restart`, `powerwash`) plus protobuf-carried extended actions (suspend, resume, snapshot, screen recording).
+- gfxstream renders graphics through crosvm's virtio-gpu/rutabaga path, often as an isolated vhost-user GPU process. That process exposes a Wayland frames socket. RootCanal, the modem simulator, and netsim are shared verbatim with the emulator.
+- The display is delivered over WebRTC from a host streamer to a browser, with an operator/signaling server. This makes headless server-side Cuttlefish practical.
+- Cuttlefish differs from the emulator in three places. These are VMM (crosvm vs QEMU), transport (vsock vs Goldfish pipes), and process model (a supervised host fleet vs one process). It shares the guest image and the high-level virtual hardware.
 
 ### Key Source Files
 

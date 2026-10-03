@@ -1,8 +1,12 @@
 # Chapter 5: CPU Acceleration
 
-The Android Emulator runs a full guest operating system, and the single biggest factor in how fast that guest feels is whether its virtual CPU runs on a hardware hypervisor or under software interpretation. When the host CPU architecture matches the guest (an x86_64 guest on an x86_64 host, an arm64 guest on an Apple Silicon Mac) the emulator hands each virtual CPU directly to the kernel's virtualization extensions and the guest executes at close to native speed. When that match is impossible, QEMU falls back to its Tiny Code Generator (TCG), which translates guest instructions into host instructions block by block. Everything between those two extremes is plumbing: detecting what the host can do, choosing a backend, and wiring QEMU's accelerator interface to the right kernel driver or framework.
+The Android Emulator runs a full guest operating system. The single biggest factor in how fast that guest feels is whether its virtual CPU runs on a hardware hypervisor or under software interpretation.
 
-This chapter follows that plumbing from the moment the emulator launcher probes the host, through the `CpuAccelerator` capability check in `android-emu`, into QEMU's `configure_accelerator` machinery, and down into each per-platform backend: KVM on Linux, Hypervisor.framework (HVF) on macOS, the Windows Hypervisor Platform (WHPX) and the Android Emulator Hypervisor Driver (AEHD, formerly gvm) on Windows, and the TCG interpreter that backs everything else. It closes with how guest and host CPU architectures interact, which combinations get hardware acceleration, and which fall back to translation.
+If the host CPU architecture matches the guest, the emulator hands each virtual CPU directly to the kernel's virtualization extensions. Examples are an x86_64 guest on an x86_64 host and an arm64 guest on an Apple Silicon Mac. The guest then executes at close to native speed. When that match is impossible, QEMU falls back to its Tiny Code Generator (TCG), which translates guest instructions into host instructions block by block. Everything between those two extremes is plumbing. This plumbing detects what the host can do, chooses a backend, and connects QEMU's accelerator interface to the right kernel driver or framework.
+
+This chapter follows that plumbing in order. It starts when the emulator launcher probes the host. Then it goes through the `CpuAccelerator` capability check in `android-emu` and into QEMU's `configure_accelerator` machinery. Last, it goes down into each per-platform backend.
+
+These are KVM on Linux and Hypervisor.framework (HVF) on macOS. On Windows they are the Windows Hypervisor Platform (WHPX) and the Android Emulator Hypervisor Driver (AEHD, formerly gvm). The TCG interpreter backs everything else. It closes with how guest and host CPU architectures interact, which combinations get hardware acceleration, and which fall back to translation.
 
 ---
 
@@ -10,9 +14,11 @@ This chapter follows that plumbing from the moment the emulator launcher probes 
 
 Every virtual CPU in the emulator runs in one of two fundamentally different ways, and the choice is made once, at machine start.
 
-The first model is hardware virtualization. The host CPU has extensions — Intel VT-x, AMD-V/SVM, or the ARMv8 virtualization extensions — that let the kernel run guest code in a less-privileged CPU mode while the host stays in control. Guest instructions run on the real silicon. Only "interesting" events (I/O to a virtual device, an unhandled page fault, a privileged instruction) trap back into the emulator. This is the path KVM, HVF, WHPX, and AEHD all take, and it requires the guest architecture to be the same as the host architecture, because the guest instructions are executed directly.
+The first model is hardware virtualization. The host CPU has extensions: Intel VT-x, AMD-V/SVM, or the ARMv8 virtualization extensions. These extensions let the kernel run guest code in a less-privileged CPU mode while the host stays in control.
 
-The second model is dynamic binary translation. QEMU's TCG reads guest instructions, translates them into an intermediate representation, compiles that into host instructions inside a translation block, and caches the result. This works for any guest-on-host combination — an arm64 guest on an x86_64 host, for example — but every guest instruction costs many host instructions, so it is far slower.
+Guest instructions run on the real silicon. Only "interesting" events (I/O to a virtual device, an unhandled page fault, a privileged instruction) trap back into the emulator. KVM, HVF, WHPX, and AEHD all take this path. It requires the guest architecture to be the same as the host architecture, because the guest instructions run directly.
+
+The second model is dynamic binary translation. QEMU's TCG reads guest instructions, translates them into an intermediate representation, compiles that into host instructions inside a translation block, and caches the result. This works for any guest-on-host combination, for example an arm64 guest on an x86_64 host. But every guest instruction costs many host instructions, so it is far slower.
 
 ### 5.1.1 Where each model lives in the tree
 
@@ -57,7 +63,7 @@ flowchart TD
 
 ## 5.2 Probing the Host: the CpuAccelerator Module
 
-Before QEMU is even invoked, the emulator launcher decides whether acceleration is possible. That decision is made by the `CpuAccelerator` module in `android-emu`, which is deliberately independent of QEMU so that the standalone `emulator-check` tool (used by Android Studio) can run the same probe without dragging in the whole virtual machine.
+Before QEMU is even invoked, the emulator launcher decides whether acceleration is possible. The `CpuAccelerator` module in `android-emu` makes that decision. The module is deliberately independent of QEMU. This lets the standalone `emulator-check` tool (used by Android Studio) run the same probe without the whole virtual machine.
 
 The public enum at `external/qemu/android/emu/feature/include/android/emulation/CpuAccelerator.h` lists the supported technologies:
 
@@ -75,7 +81,7 @@ enum CpuAccelerator {
 };
 ```
 
-`CPU_ACCELERATOR_HAX` (the Intel HAXM driver) is retained only so that historical metrics still line up — the comment in the header makes that explicit, and no probe in the current code ever returns it.
+`CPU_ACCELERATOR_HAX` (the Intel HAXM driver) stays only so that historical metrics still line up. The comment in the header says this, and no probe in the current code ever returns it.
 
 ### 5.2.1 Compile-time platform selection
 
@@ -98,11 +104,11 @@ The implementation in `external/qemu/android/emu/feature/src/android/emulation/C
 #endif
 ```
 
-So a Linux host only ever considers KVM, a Windows host considers both WHPX and AEHD, and a macOS host considers HVF — with an extra `APPLE_SILICON` flag that changes the CPU checks because Apple's arm64 chips do not have x86 virtualization feature bits to test.
+So a Linux host only ever considers KVM. A Windows host considers both WHPX and AEHD. A macOS host considers HVF, with an extra `APPLE_SILICON` flag. This flag changes the CPU checks, because Apple's arm64 chips do not have x86 virtualization feature bits to test.
 
 ### 5.2.2 The cached global probe
 
-The result of probing is cached in a process-global `GlobalState` so the (potentially slow) detection runs only once:
+The result of the probe is cached in a process-global `GlobalState`, so the (potentially slow) detection runs only once:
 
 ```cpp
 // Source: external/qemu/android/emu/feature/src/android/emulation/CpuAccelerator.cpp
@@ -190,17 +196,17 @@ static CommandReturn checkCpuAcceleration() {
 }
 ```
 
-Because this is the exact code Android Studio runs to decide whether to offer a hardware-accelerated AVD, the status string doubles as user-facing advice — on Linux a permission failure returns a multi-line message explaining how to add the user to the `kvm` group, on Windows it explains how to turn Hyper-V off or the Hypervisor Platform feature on.
+This is the exact code Android Studio runs to decide whether to offer a hardware-accelerated AVD. So the status string doubles as user-facing advice. On Linux a permission failure returns a multi-line message that explains how to add the user to the `kvm` group. On Windows the message explains how to turn Hyper-V off or the Hypervisor Platform feature on.
 
 ---
 
 ## 5.4 KVM on Linux
 
-On Linux the only hardware backend is KVM, and the probe is the most direct of the four: it checks for `/dev/kvm`, that it is readable, and that its API version is recent enough.
+On Linux the only hardware backend is KVM. The probe is the most direct of the four. It checks for `/dev/kvm`, that it is readable, and that its API version is recent enough.
 
 ### 5.4.1 The KVM probe
 
-`ProbeKVM` in `CpuAccelerator.cpp` walks a sequence of checks, returning a distinct status code at each failure point. The device path can be overridden through an environment variable, defaulting to `/dev/kvm`:
+`ProbeKVM` in `CpuAccelerator.cpp` walks a sequence of checks and returns a distinct status code at each failure point. The device path can be overridden through an environment variable. The default is `/dev/kvm`:
 
 ```cpp
 // Source: external/qemu/android/emu/feature/src/android/emulation/CpuAccelerator.cpp
@@ -224,11 +230,13 @@ AndroidCpuAcceleration ProbeKVM(std::string* status) {
 }
 ```
 
-If the device is missing, the probe uses CPUID to distinguish "your CPU cannot do this at all" (`NO_CPU_SUPPORT`) from "your CPU can, but the module is not loaded or VT is off in the BIOS" (`DEV_NOT_FOUND`). If the device exists but is not readable, it reads `/etc/group`, looks for the `kvm:` line, and returns `DEV_PERMISSION` with instructions. Finally it opens the device and issues `KVM_GET_API_VERSION`, comparing against the kernel's `KVM_API_VERSION` constant; an older API returns `DEV_OBSOLETE`.
+If the device is missing, the probe uses CPUID to tell two cases apart. The first is "your CPU cannot do this at all" (`NO_CPU_SUPPORT`). The second is "your CPU can, but the module is not loaded or VT is off in the BIOS" (`DEV_NOT_FOUND`).
+
+If the device exists but is not readable, it reads `/etc/group`, looks for the `kvm:` line, and returns `DEV_PERMISSION` with instructions. Finally it opens the device and issues `KVM_GET_API_VERSION`. It compares the result against the kernel's `KVM_API_VERSION` constant. An older API returns `DEV_OBSOLETE`.
 
 ### 5.4.2 Inside QEMU: kvm_init and capability checks
 
-When QEMU itself initializes KVM, `kvm_init` in `external/qemu/accel/kvm/kvm-all.c` opens the device, re-checks the API version, creates a VM with `KVM_CREATE_VM`, and then verifies that the kernel supports a required set of capabilities. The required list is short and architecture-neutral:
+When QEMU itself initializes KVM, `kvm_init` in `external/qemu/accel/kvm/kvm-all.c` opens the device, re-checks the API version, and creates a VM with `KVM_CREATE_VM`. Then it verifies that the kernel supports a required set of capabilities. The required list is short and architecture-neutral:
 
 ```c
 // Source: external/qemu/accel/kvm/kvm-all.c
@@ -240,7 +248,7 @@ static const KVMCapabilityInfo kvm_required_capabilites[] = {
 };
 ```
 
-`kvm_init` calls `kvm_check_extension_list` against both this list and an architecture-specific `kvm_arch_required_capabilities`; a missing capability aborts initialization with an upgrade note. Optional capabilities (coalesced MMIO, VCPU events, robust single-step, IRQ routing) are probed individually with `kvm_check_extension` and recorded as feature flags, so QEMU adapts to whatever the running kernel offers rather than demanding a fixed feature set.
+`kvm_init` calls `kvm_check_extension_list` against both this list and an architecture-specific `kvm_arch_required_capabilities`; a missing capability aborts initialization with an upgrade note. Optional capabilities (coalesced MMIO, VCPU events, robust single-step, IRQ routing) are probed individually with `kvm_check_extension` and recorded as feature flags. So QEMU adapts to whatever the running kernel offers. It does not demand a fixed feature set.
 
 ### 5.4.3 The KVM run loop
 
@@ -266,7 +274,7 @@ case KVM_EXIT_MMIO:
 }
 ```
 
-The guest runs entirely inside `KVM_RUN` on the real CPU until it does something the host must handle — a port I/O instruction (`KVM_EXIT_IO`), an access to memory-mapped device registers (`KVM_EXIT_MMIO`), or a shutdown. Each exit hands control to QEMU's device model, which services the access and re-enters `KVM_RUN`. This trap-and-emulate loop is what makes a virtual device feel like real hardware to the guest while costing the host nothing while the guest is computing.
+The guest runs entirely inside `KVM_RUN` on the real CPU until it does something the host must handle. The cases are a port I/O instruction (`KVM_EXIT_IO`), an access to memory-mapped device registers (`KVM_EXIT_MMIO`), or a shutdown. Each exit hands control to QEMU's device model, which services the access and re-enters `KVM_RUN`. This trap-and-emulate loop makes a virtual device feel like real hardware to the guest. It costs the host nothing while the guest is computing.
 
 ```mermaid
 sequenceDiagram
@@ -317,7 +325,7 @@ AndroidCpuAcceleration ProbeHVF(std::string* status) {
 }
 ```
 
-`hasModernX86VirtualizationFeatures()` is a clever shortcut. Detecting EPT and unrestricted-guest properly needs `rdmsr`, which is only available to root, so the code instead checks for CPUID feature bits that shipped at the same time as those features — `popcnt` for EPT, and `aes` plus `pclmulqdq` for unrestricted-guest. If those instruction-set extensions are present, the CPU is new enough to have the virtualization features too.
+`hasModernX86VirtualizationFeatures()` is a clever shortcut. Proper detection of EPT and unrestricted-guest needs `rdmsr`, but only root can use it. So the code instead checks for CPUID feature bits that shipped at the same time as those features. These bits are `popcnt` for EPT, and `aes` plus `pclmulqdq` for unrestricted-guest. If those instruction-set extensions are present, the CPU is new enough to have the virtualization features too.
 
 ### 5.5.2 The HVF run loop and arm64
 
@@ -343,11 +351,11 @@ For Apple Silicon, the arm64 backend at `external/qemu/target/arm/hvf.c` uses th
 
 ## 5.6 Windows: WHPX and AEHD
 
-Windows is the only host that ships two coexisting backends, and the selection between them is entangled with whether Hyper-V is running.
+Windows is the only host that ships two coexisting backends. The selection between them is tied to whether Hyper-V is running.
 
 ### 5.6.1 The Hyper-V question
 
-On Windows the probe first calls `GetHyperVStatus()`, which uses CPUID to detect whether the machine is running under a Hyper-V hypervisor and, through the Hyper-V `0x40000003` CPUID leaf, whether this is the host (root) partition. If Hyper-V is running as the host, the only way to accelerate is the Windows Hypervisor Platform, which exposes Hyper-V's facilities to a user-mode VMM. If Hyper-V is not running, the native AEHD driver can take over the CPU directly.
+On Windows the probe first calls `GetHyperVStatus()`. This function uses CPUID to detect whether the machine is running under a Hyper-V hypervisor. It also uses the Hyper-V `0x40000003` CPUID leaf to detect whether this is the host (root) partition. If Hyper-V is running as the host, the only way to accelerate is the Windows Hypervisor Platform, which exposes Hyper-V's facilities to a user-mode VMM. If Hyper-V is not running, the native AEHD driver can take over the CPU directly.
 
 ```cpp
 // Source: external/qemu/android/emu/feature/src/android/emulation/CpuAccelerator.cpp
@@ -379,11 +387,11 @@ if (hWinHvPlatform) {
 }
 ```
 
-Inside QEMU, `whpx_accel_init` in `external/qemu/target/i386/whpx-all.c` re-runs the same capability query through a dispatch table (`whp_dispatch`) built by `init_whp_dispatch()`, then creates a partition and configures its processor count. The per-CPU loop `whpx_vcpu_run` calls `WHvRunVirtualProcessor` and dispatches on `WHvRunVpExitReason` values — `MemoryAccess`, `X64IoPortAccess`, `X64Halt`, `X64Cpuid`, `X64MsrAccess` — the same trap-and-emulate pattern KVM and HVF use, just with Windows API names.
+Inside QEMU, `whpx_accel_init` in `external/qemu/target/i386/whpx-all.c` re-runs the same capability query through a dispatch table (`whp_dispatch`) built by `init_whp_dispatch()`. Then it creates a partition and configures its processor count. The per-CPU loop `whpx_vcpu_run` calls `WHvRunVirtualProcessor` and dispatches on `WHvRunVpExitReason` values: `MemoryAccess`, `X64IoPortAccess`, `X64Halt`, `X64Cpuid`, `X64MsrAccess`. This is the same trap-and-emulate pattern that KVM and HVF use, just with Windows API names.
 
 ### 5.6.3 The AEHD probe
 
-AEHD — the Android Emulator Hypervisor Driver — is Google's own kernel-mode hypervisor for Windows, the successor to the older "gvm" driver. The probe first checks that the CPU is an Intel chip with VT-x or an AMD chip with SVM, then tries to open the driver's device, falling back from the new name to the legacy one:
+AEHD — the Android Emulator Hypervisor Driver — is Google's own kernel-mode hypervisor for Windows, the successor to the older "gvm" driver. The probe first checks that the CPU is an Intel chip with VT-x or an AMD chip with SVM. Then it tries to open the driver's device. It falls back from the new name to the legacy one:
 
 ```cpp
 // Source: external/qemu/android/emu/feature/src/android/emulation/CpuAccelerator.cpp
@@ -405,7 +413,9 @@ if (!aehd.valid() && !gvm.valid()) {
 }
 ```
 
-On success it issues a custom IOCTL, `AEHD_GET_API_VERSION` (defined with `CTL_CODE` and the device type `0xE3E3`), to extract the driver version. The driver's QEMU side is `external/qemu/target/i386/aehd-all.c`, whose `aehd_init` and `aehd_init_vcpu` mirror the KVM structure — AEHD is essentially a KVM-style ioctl interface implemented as a Windows kernel driver, which is why its QEMU integration reads almost identically to `kvm-all.c`. Note one Windows-specific wrinkle: after AEHD is selected, `main.cpp` warns the user if the Vanguard anti-cheat service (`vgk`) is detected, because it conflicts with the driver.
+On success it issues a custom IOCTL, `AEHD_GET_API_VERSION` (defined with `CTL_CODE` and the device type `0xE3E3`), to extract the driver version. The driver's QEMU side is `external/qemu/target/i386/aehd-all.c`, whose `aehd_init` and `aehd_init_vcpu` mirror the KVM structure. AEHD is essentially a KVM-style ioctl interface implemented as a Windows kernel driver. This is why its QEMU integration reads almost identically to `kvm-all.c`.
+
+Note one Windows-specific wrinkle. After AEHD is selected, `main.cpp` warns the user if the Vanguard anti-cheat service (`vgk`) is detected. This is because the service conflicts with the driver.
 
 ```mermaid
 flowchart TD
@@ -446,11 +456,11 @@ static void tcg_accel_class_init(ObjectClass *oc, void *data)
 }
 ```
 
-`tcg_init` only sizes the translation-block buffer (`tcg_tb_size` megabytes) and installs an interrupt handler. There is no device to open and no capability to check, because TCG runs in user space on top of plain host instructions — it always works.
+`tcg_init` only sizes the translation-block buffer (`tcg_tb_size` megabytes) and installs an interrupt handler. There is no device to open and no capability to check. This is because TCG runs in user space on top of plain host instructions, so it always works.
 
 ### 5.7.1 The translation-block dispatch loop
 
-Where KVM's loop issues a single `KVM_RUN` ioctl, TCG's `cpu_exec` in `external/qemu/accel/tcg/cpu-exec.c` runs an inner loop that finds (or translates) one block of guest code at a time and executes it:
+KVM's loop issues a single `KVM_RUN` ioctl. TCG's `cpu_exec` in `external/qemu/accel/tcg/cpu-exec.c` runs an inner loop instead. This loop finds (or translates) one block of guest code at a time and executes it:
 
 ```c
 // Source: external/qemu/accel/tcg/cpu-exec.c
@@ -468,7 +478,7 @@ while (!cpu_handle_exception(cpu, &ret)) {
 }
 ```
 
-`tb_find` looks the guest program counter up in the translation-block cache, translating a new block on a miss. `cpu_loop_exec_tb` then jumps into the emitted host code. Blocks are chained together so that, on the common path, control flows from one cached block straight into the next without returning to this loop — which is why a hot loop in the guest only pays the translation cost once. The outer two `while` loops exist to break that chaining whenever an interrupt or exception must be serviced.
+`tb_find` looks the guest program counter up in the translation-block cache, translating a new block on a miss. `cpu_loop_exec_tb` then jumps into the emitted host code. Blocks are chained together. So on the common path, control flows from one cached block straight into the next without returning to this loop. This is why a hot loop in the guest only pays the translation cost once. The outer two `while` loops exist to break that chaining whenever an interrupt or exception must be serviced.
 
 ---
 
@@ -495,7 +505,7 @@ WHPX (`whpx_accel_init`, name "WHPX") and AEHD (`aehd_init`, name "AEHD") regist
 
 ### 5.8.2 configure_accelerator
 
-At machine startup, `configure_accelerator` in `external/qemu/accel/accel.c` reads the `accel=` machine option (defaulting to `tcg`), splits it on colons to allow a fallback list, and for each name looks up the `AccelClass`, checks its `available()` predicate, and tries to initialize it:
+At machine startup, `configure_accelerator` in `external/qemu/accel/accel.c` reads the `accel=` machine option. The default is `tcg`. It splits the option on colons to allow a fallback list. For each name it looks up the `AccelClass`, checks its `available()` predicate, and tries to initialize it:
 
 ```c
 // Source: external/qemu/accel/accel.c
@@ -585,7 +595,7 @@ typedef enum {
 } CpuAccelMode;
 ```
 
-`-no-accel` is just shorthand for `-accel off`, defined as a flag in `external/qemu/android/emu/cmdline/include/android/cmdline-options.h`. With `auto` (the default), the launcher enables acceleration when the probe says `ANDROID_CPU_ACCELERATION_READY` and silently falls back to TCG otherwise; with `on` it panics if acceleration is unavailable.
+`-no-accel` is just shorthand for `-accel off`, defined as a flag in `external/qemu/android/emu/cmdline/include/android/cmdline-options.h`. With `auto` (the default), the launcher enables acceleration when the probe says `ANDROID_CPU_ACCELERATION_READY`. Otherwise it silently falls back to TCG. With `on` it panics if acceleration is unavailable.
 
 ### 5.9.2 Mapping the chosen accelerator to a flag
 
@@ -608,11 +618,11 @@ In `external/qemu/android-qemu2-glue/main.cpp`, the x86 path calls `handleCpuAcc
 
 ### 5.9.3 Per-CPU threads
 
-Once QEMU knows which accelerator is active, `qemu_init_vcpu` in `external/qemu/cpus.c` spawns one thread per virtual CPU and routes it to the right start function based on which `*_enabled()` predicate is true — `qemu_kvm_start_vcpu`, `qemu_hvf_start_vcpu`, `qemu_whpx_start_vcpu`, `qemu_aehd_start_vcpu`, or `qemu_tcg_init_vcpu`. Each thread is named after its accelerator (for example "CPU 0/KVM"), which is what you see if you inspect emulator threads in a debugger.
+Once QEMU knows which accelerator is active, `qemu_init_vcpu` in `external/qemu/cpus.c` spawns one thread per virtual CPU. It routes each thread to the right start function based on which `*_enabled()` predicate is true. The start functions are `qemu_kvm_start_vcpu`, `qemu_hvf_start_vcpu`, `qemu_whpx_start_vcpu`, `qemu_aehd_start_vcpu`, or `qemu_tcg_init_vcpu`. Each thread is named after its accelerator (for example "CPU 0/KVM"), which is what you see if you inspect emulator threads in a debugger.
 
 ### 5.9.4 SMP limits
 
-The same glue path also constrains how many cores the AVD gets, but only for x86 and x86_64 targets. For those targets, if `hasModernX86VirtualizationFeatures()` returns false, multicore guests slow down, so the glue forces `hw_cpu_ncore` to 1. On macOS with an x86_64 target build, hosts with fewer than 6 logical cores are also pinned to a single virtual core, and no AVD ever gets more than 6 cores. Arm64 target builds are not subject to either limit:
+The same glue path also constrains how many cores the AVD gets, but only for x86 and x86_64 targets. For those targets, if `hasModernX86VirtualizationFeatures()` returns false, multicore guests slow down, so the glue forces `hw_cpu_ncore` to 1. On macOS with an x86_64 target build, hosts with fewer than 6 logical cores are also pinned to a single virtual core. No AVD ever gets more than 6 cores. Arm64 target builds are not subject to either limit:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/main.cpp
@@ -655,7 +665,9 @@ const TargetInfo kTarget = {
 };
 ```
 
-The `-cpu` value reveals the acceleration story. For an arm64 guest on an arm64 Linux host the model is `host`, which exposes the real host CPU's full feature set to the guest. For an arm64 guest on Apple Silicon the model is `cortex-a53`, a fixed synthetic Cortex-A53 model presented to the guest regardless of the M-series chip's actual capabilities; HVF still provides hardware acceleration, but the CPU model visible to the guest is a defined ARM type rather than the host's own identity. For an arm64 guest on an x86_64 host the model is `cortex-a57`, a synthetic model that only TCG can emulate. For x86_64 guests the model is the custom `android64`.
+The `-cpu` value reveals the acceleration story. For an arm64 guest on an arm64 Linux host the model is `host`, which exposes the real host CPU's full feature set to the guest.
+
+For an arm64 guest on Apple Silicon the model is `cortex-a53`. This is a fixed synthetic Cortex-A53 model presented to the guest regardless of the M-series chip's actual capabilities. HVF still provides hardware acceleration, but the CPU model visible to the guest is a defined ARM type rather than the host's own identity. For an arm64 guest on an x86_64 host the model is `cortex-a57`, a synthetic model that only TCG can emulate. For x86_64 guests the model is the custom `android64`.
 
 ### 5.10.2 The accelerated combinations
 
@@ -665,11 +677,11 @@ In practice the emulator accelerates only the matching-architecture cases:
 2. arm64 guests on an arm64 host, via HVF on Apple Silicon or KVM on an arm64 Linux host.
 3. Everything else (an arm64 guest on x86_64, or an x86 guest on an arm64 Mac) runs under TCG.
 
-This is why an x86_64 system image is the standard recommendation on x86 development machines and an arm64 image is the fast choice on Apple Silicon: only the matching ABI gets a hypervisor.
+This is why an x86_64 system image is the standard recommendation on x86 development machines. It is also why an arm64 image is the fast choice on Apple Silicon. Only the matching ABI gets a hypervisor.
 
 ### 5.10.3 What about riscv64?
 
-QEMU upstream carries a complete RISC-V target — `external/qemu/target/riscv/` with its own `cpu.c` and `translate.c`, and `external/qemu/default-configs/riscv64-softmmu.mak` builds a `qemu-system-riscv64`. But that target has no `kvm.c` or `hvf.c`, and the Android glue's `TargetInfo` table has no riscv64 case at all (it covers arm64, arm, mips64, mips, x86_64, and i386). So while QEMU can interpret riscv64 guest code through TCG, the Android Emulator product does not ship a riscv64 device, and there is no hardware-accelerated path for it — RISC-V would be a pure TCG guest.
+QEMU upstream carries a complete RISC-V target — `external/qemu/target/riscv/` with its own `cpu.c` and `translate.c`, and `external/qemu/default-configs/riscv64-softmmu.mak` builds a `qemu-system-riscv64`. But that target has no `kvm.c` or `hvf.c`. The Android glue's `TargetInfo` table also has no riscv64 case at all (it covers arm64, arm, mips64, mips, x86_64, and i386). QEMU can interpret riscv64 guest code through TCG. But the Android Emulator product does not ship a riscv64 device. There is no hardware-accelerated path for it, so RISC-V would be a pure TCG guest.
 
 ```mermaid
 flowchart TD
@@ -710,7 +722,7 @@ emulator-check accel
 emulator-check cpu-info
 ```
 
-- Launch an AVD with verbose init logging and watch the accelerator selection lines ("Selecting KVM for CPU acceleration", "Host can use CPU acceleration"):
+- Launch an AVD with verbose init logging. Watch for the accelerator selection lines ("Selecting KVM for CPU acceleration", "Host can use CPU acceleration"):
 
 ```bash
 emulator -avd <your_avd> -verbose -show-kernel
@@ -745,14 +757,14 @@ emulator -avd <your_avd> -verbose 2>&1 | grep -- "-cpu"
 
 ## Summary
 
-- The emulator runs each virtual CPU either through a host hypervisor (near-native) or through QEMU's TCG binary translator (portable but slow); the choice is made once at machine start.
-- The `CpuAccelerator` module in `external/qemu/android/emu/feature/src/android/emulation/CpuAccelerator.cpp` probes the host independently of QEMU, caches the result in a process-global state, and is the same code the standalone `emulator-check accel` tool runs for Android Studio.
-- Each host OS compiles in a different set of probes: KVM on Linux, HVF on macOS (with an `APPLE_SILICON` variation), and both WHPX and AEHD on Windows; HAXM remains only as a deprecated metrics enum value.
+- The emulator runs each virtual CPU either through a host hypervisor (near-native) or through QEMU's TCG binary translator (portable but slow). The choice is made once at machine start.
+- The `CpuAccelerator` module in `external/qemu/android/emu/feature/src/android/emulation/CpuAccelerator.cpp` probes the host independently of QEMU and caches the result in a process-global state. It is the same code the standalone `emulator-check accel` tool runs for Android Studio.
+- Each host OS compiles in a different set of probes. These are KVM on Linux, HVF on macOS (with an `APPLE_SILICON` variation), and both WHPX and AEHD on Windows. HAXM remains only as a deprecated metrics enum value.
 - The probe returns a stable numeric `AndroidCpuAcceleration` status code (Android Studio depends on the numbers) plus a human-readable string that doubles as remediation advice.
-- KVM, HVF, WHPX, and AEHD all use the same trap-and-emulate pattern: run the guest natively until a VM exit (I/O, MMIO, HLT, CPUID), service it in QEMU's device model, and re-enter.
-- On Windows the backend choice hinges on Hyper-V: if Hyper-V is the host, only WHPX works (Windows 10 build 17134+); otherwise the native AEHD driver (legacy name gvm) takes the CPU directly.
-- All backends register a QEMU `AccelClass` with a name and an `init_machine` callback; `configure_accelerator` in `external/qemu/accel/accel.c` selects one by the `accel=` option, which the launcher's `-enable-kvm`/`-enable-hvf`/`-enable-whpx`/`-enable-aehd` flags rewrite into.
-- Hardware acceleration requires matching guest and host architectures; the `TargetInfo` table in `android-qemu2-glue/main.cpp` encodes the target, and only x86 on x86_64 and arm64 on arm64 are accelerated — everything else, including riscv64, falls back to TCG.
+- KVM, HVF, WHPX, and AEHD all use the same trap-and-emulate pattern. They run the guest natively until a VM exit (I/O, MMIO, HLT, CPUID). Then they service the exit in QEMU's device model and re-enter.
+- On Windows the backend choice hinges on Hyper-V. If Hyper-V is the host, only WHPX works (Windows 10 build 17134+). Otherwise the native AEHD driver (legacy name gvm) takes the CPU directly.
+- All backends register a QEMU `AccelClass` with a name and an `init_machine` callback. `configure_accelerator` in `external/qemu/accel/accel.c` selects one by the `accel=` option. The launcher's `-enable-kvm`/`-enable-hvf`/`-enable-whpx`/`-enable-aehd` flags rewrite into that option.
+- Hardware acceleration requires matching guest and host architectures. The `TargetInfo` table in `android-qemu2-glue/main.cpp` encodes the target. Only x86 on x86_64 and arm64 on arm64 are accelerated. Everything else, including riscv64, falls back to TCG.
 
 ### Key Source Files
 

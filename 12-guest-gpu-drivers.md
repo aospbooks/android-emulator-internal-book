@@ -1,8 +1,10 @@
 # Chapter 12: Guest GPU Drivers
 
-A physical Android phone has a GPU and a kernel-mode driver that talks to it. An emulated Android device has neither. Instead it has a *guest GPU driver* whose job is not to drive silicon but to **serialize** every EGL, GLES, and Vulkan call the app makes, push the bytes across a host/guest transport, and let the host process replay them against the host's real GPU. This is the guest half of gfxstream — an "API forwarding" or "API remoting" driver. The app links against an ordinary `libEGL`/`libGLESv2`/`libvulkan` ICD, but underneath, every `glDrawArrays` becomes a packet on a ring buffer.
+A physical Android phone has a GPU and a kernel-mode driver that talks to it. An emulated Android device has neither. Instead it has a *guest GPU driver*. The job of this driver is not to drive silicon. Its job is to **serialize** every EGL, GLES, and Vulkan call the app makes. It pushes the bytes across a host/guest transport, and the host process replays them against the host's real GPU.
 
-This chapter walks the guest stack from the top down: the EGL and GLES ICDs the framework loads, the generated encoders that turn function calls into bytes, the Vulkan ICD that rides on Mesa's runtime, the `HostConnection`/`IOStream` transport abstraction, the virtio-gpu and address-space ring buffers that actually carry the bytes, and the gralloc/minigbm buffer allocators that bridge graphics memory between guest and host. Two source trees matter here: the older `device/generic/goldfish-opengl/` and the current home of the code under `hardware/google/gfxstream/guest/` and `external/mesa3d/src/gfxstream/guest/`.
+This is the guest half of gfxstream — an "API forwarding" or "API remoting" driver. The app links against an ordinary `libEGL`/`libGLESv2`/`libvulkan` ICD, but underneath, every `glDrawArrays` becomes a packet on a ring buffer.
+
+This chapter walks the guest stack from the top down. First come the EGL and GLES ICDs the framework loads. Next are the generated encoders that turn function calls into bytes, and the Vulkan ICD that rides on Mesa's runtime. Then come the `HostConnection`/`IOStream` transport abstraction and the virtio-gpu and address-space ring buffers that actually carry the bytes. Last are the gralloc/minigbm buffer allocators that bridge graphics memory between guest and host. Two source trees matter here: the older `device/generic/goldfish-opengl/` and the current home of the code under `hardware/google/gfxstream/guest/` and `external/mesa3d/src/gfxstream/guest/`.
 
 ---
 
@@ -10,9 +12,9 @@ This chapter walks the guest stack from the top down: the EGL and GLES ICDs the 
 
 The guest graphics driver lives in three places that together form one logical stack. Understanding the split prevents a lot of confusion when grepping.
 
-The legacy tree is `device/generic/goldfish-opengl/`. Its `README` is explicit that it "contains Android-side modules related to hardware OpenGL ES emulation" and that the encoder sources are "auto-generated with the 'emugen' host tool." Today it still ships the gralloc HAL, the HWC3 composer, and codec shims under `device/generic/goldfish-opengl/system/` (`gralloc/`, `hwc3/`, `codecs/`).
+The legacy tree is `device/generic/goldfish-opengl/`. Its `README` is explicit. It says the tree "contains Android-side modules related to hardware OpenGL ES emulation". It also says the encoder sources are "auto-generated with the 'emugen' host tool." Today it still ships the gralloc HAL, the HWC3 composer, and codec shims under `device/generic/goldfish-opengl/system/` (`gralloc/`, `hwc3/`, `codecs/`).
 
-The active gfxstream guest tree is split in two. The GLES/EGL encoders and the `HostConnection` transport glue live under `hardware/google/gfxstream/guest/` (`egl/`, `GLESv1_enc/`, `GLESv2_enc/`, `renderControl_enc/`, `OpenglSystemCommon/`). The Vulkan ICD, the resource tracker, the platform transport (`VirtGpu`), and the gralloc abstraction live in the Mesa import at `external/mesa3d/src/gfxstream/guest/` (`vulkan/`, `vulkan_enc/`, `platform/`, `android/`, `iostream/`). The Vulkan side moved into Mesa so it could reuse Mesa's `vk_instance`/`vk_device` dispatch runtime; the GLES side did not.
+The active gfxstream guest tree is split in two. The GLES/EGL encoders and the `HostConnection` transport glue live under `hardware/google/gfxstream/guest/` (`egl/`, `GLESv1_enc/`, `GLESv2_enc/`, `renderControl_enc/`, `OpenglSystemCommon/`). The Mesa import at `external/mesa3d/src/gfxstream/guest/` holds the Vulkan ICD, the resource tracker, the platform transport (`VirtGpu`), and the gralloc abstraction. These live in `vulkan/`, `vulkan_enc/`, `platform/`, `android/`, and `iostream/`. The Vulkan side moved into Mesa so it could reuse Mesa's `vk_instance`/`vk_device` dispatch runtime; the GLES side did not.
 
 ### 12.1.1 What ships in the guest image
 
@@ -30,7 +32,7 @@ The platform EGL loader reads `egl.cfg` to learn which backend to load. The emul
 0 0 emulation
 ```
 
-The third column, `emulation`, is the suffix the loader appends to `libEGL_`, `libGLESv1_CM_`, and `libGLESv2_`, which is exactly how it finds the gfxstream ICDs rather than a hardware vendor driver.
+The third column, `emulation`, is the suffix the loader appends to `libEGL_`, `libGLESv1_CM_`, and `libGLESv2_`. This is exactly how the loader finds the gfxstream ICDs rather than a hardware vendor driver.
 
 ### 12.1.2 The guest GPU stack at a glance
 
@@ -91,17 +93,17 @@ void glActiveTexture(GLenum texture)
 }
 ```
 
-`getEGLThreadInfo()` returns a thread-local `EGLThreadInfo`, whose `hostConn` field holds the thread's `HostConnection`. Because the connection (and thus the encoder and its stream buffer) is thread-local, two app threads issuing GLES calls never contend on the same wire buffer — each has its own. The encoder object itself, `GL2Encoder`, is a hand-written class (`GL2Encoder.cpp`) that derives from a generated base, `gl2_encoder_context_t` (declared in `gl2_enc.h`, implemented in `gl2_enc.cpp`); the next two sections explain how that base is generated and what bytes it writes.
+`getEGLThreadInfo()` returns a thread-local `EGLThreadInfo`, whose `hostConn` field holds the thread's `HostConnection`. The connection, and thus the encoder and its stream buffer, is thread-local. So two app threads that issue GLES calls never contend on the same wire buffer. Each thread has its own. The encoder object itself, `GL2Encoder`, is a hand-written class (`GL2Encoder.cpp`) that derives from a generated base, `gl2_encoder_context_t` (declared in `gl2_enc.h`, implemented in `gl2_enc.cpp`). The next two sections explain how that base is generated and what bytes it writes.
 
 ### 12.2.1 GLClientState: not everything is forwarded
 
-`GL2Encoder` is not a pure forwarder. It maintains a `GLClientState` (declared in `hardware/google/gfxstream/guest/OpenglCodecCommon/include/gfxstream/guest/GLClientState.h`, held as a `GLClientState* m_state` member in `GL2Encoder.h`) so it can answer client-side queries without a host round-trip, batch vertex-attribute setup, and validate arguments before they ever reach the host. The spec marks such functions `custom_decoder` or wraps them in hand-written code in `GL2Encoder.cpp`. The default for an unannotated call, though, is pure serialize-and-send, and that default is what the code generator produces.
+`GL2Encoder` is not a pure forwarder. It maintains a `GLClientState` (declared in `hardware/google/gfxstream/guest/OpenglCodecCommon/include/gfxstream/guest/GLClientState.h`, held as a `GLClientState* m_state` member in `GL2Encoder.h`). With this state it can answer client-side queries without a host round-trip, batch vertex-attribute setup, and validate arguments before they reach the host. The spec marks such functions `custom_decoder` or wraps them in hand-written code in `GL2Encoder.cpp`. The default for an unannotated call, though, is pure serialize-and-send, and that default is what the code generator produces.
 
 ## 12.3 emugen: Generating the Encoders
 
-The bulk of the GLES and renderControl encoder code is generated, not written. The build runs a tool the source calls the "generic apigen" (historically "emugen") over three input files per API and emits the encoder `.cpp`/`.h` pair.
+The bulk of the GLES and renderControl encoder code is generated, not written. The build runs a tool over three input files per API. The source calls this tool the "generic apigen" (historically "emugen"). The tool emits the encoder `.cpp`/`.h` pair.
 
-The driver lives in `hardware/google/gfxstream/codegen/generic-apigen/` (`main.cpp`, `parser.cpp`, `api_gen.cpp`, `entry_point.cpp`). The build script `hardware/google/gfxstream/scripts/generate-apigen-sources.sh` shows exactly how it is invoked. It builds the tool with Bazel, then runs it once per API in encoder mode (`-E`) for the guest and decoder mode (`-D`) for the host:
+The driver lives in `hardware/google/gfxstream/codegen/generic-apigen/` (`main.cpp`, `parser.cpp`, `api_gen.cpp`, `entry_point.cpp`). The build script `hardware/google/gfxstream/scripts/generate-apigen-sources.sh` shows exactly how it is invoked. It builds the tool with Bazel. Then it runs the tool once per API: in encoder mode (`-E`) for the guest and in decoder mode (`-D`) for the host:
 
 ```bash
 # Source: hardware/google/gfxstream/scripts/generate-apigen-sources.sh
@@ -118,7 +120,7 @@ The same input drives both sides, which is why the wire format is automatically 
 Each API is described by three files, all under `hardware/google/gfxstream/codegen/`:
 
 1. `*.in` — the function prototypes, one `GL_ENTRY(...)` per call. For example `hardware/google/gfxstream/codegen/gles2/gles2.in` lists `GL_ENTRY(void, glClear, GLbitfield mask)` and `GL_ENTRY(void, glDrawArrays, GLenum mode, GLint first, GLsizei count)`.
-2. `*.attrib` — per-function attributes that tell the generator how to serialize pointer arguments: which parameter holds a buffer's length, whether NULL is allowed, whether the payload is "large." `gles2.attrib` opens with a `GLOBAL` block setting `base_opcode 2048`.
+2. `*.attrib` — per-function attributes. They tell the generator how to serialize pointer arguments: which parameter holds a buffer's length, whether NULL is allowed, whether the payload is "large." `gles2.attrib` opens with a `GLOBAL` block setting `base_opcode 2048`.
 3. `*.types` — the size and pass-by-value/pointer rules for each type name used in the prototypes.
 
 A representative `.attrib` entry shows how a pointer parameter is bound to its length:
@@ -130,7 +132,7 @@ glBufferData
     var_flag data nullAllowed isLarge
 ```
 
-`len data size` says "the byte length of the `data` pointer is the value of the `size` argument," which is how the generator knows how many bytes of `data` to copy into the packet. `isLarge` flags a payload that may be sent out of line rather than inlined into the command buffer.
+`len data size` says "the byte length of the `data` pointer is the value of the `size` argument." This is how the generator knows how many bytes of `data` to copy into the packet. `isLarge` flags a payload that may be sent out of line rather than inlined into the command buffer.
 
 ### 12.3.2 Codegen flow
 
@@ -180,7 +182,7 @@ void glClear_enc(void *self , GLbitfield mask)
 }
 ```
 
-The `8` in `sizeWithoutChecksum` is the opcode plus the size field; the `4` is the single `GLbitfield mask`. The opcode `OP_glClear` is defined in the generated `gl2_opcodes.h` and is offset from the `base_opcode 2048` declared in the `.attrib` file, which keeps GLESv1, GLESv2, and renderControl opcode ranges disjoint so the host decoder can tell them apart on one stream.
+The `8` in `sizeWithoutChecksum` is the opcode plus the size field; the `4` is the single `GLbitfield mask`. The generated `gl2_opcodes.h` defines the opcode `OP_glClear`. The opcode is offset from the `base_opcode 2048` declared in the `.attrib` file. This offset keeps the GLESv1, GLESv2, and renderControl opcode ranges disjoint, so the host decoder can tell them apart on one stream.
 
 ### 12.4.1 alloc, not write
 
@@ -210,7 +212,7 @@ virtual unsigned char *alloc(size_t len) {
 }
 ```
 
-When the next command does not fit in `m_free`, `alloc` calls `flush()`, which calls the subclass `commitBuffer()` to push the accumulated bytes to the host and then resets the buffer. The concrete transports — `QemuPipeStream`, `VirtioGpuPipeStream`, `AddressSpaceStream` — only have to implement `allocBuffer`, `commitBuffer`, and the read paths; the batching logic is shared.
+When the next command does not fit in `m_free`, `alloc` calls `flush()`. This call in turn calls the subclass `commitBuffer()` to push the accumulated bytes to the host, and then it resets the buffer. The concrete transports — `QemuPipeStream`, `VirtioGpuPipeStream`, `AddressSpaceStream` — only have to implement `allocBuffer`, `commitBuffer`, and the read paths; the batching logic is shared.
 
 ## 12.5 EGL and the renderControl Channel
 
@@ -249,7 +251,7 @@ The surface's `swapBuffers()` ultimately calls `rcEnc->rcFlushWindowColorBufferA
 
 ### 12.5.1 EGL display is a singleton
 
-The EGL display is not negotiated per call — `egl.cpp` keeps a single `static eglDisplay s_display;` and `eglGetDisplay` returns its address for `EGL_DEFAULT_DISPLAY` (the only valid display on Android), and `EGL_NO_DISPLAY` for any other argument. Validation macros (`VALIDATE_DISPLAY_INIT`, `DEFINE_AND_VALIDATE_HOST_CONNECTION`) check that the passed `EGLDisplay` equals `&s_display` before touching it, so a bad handle fails fast in the guest instead of corrupting the wire stream.
+The EGL display is not negotiated per call. `egl.cpp` keeps a single `static eglDisplay s_display;`. `eglGetDisplay` returns its address for `EGL_DEFAULT_DISPLAY` (the only valid display on Android), and `EGL_NO_DISPLAY` for any other argument. Validation macros (`VALIDATE_DISPLAY_INIT`, `DEFINE_AND_VALIDATE_HOST_CONNECTION`) check that the passed `EGLDisplay` equals `&s_display` before they touch it. A bad handle therefore fails fast in the guest instead of corrupting the wire stream.
 
 ### 12.5.2 An EGL frame, end to end
 
@@ -281,7 +283,7 @@ sequenceDiagram
 
 ## 12.6 The Vulkan ICD on the Mesa Runtime
 
-The Vulkan guest driver is structurally different from GLES. Instead of a thin hand-written ICD over a generated encoder, it is a full Mesa Vulkan driver that *reuses Mesa's dispatch runtime* and forwards through a generated `VkEncoder`. On Android the loader discovers it as `vulkan.ranchu.so` in `/vendor/lib[64]/hw/` via the standard `vulkan.<hw>.so` naming convention (build module `vulkan.ranchu` in `external/mesa3d/src/gfxstream/guest/vulkan/Android.bp`). The file `external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_icd.json` is a desktop-Linux Vulkan loader manifest and is not used on Android; the library name it references (`libgfxstream_guest_vulkan_with_host.so`) does not match any current Android build output.
+The Vulkan guest driver is structurally different from GLES. It is not a thin hand-written ICD over a generated encoder. It is a full Mesa Vulkan driver that *reuses Mesa's dispatch runtime* and forwards through a generated `VkEncoder`. On Android the loader discovers it as `vulkan.ranchu.so` in `/vendor/lib[64]/hw/` via the standard `vulkan.<hw>.so` naming convention (build module `vulkan.ranchu` in `external/mesa3d/src/gfxstream/guest/vulkan/Android.bp`). The file `external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_icd.json` is a desktop-Linux Vulkan loader manifest and is not used on Android. The library name it references (`libgfxstream_guest_vulkan_with_host.so`) does not match any current Android build output.
 
 `external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp` implements the entry points with the `gfxstream_vk_` prefix and wires them into Mesa's dispatch tables. `gfxstream_vk_CreateInstance` first builds a Mesa `vk_instance`, then makes the encoder call:
 
@@ -299,11 +301,11 @@ result = vk_instance_init(&instance->vk, extensions, &dispatch_table, pCreateInf
 }
 ```
 
-So a Vulkan call passes through three layers in the guest: the Mesa-style entry point (`gfxstream_vk_*`), the `ResourceTracker` (which decides what needs special handling), and the `VkEncoder` (which serializes the call onto the stream). The host object handle is stored as `internal_object` inside the guest's Mesa object.
+So a Vulkan call passes through three layers in the guest. The first is the Mesa-style entry point (`gfxstream_vk_*`). The second is the `ResourceTracker`, which decides what needs special handling. The third is the `VkEncoder`, which serializes the call onto the stream. The host object handle is stored as `internal_object` inside the guest's Mesa object.
 
 ### 12.6.1 ResourceTracker: the brains
 
-`external/mesa3d/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp` is the large, hand-written core. It owns the per-thread encoder, the sequence-number counter that orders commands, the gralloc handle, and all the `on_vkXxx` overrides for calls that cannot be blindly forwarded — memory allocation, image creation, AndroidHardwareBuffer import, swapchain interaction. The encoder fetch is a static helper:
+`external/mesa3d/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp` is the large, hand-written core. It owns the per-thread encoder, the sequence-number counter that orders commands, and the gralloc handle. It also owns all the `on_vkXxx` overrides for calls that cannot be blindly forwarded: memory allocation, image creation, AndroidHardwareBuffer import, and swapchain interaction. The encoder fetch is a static helper:
 
 ```cpp
 // Source: external/mesa3d/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
@@ -326,11 +328,11 @@ ALWAYS_INLINE_GFXSTREAM uint32_t ResourceTracker::nextSeqno() {
 
 ### 12.6.2 Capability negotiation
 
-The Vulkan path's behavior is not hardcoded — it depends on capabilities the host advertises. `ResourceTracker` reads `mCaps.vulkanCapset` and branches on flags like `deferredMapping` and `mCaps.params[kParamCreateGuestHandle]` (ResourceTracker.cpp, the memory-allocation paths) to decide whether device memory is mapped lazily, whether a guest-side DRM handle backs it, and whether render-control encoding can be skipped. The `HostConnection::connect` path reads `caps.vulkanCapset.noRenderControlEnc` and only constructs a renderControl encoder for Vulkan when the host still needs one (HostConnection.cpp), which is how newer hosts drop the legacy GLES control channel for pure-Vulkan guests.
+The Vulkan path's behavior is not hardcoded — it depends on capabilities the host advertises. `ResourceTracker` reads `mCaps.vulkanCapset` and branches on flags like `deferredMapping` and `mCaps.params[kParamCreateGuestHandle]` (ResourceTracker.cpp, the memory-allocation paths). The flags decide whether device memory is mapped lazily, whether a guest-side DRM handle backs it, and whether render-control encoding can be skipped. The `HostConnection::connect` path reads `caps.vulkanCapset.noRenderControlEnc`. It only constructs a renderControl encoder for Vulkan when the host still needs one (HostConnection.cpp). This is how newer hosts drop the legacy GLES control channel for pure-Vulkan guests.
 
 ## 12.7 The Vulkan Wire Format: Count, Then Write
 
-GLES commands are fixed-shape, so the encoder can compute `totalSize` arithmetically. Vulkan structs are deeply nested with `pNext` chains and variable arrays, so the size of a serialized call is not known until you walk the whole structure. gfxstream solves this with a two-pass scheme using two streams, both visible in the `VkEncoder::Impl` in `external/mesa3d/src/gfxstream/guest/vulkan_enc/VkEncoder.cpp.inl`:
+GLES commands are fixed-shape, so the encoder can compute `totalSize` arithmetically. Vulkan structs are deeply nested with `pNext` chains and variable arrays. The size of a serialized call is therefore not known until you walk the whole structure. gfxstream solves this with a two-pass scheme that uses two streams, both visible in the `VkEncoder::Impl` in `external/mesa3d/src/gfxstream/guest/vulkan_enc/VkEncoder.cpp.inl`:
 
 ```cpp
 // Source: external/mesa3d/src/gfxstream/guest/vulkan_enc/VkEncoder.cpp.inl
@@ -341,7 +343,7 @@ private:
     Validation m_validation;
 ```
 
-`VulkanCountingStream` (declared in `external/mesa3d/src/gfxstream/guest/vulkan_enc/VulkanStreamGuest.h` as a subclass of `VulkanStreamGuest`) overrides `write()` to count bytes instead of storing them. The generated `VkEncoder` method serializes each argument first to the counting stream to learn the exact packet size, then writes the opcode and that size, then re-serializes to the real `VulkanStreamGuest`. The `BumpPool` provides scratch allocations for the deep-copied structs during this walk without per-field `malloc`.
+`VulkanCountingStream` (declared in `external/mesa3d/src/gfxstream/guest/vulkan_enc/VulkanStreamGuest.h` as a subclass of `VulkanStreamGuest`) overrides `write()` to count bytes instead of storing them. The generated `VkEncoder` method first serializes each argument to the counting stream to learn the exact packet size. Then it writes the opcode and that size, and re-serializes to the real `VulkanStreamGuest`. The `BumpPool` provides scratch allocations for the deep-copied structs during this walk without per-field `malloc`.
 
 ### 12.7.1 Command buffers stage locally
 
@@ -356,7 +358,7 @@ static constexpr uint32_t kSyncDataReadComplete = 0X0;
 static constexpr uint32_t kSyncDataReadPending = 0X1;
 ```
 
-When `VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT` is set, each command buffer pops its own private staging stream and encoder (`ResourceTracker::getCommandBufferEncoder`), so recording is lock-free per command buffer and the recorded blob is replayed on the host when the queue submit arrives. The sync bytes let the guest avoid freeing or reusing staging memory the host is still reading.
+When `VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT` is set, each command buffer pops its own private staging stream and encoder (`ResourceTracker::getCommandBufferEncoder`). Recording is therefore lock-free per command buffer. The recorded blob is replayed on the host when the queue submit arrives. The sync bytes let the guest avoid freeing or reusing staging memory the host is still reading.
 
 ### 12.7.2 Two-pass encode
 
@@ -452,7 +454,7 @@ The two virtio-gpu transports both ultimately talk to a `/dev/dri/renderD*` node
 
 ### 12.9.1 VirtioGpuPipeStream: TRANSFER ioctls
 
-`hardware/google/gfxstream/guest/OpenglSystemCommon/VirtioGpuPipeStream.cpp` implements an `IOStream` whose header states it "uses VIRTGPU TRANSFER* ioctls on a virtio-gpu DRM rendernode device to communicate with a goldfish-pipe service on the host side." Its `allocBuffer` is a plain heap buffer, and `commitBuffer` just calls `writeFully`, which loops over `transferToHost`:
+`hardware/google/gfxstream/guest/OpenglSystemCommon/VirtioGpuPipeStream.cpp` implements an `IOStream`. Its header states it "uses VIRTGPU TRANSFER* ioctls on a virtio-gpu DRM rendernode device to communicate with a goldfish-pipe service on the host side." Its `allocBuffer` is a plain heap buffer, and `commitBuffer` just calls `writeFully`, which loops over `transferToHost`:
 
 ```cpp
 // Source: hardware/google/gfxstream/guest/OpenglSystemCommon/VirtioGpuPipeStream.cpp
@@ -466,7 +468,7 @@ int VirtioGpuPipeStream::commitBuffer(size_t size) {
 
 ### 12.9.2 AddressSpaceStream: a lock-free ring
 
-The address-space transport avoids per-flush ioctls. `external/mesa3d/src/gfxstream/guest/GoldfishAddressSpace/AddressSpaceStream.cpp` maps a shared `asg_ring_storage` region — a ring buffer plus a `ring_config` control block — directly into the guest process. Writing is a memory store; the host polls the ring. The commit path sets the transfer size and mode in the shared config and only "notifies" the host (a cheap doorbell) when the host is actually idle:
+The address-space transport avoids per-flush ioctls. `external/mesa3d/src/gfxstream/guest/GoldfishAddressSpace/AddressSpaceStream.cpp` maps a shared `asg_ring_storage` region — a ring buffer plus a `ring_config` control block — directly into the guest process. Writing is a memory store; the host polls the ring. The commit path sets the transfer size and mode in the shared config. It only "notifies" the host (a cheap doorbell) when the host is actually idle:
 
 ```cpp
 // Source: external/mesa3d/src/gfxstream/guest/GoldfishAddressSpace/AddressSpaceStream.cpp
@@ -534,7 +536,7 @@ The `kFenceOut` flag asks the kernel for an out-fence — a sync FD that signals
 
 ## 12.11 gralloc and minigbm: Sharing Graphics Buffers
 
-A `glClear` produces no pixels the CPU ever touches, but textures, camera frames, and the framebuffer are real buffers that must be shared between guest and host and sometimes mapped by guest CPU code. That is gralloc's job, and the emulator has more than one gralloc.
+A `glClear` produces no pixels that the CPU ever touches. Textures, camera frames, and the framebuffer are real buffers. They must be shared between guest and host, and guest CPU code sometimes maps them. That is gralloc's job, and the emulator has more than one gralloc.
 
 ### 12.11.1 One abstract Gralloc, three backends
 
@@ -549,7 +551,7 @@ enum GrallocType {
 };
 ```
 
-The key methods are `createColorBuffer`, `allocate`, `lock`/`lockPlanes`/`unlock`, and `getHostHandle` — the last one maps a guest `native_handle_t` to the host color-buffer ID that the renderControl and Vulkan encoders pass to the host. The factory picks the backend from a property:
+The key methods are `createColorBuffer`, `allocate`, `lock`/`lockPlanes`/`unlock`, and `getHostHandle`. The last one maps a guest `native_handle_t` to the host color-buffer ID that the renderControl and Vulkan encoders pass to the host. The factory picks the backend from a property:
 
 ```cpp
 // Source: external/mesa3d/src/gfxstream/guest/android/GfxStreamGralloc.cpp
@@ -563,7 +565,7 @@ Gralloc* createPlatformGralloc(int32_t descriptor) {
 }
 ```
 
-`GoldfishGralloc` (`GrallocGoldfish.cpp`) is the legacy path that talks to the host through renderControl color-buffer calls. `MinigbmGralloc` (`GrallocMinigbm.cpp`) allocates real virtio-gpu resources through the same `VirtGpuDevice` used by Vulkan, so a buffer can be a first-class virtio-gpu blob shared with the host GPU. `EmulatedGralloc` (`GrallocEmulated.cpp`) is the off-Android/host-test backend.
+`GoldfishGralloc` (`GrallocGoldfish.cpp`) is the legacy path that talks to the host through renderControl color-buffer calls. `MinigbmGralloc` (`GrallocMinigbm.cpp`) allocates real virtio-gpu resources through the same `VirtGpuDevice` that Vulkan uses. A buffer can therefore be a first-class virtio-gpu blob shared with the host GPU. `EmulatedGralloc` (`GrallocEmulated.cpp`) is the off-Android/host-test backend.
 
 ### 12.11.2 minigbm allocates virtio-gpu resources
 
@@ -655,12 +657,12 @@ cat external/mesa3d/src/gfxstream/guest/vulkan/gfxstream_icd.json
 
 ## Summary
 
-- The guest GPU driver does not drive hardware; it **serializes** EGL/GLES/Vulkan calls and forwards them to a host renderer that owns the real GPU. The driver is split across `device/generic/goldfish-opengl/` (legacy), `hardware/google/gfxstream/guest/` (GLES/EGL + transport), and `external/mesa3d/src/gfxstream/guest/` (Vulkan + platform + gralloc).
+- The guest GPU driver does not drive hardware. It **serializes** EGL/GLES/Vulkan calls and forwards them to a host renderer that owns the real GPU. The driver is split across `device/generic/goldfish-opengl/` (legacy), `hardware/google/gfxstream/guest/` (GLES/EGL + transport), and `external/mesa3d/src/gfxstream/guest/` (Vulkan + platform + gralloc).
 - The GLES ICDs (`libEGL_emulation`, `libGLESv1_CM_emulation`, `libGLESv2_emulation`) are thin: each entry point fetches a thread-local `GL2Encoder` via `getEGLThreadInfo()->hostConn` and forwards the call.
-- The encoders are mostly generated by `gfxstream_generic_apigen` (emugen) from three spec files per API (`.in`, `.attrib`, `.types`), so the guest encoder and host decoder share one source of truth. The GLES wire format is `[opcode][size][args][optional checksum]`, written directly into a stream buffer with `memcpy`.
-- EGL window-system operations go through a separate `renderControl` (`rc*`) encoder; `eglCreateContext` creates a host context and the guest keeps only an integer handle, while `eglSwapBuffers` is a flush plus a `rcFlushWindowColorBuffer*` control message.
+- The encoders are mostly generated by `gfxstream_generic_apigen` (emugen) from three spec files per API (`.in`, `.attrib`, `.types`). The guest encoder and host decoder therefore share one source of truth. The GLES wire format is `[opcode][size][args][optional checksum]`, written directly into a stream buffer with `memcpy`.
+- EGL window-system operations go through a separate `renderControl` (`rc*`) encoder. `eglCreateContext` creates a host context, and the guest keeps only an integer handle. `eglSwapBuffers` is a flush plus a `rcFlushWindowColorBuffer*` control message.
 - The Vulkan ICD is a full Mesa driver (`gfxstream_vk_*`) layered over a `ResourceTracker` and a generated `VkEncoder`. Because Vulkan structs are variable-size, encoding is two-pass: a `VulkanCountingStream` measures the packet, then `VulkanStreamGuest` writes it. Command buffers stage locally in a `CommandBufferStagingStream` and ship at submit time.
-- All encoders write into a per-thread `HostConnection`/`IOStream`. The transport is chosen from `ro.boot.hardware.gltransport` among QEMU pipe, goldfish address-space ring, and the two virtio-gpu variants; Vulkan and ANGLE are pinned to the address-space ring for throughput.
+- All encoders write into a per-thread `HostConnection`/`IOStream`. The transport is chosen from `ro.boot.hardware.gltransport` among QEMU pipe, goldfish address-space ring, and the two virtio-gpu variants. Vulkan and ANGLE are pinned to the address-space ring for throughput.
 - Bytes reach the host either via `DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST` (pipe stream) or a lock-free shared ring with an atomic `transfer_size`/`transfer_mode` and a backoff-and-doorbell notification (address-space stream). Control and submit operations can also go straight through `DRM_IOCTL_VIRTGPU_EXECBUFFER`, optionally returning an out-fence sync FD.
 - gralloc bridges graphics memory: an abstract `Gralloc` with three backends (`GoldfishGralloc`, `MinigbmGralloc`, `EmulatedGralloc`) selected by `ro.hardware.gralloc`. minigbm allocates real virtio-gpu resources; the legacy goldfish path creates host color buffers via renderControl. `getHostHandle` maps a guest buffer to the host-side resource ID the encoders send.
 

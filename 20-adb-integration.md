@@ -1,8 +1,12 @@
 # Chapter 20: ADB Integration
 
-The Android Debug Bridge is the single most-used tool in the Android developer's box: `adb shell`, `adb install`, `adb logcat`, `adb push`. On a physical phone it rides USB or Wi-Fi. The emulator has neither — the guest kernel sees a virtio network device, but that network is a user-mode NAT with no route from the host to the guest's `adbd` socket, and there is no USB at all. Yet `adb devices` reliably lists `emulator-5554`, and everything works. This chapter explains the machinery that makes that illusion seamless.
+The Android Debug Bridge is the single most-used tool in the Android developer's box: `adb shell`, `adb install`, `adb logcat`, `adb push`. On a physical phone it rides USB or Wi-Fi. The emulator has neither. The guest kernel sees a virtio network device. But that network is a user-mode NAT with no route from the host to the guest's `adbd` socket. There is no USB at all.
 
-The trick is that the emulator does not expose the guest's TCP port to the host. Instead it carries the ADB transport over an in-VM pipe — `qemu_pipe` — and the host process acts as a proxy: it opens a loopback TCP server on the host, the guest's `adbd` opens a pipe to the emulator, and the emulator splices the two together. Layered on top of that proxy are three more pieces: a discovery handshake so the `adb` server learns about emulators on non-standard ports, an in-process ADB *client* (`AdbConnection`) the emulator uses to drive its own guest for features like `logcat` and file push, and a host-side `AdbInterface` that locates and shells out to the real `adb` binary. We trace all four, grounding every claim in the source under `external/qemu/android/`.
+Yet `adb devices` reliably lists `emulator-5554`, and everything works. This chapter explains the machinery that makes that illusion seamless.
+
+The trick is that the emulator does not expose the guest's TCP port to the host. Instead it carries the ADB transport over an in-VM pipe, `qemu_pipe`. The host process acts as a proxy. It opens a loopback TCP server on the host, the guest's `adbd` opens a pipe to the emulator, and the emulator splices the two together. 
+
+Three more pieces sit on top of that proxy. A discovery handshake lets the `adb` server learn about emulators on non-standard ports. An in-process ADB *client* (`AdbConnection`) lets the emulator drive its own guest for features like `logcat` and file push. A host-side `AdbInterface` locates and shells out to the real `adb` binary. We trace all four and ground every claim in the source under `external/qemu/android/`.
 
 ---
 
@@ -36,7 +40,7 @@ AdbdCommunicationMode avdInfo_getAdbdCommunicationMode(const AvdInfo* i,
 }
 ```
 
-The two modes are dispatched in `setup_console_and_adb_ports` (`external/qemu/android/android-emu/android/qemu-setup.cpp`): legacy mode calls `agents->net->slirpRedir(false, adb_port, 5555)` to install the NAT redirect, while pipe mode calls `android_adb_server_init(adb_port)` and later registers the pipe service. The rest of this chapter is about pipe mode, which is what every device you will ever launch actually uses.
+The two modes are dispatched in `setup_console_and_adb_ports` (`external/qemu/android/android-emu/android/qemu-setup.cpp`). Legacy mode calls `agents->net->slirpRedir(false, adb_port, 5555)` to install the NAT redirect. Pipe mode calls `android_adb_server_init(adb_port)` and later registers the pipe service. The rest of this chapter is about pipe mode, which is what every device you will ever launch actually uses.
 
 How the two modes reach the guest's `adbd`:
 
@@ -101,7 +105,7 @@ Port responsibilities for the first instance:
 
 ## 20.3 The qemu_pipe Transport
 
-`qemu_pipe` is the emulator's generic guest-to-host channel: the guest opens `/dev/qemu_pipe`, writes a `pipe:<service>` string, and from then on the file descriptor is a bidirectional byte stream wired to a host-side `AndroidPipe::Service` of that name. ADB rides the service named `qemud:adb`.
+`qemu_pipe` is the emulator's generic guest-to-host channel. The guest opens `/dev/qemu_pipe` and writes a `pipe:<service>` string. From then on the file descriptor is a bidirectional byte stream wired to a host-side `AndroidPipe::Service` of that name. ADB rides the service named `qemud:adb`.
 
 On the host the service is `AdbGuestPipe::Service`, constructed with the literal name in `external/qemu/android/android-emu/android/emulation/AdbGuestPipe.h`:
 
@@ -111,7 +115,7 @@ Service(AdbHostAgent* hostAgent)
     : AndroidPipe::Service("qemud:adb"), mHostAgent(hostAgent) {}
 ```
 
-When the guest's `adbd` opens `/dev/qemu_pipe` and writes `pipe:qemud:adb:<port>\0`, the pipe layer matches the `qemud:adb` service name and calls `AdbGuestPipe::Service::create`, minting one `AdbGuestPipe` instance per transport. The trailing port (decimal, `5555` by default) is guest-local and the emulator ignores it — the header comment notes it is "assumed to be here for obsolete reasons." Each pipe instance is a state machine that owns one ADB transport for its lifetime.
+When the guest's `adbd` opens `/dev/qemu_pipe` and writes `pipe:qemud:adb:<port>\0`, the pipe layer matches the `qemud:adb` service name. It calls `AdbGuestPipe::Service::create`, which creates one `AdbGuestPipe` instance per transport. The trailing port (decimal, `5555` by default) is guest-local and the emulator ignores it. The header comment notes it is "assumed to be here for obsolete reasons." Each pipe instance is a state machine that owns one ADB transport for its lifetime.
 
 The end-to-end wiring, copied almost verbatim from the documentation block in `AdbGuestPipe.h`:
 
@@ -142,7 +146,7 @@ void registerServices() {
 }
 ```
 
-`AdbVsockPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.h`) is the virtio-vsock variant: same proxy role, but the guest side speaks vsock instead of the legacy pipe device. Both implement the same `AdbGuestAgent` interface so the host listener is identical for either transport. Regardless of whether the vsock or the legacy pipe transport is chosen, `registerServices()` always registers a `qemud:adb-debug` service via `AdbDebugPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbDebugPipe.h`) after the vsock/pipe `if`/`else` block. The service is registered unconditionally; only the stderr stream it dumps proxied ADB traffic to is attached, when the emulator is launched with `-debug adb` (`VERBOSE_CHECK(adb)`).
+`AdbVsockPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbVsockPipe.h`) is the virtio-vsock variant: same proxy role, but the guest side speaks vsock instead of the legacy pipe device. Both implement the same `AdbGuestAgent` interface so the host listener is identical for either transport. `registerServices()` always registers a `qemud:adb-debug` service via `AdbDebugPipe::Service` (`external/qemu/android/android-emu/android/emulation/AdbDebugPipe.h`), for either transport. It does this after the vsock/pipe `if`/`else` block. The service is registered unconditionally; only the stderr stream it dumps proxied ADB traffic to is attached, when the emulator is launched with `-debug adb` (`VERBOSE_CHECK(adb)`).
 
 ## 20.4 Two Agents: Host Listener and Guest Pipe
 
@@ -161,7 +165,7 @@ struct AdbHostAgent {
 };
 ```
 
-`AdbHostListener::reset` (`external/qemu/android/android-emu/android/emulation/AdbHostListener.cpp`) creates the loopback TCP server on `adb_port`. It prefers IPv4 but falls back to IPv6-only on systems without IPv4, and it creates a *second* server on a random port for JDWP (used by Android Studio's Icebox debugger):
+`AdbHostListener::reset` (`external/qemu/android/android-emu/android/emulation/AdbHostListener.cpp`) creates the loopback TCP server on `adb_port`. It prefers IPv4 but falls back to IPv6-only on systems without IPv4. It also creates a *second* server on a random port for JDWP (used by Android Studio's Icebox debugger):
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/AdbHostListener.cpp
@@ -173,7 +177,7 @@ mRegularAdbServer = AsyncSocketServer::createTcpLoopbackServer(
         mode, android::base::ThreadLooper::get());
 ```
 
-When the host `adb` server connects to that loopback port, `onHostServerConnection` simply forwards the accepted socket to the guest agent as an `AdbPortType::RegularAdb` (or `Jdwp`) connection. The `AdbGuestPipe::Service` then finds a pipe that is waiting and hands it the socket.
+When the host `adb` server connects to that loopback port, `onHostServerConnection` forwards the accepted socket to the guest agent as an `AdbPortType::RegularAdb` (or `Jdwp`) connection. The `AdbGuestPipe::Service` then finds a pipe that is waiting and hands it the socket.
 
 Object responsibilities and the calls between them:
 
@@ -208,7 +212,7 @@ A freshly created pipe is constructed in the `WaitingForGuestAcceptCommand` stat
 setExpectedGuestCommand("accept", State::WaitingForGuestAcceptCommand);
 ```
 
-The command matcher in `onGuestSendCommand` compares the guest's bytes against the expected command byte-for-byte. A mismatch is treated as an I/O error that forces the guest to tear down the transport — "closing the connection now is easier than sending 'ko'." On a full match of `accept`, the pipe calls `waitForHostConnection`; on a full match of `start`, it flips to `ProxyingData`:
+The command matcher in `onGuestSendCommand` compares the guest's bytes against the expected command byte-for-byte. A mismatch is treated as an I/O error that forces the guest to tear down the transport. The reason: "closing the connection now is easier than sending 'ko'." On a full match of `accept`, the pipe calls `waitForHostConnection`; on a full match of `start`, it flips to `ProxyingData`:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/AdbGuestPipe.cpp
@@ -221,7 +225,7 @@ if (mState == State::WaitingForGuestAcceptCommand) {
 }
 ```
 
-`waitForHostConnection` is where the two agents meet: it moves the pipe to `WaitingForHostAdbConnection`, then asks the host listener to both listen and notify the server, so an `adb` server on a non-standard port still learns this instance exists:
+`waitForHostConnection` is where the two agents meet. It moves the pipe to `WaitingForHostAdbConnection`. Then it asks the host listener to both listen and notify the server. So an `adb` server on a non-standard port still learns this instance exists:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/AdbGuestPipe.cpp
@@ -242,7 +246,7 @@ signalWake(PIPE_WAKE_READ);
 
 ### 20.5.1 Why the guest keeps opening pipes
 
-A subtle detail the header calls out: `adbd` typically creates a *new* `AdbGuestPipe` immediately, but only ever has one pipe in `accept` at a time. So the service usually holds several pipes — one actively proxying, plus pending ones in `WaitingForGuestAcceptCommand`. `searchForActivePipe` picks the one in `WaitingForHostAdbConnection` when a host socket arrives, and once no pipe is left waiting, the service calls `stopListening` so the host port stops accepting until the next `accept`. This is what lets a single emulator multiplex many concurrent ADB transports (one per `adb shell`, `adb logcat`, file transfer, and so on) over the one pipe service.
+A subtle detail the header calls out: `adbd` typically creates a *new* `AdbGuestPipe` immediately, but only ever has one pipe in `accept` at a time. So the service usually holds several pipes — one actively proxying, plus pending ones in `WaitingForGuestAcceptCommand`. `searchForActivePipe` picks the one in `WaitingForHostAdbConnection` when a host socket arrives. Once no pipe is left waiting, the service calls `stopListening` so the host port stops accepting until the next `accept`. This lets a single emulator multiplex many concurrent ADB transports (one per `adb shell`, `adb logcat`, file transfer, and so on) over the one pipe service.
 
 The full per-pipe lifecycle:
 
@@ -261,7 +265,9 @@ stateDiagram-v2
 
 ## 20.6 ADB Server Discovery
 
-The host `adb` server normally finds emulators by probing: at startup it scans the 16 standard odd ports `5555, 5557, ... 5585` on loopback and tries to speak the ADB transport protocol to each. That works when the emulator landed on a standard port. But if `adb` is restarted *after* the emulator started on a non-standard port — or the emulator simply wants to be found promptly without waiting for the next scan — the emulator proactively notifies the server. This is the job of `AdbHostServer` in `external/qemu/android/emu/adb/interface/src/android/emulation/AdbHostServer.cpp`.
+The host `adb` server normally finds emulators by probing. At startup it scans the 16 standard odd ports `5555, 5557, ... 5585` on loopback and tries to speak the ADB transport protocol to each. That works when the emulator landed on a standard port.
+
+But the emulator proactively notifies the server in two cases. In the first case, `adb` is restarted *after* the emulator started on a non-standard port. In the second case, the emulator wants to be found promptly without waiting for the next scan. This is the job of `AdbHostServer` in `external/qemu/android/emu/adb/interface/src/android/emulation/AdbHostServer.cpp`.
 
 The server itself listens on a well-known TCP port. `getClientPort` returns the default `5037` unless overridden by the `ANDROID_ADB_SERVER_PORT` environment variable:
 
@@ -305,7 +311,7 @@ auto wireformat = StringFormat("%04x%s", (uint32_t)message.size(), message.c_str
 return android::base::socketSendAll(fd, wireformat.c_str(), wireformat.size());
 ```
 
-So `host:emulator:5555` becomes `0012host:emulator:5555` on the wire. The server reads the port and adds a transport for `emulator-5554`. Two places trigger this notification: `android_adb_server_notify` in `adb-server.cpp` fires it asynchronously right after emulation setup (so a slow IPv6 loopback cannot stall startup), and `AdbGuestPipe::waitForHostConnection` fires it every time a guest pipe starts waiting.
+So `host:emulator:5555` becomes `0012host:emulator:5555` on the wire. The server reads the port and adds a transport for `emulator-5554`. Two places trigger this notification. `android_adb_server_notify` in `adb-server.cpp` fires it asynchronously right after emulation setup, so a slow IPv6 loopback cannot stall startup. `AdbGuestPipe::waitForHostConnection` fires it every time a guest pipe starts waiting.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/adb-server.cpp
@@ -321,7 +327,7 @@ void android_adb_server_notify(int port) {
 
 ### 20.6.2 Negotiating the protocol version
 
-`AdbHostServer::getProtocolVersion` connects to 5037 and sends `host:version`, then parses the server's `OKAY`-prefixed hex reply. The emulator uses this to pick a compatible `adb` binary (Section 20.8). The reply protocol is the standard ADB host-service handshake: a four-byte `OKAY` or `FAIL`, then a length-prefixed payload that, for `host:version`, is a four-byte hex version number.
+`AdbHostServer::getProtocolVersion` connects to 5037 and sends `host:version`, then parses the server's `OKAY`-prefixed hex reply. The emulator uses this to pick a compatible `adb` binary (Section 20.8). The reply protocol is the standard ADB host-service handshake. It has a four-byte `OKAY` or `FAIL`, then a length-prefixed payload. For `host:version`, the payload is a four-byte hex version number.
 
 How discovery flows end to end:
 
@@ -337,7 +343,7 @@ flowchart LR
 
 ## 20.7 ADB Authentication
 
-ADB is authenticated: `adbd` will only let a host talk to it once the host proves possession of a trusted RSA key (this is the "Allow USB debugging?" dialog on real devices). The emulator participates in this protocol in two distinct roles, and the auth code lives in `external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/adbkey.cpp` with declarations in `adbkey.h`.
+ADB is authenticated. `adbd` will only let a host talk to it once the host proves possession of a trusted RSA key. On real devices, this is the "Allow USB debugging?" dialog. The emulator participates in this protocol in two distinct roles, and the auth code lives in `external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/adbkey.cpp` with declarations in `adbkey.h`.
 
 The wire-level auth is a three-message dance using the ADB transport commands. The relevant subtypes are defined in `AdbConnection.cpp`:
 
@@ -348,7 +354,7 @@ The wire-level auth is a three-message dance using the ADB transport commands. T
 #define ADB_AUTH_RSAPUBLICKEY 3
 ```
 
-The sequence: `adbd` sends `A_AUTH` with an `ADB_AUTH_TOKEN` (a 20-byte random challenge); the client signs it with its private key and replies `A_AUTH`/`ADB_AUTH_SIGNATURE`; if no known key matches, the client may offer its public key with `ADB_AUTH_RSAPUBLICKEY`, prompting the on-device authorization dialog. `TOKEN_SIZE` is 20 and the RSA modulus is 2048 bits, both fixed in `adbkey.h`:
+The sequence has three steps. First, `adbd` sends `A_AUTH` with an `ADB_AUTH_TOKEN` (a 20-byte random challenge). Second, the client signs it with its private key and replies `A_AUTH`/`ADB_AUTH_SIGNATURE`. Third, if no known key matches, the client may offer its public key with `ADB_AUTH_RSAPUBLICKEY`. This prompts the on-device authorization dialog. `TOKEN_SIZE` is 20 and the RSA modulus is 2048 bits, both fixed in `adbkey.h`:
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/include/android/emulation/control/adb/adbkey.h
@@ -362,9 +368,9 @@ The host's RSA key pair is the user's standard ADB key (`adbkey` / `adbkey.pub`)
 
 ### 20.7.1 The pull-key gRPC and the direct-bridge caveat
 
-There is also a gRPC RPC that lets a trusted client fetch the emulator's private key so it can authenticate to the same device: `AdbServiceImpl::pullAdbKey` in `external/qemu/android/android-grpc/services/adb/server/src/android/emulation/control/adb/AdbService.cpp` reads `getPrivateAdbKeyPath()` and returns it in an `AdbKey` protobuf. This is how an embedded UI can drive `adb` against the emulator without a separate authorization prompt.
+There is also a gRPC RPC that lets a trusted client fetch the emulator's private key. With the key, the client can authenticate to the same device. `AdbServiceImpl::pullAdbKey` in `external/qemu/android/android-grpc/services/adb/server/src/android/emulation/control/adb/AdbService.cpp` reads `getPrivateAdbKeyPath()` and returns it in an `AdbKey` protobuf. This is how an embedded UI can drive `adb` against the emulator without a separate authorization prompt.
 
-The in-process client (Section 20.9) deliberately refuses to *install* a new public key into the guest. `AdbConnection::sendPublicKeyToDevice` sets the connection to `failed` and bails out, citing bug `b/150160590` — offering a key from a second connection conflicts with the real `adb` server's auth, so the direct bridge disables itself rather than fight over the device:
+The in-process client (Section 20.9) deliberately refuses to *install* a new public key into the guest. `AdbConnection::sendPublicKeyToDevice` sets the connection to `failed` and bails out. It cites bug `b/150160590`. A key offer from a second connection conflicts with the real `adb` server's auth. So the direct bridge disables itself rather than fight over the device:
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/AdbConnection.cpp
@@ -393,7 +399,7 @@ virtual void setSerialNumberPort(int port) final {
 
 ### 20.8.1 Which adb binary
 
-`AdbLocatorImpl::availableAdb` searches three locations in order, keeping only candidates that actually report a version string:
+`AdbLocatorImpl::availableAdb` searches three locations in order and keeps only candidates that actually report a version string:
 
 1. `platform-tools/adb` under the SDK root resolved from the environment (`getSdkRootDirectoryByEnv`).
 2. `platform-tools/adb` under the SDK root resolved relative to the emulator executable (`getSdkRootDirectoryByPath`).
@@ -413,7 +419,7 @@ std::vector<std::string> AdbLocatorImpl::availableAdb() {
 }
 ```
 
-`selectAdbPath` then prefers the candidate whose protocol version matches the running `adb` *server* (queried via `AdbDaemon::getProtocolVersion`, which under the hood is `AdbHostServer::getProtocolVersion` from Section 20.6.2). Matching versions avoids the situation where launching a mismatched `adb` silently kills and restarts the user's server. If no match exists it falls back to the newest available, and flags whether it meets `kMinAdbProtocol`.
+`selectAdbPath` then prefers the candidate whose protocol version matches the running `adb` *server*. The query uses `AdbDaemon::getProtocolVersion`, which under the hood is `AdbHostServer::getProtocolVersion` from Section 20.6.2. Matching versions avoids the situation where launching a mismatched `adb` silently kills and restarts the user's server. If no match exists it falls back to the newest available, and flags whether it meets `kMinAdbProtocol`.
 
 ### 20.8.2 Running a command
 
@@ -427,13 +433,13 @@ command = std::make_shared<AdbThroughExe>(
 command->start();
 ```
 
-`enqueueCommand` layers retry-with-backoff on top, distinguishing the very first command (longer retry, since `adb` may still be launching) from later ones via `INITIAL_ADB_RETRY_LIMIT` versus `SUBSEQUENT_ADB_RETRY_LIMIT`. The whole thing is gated on `android_qemu_mode()` — the interface no-ops outside QEMU mode.
+`enqueueCommand` layers retry-with-backoff on top. It distinguishes the very first command (longer retry, since `adb` may still be launching) from later ones via `INITIAL_ADB_RETRY_LIMIT` versus `SUBSEQUENT_ADB_RETRY_LIMIT`. The whole thing is gated on `android_qemu_mode()` — the interface no-ops outside QEMU mode.
 
 ## 20.9 The In-Process ADB Client
 
-Some features cannot afford to depend on the user's `adb` binary at all — for example, pushing a file or running `logcat` very early in boot, or in headless/CI environments where no SDK is installed. For these the emulator embeds its *own* minimal ADB client, `AdbConnection`, which connects directly to the loopback `adb_port` and speaks the raw transport protocol to the guest's `adbd`. This is the "direct bridge."
+Some features cannot afford to depend on the user's `adb` binary at all. Examples are pushing a file or running `logcat` very early in boot, or in headless/CI environments where no SDK is installed. For these the emulator embeds its *own* minimal ADB client, `AdbConnection`. It connects directly to the loopback `adb_port` and speaks the raw transport protocol to the guest's `adbd`. This is the "direct bridge."
 
-The transport command set is encoded in `AdbConnection.cpp` as a 4-byte little-endian enum — the same `A_CNXN`/`A_AUTH`/`A_OPEN`/`A_OKAY`/`A_CLSE`/`A_WRTE` commands the real `adb` uses on USB and TCP:
+The transport command set is encoded in `AdbConnection.cpp` as a 4-byte little-endian enum. These are the same `A_CNXN`/`A_AUTH`/`A_OPEN`/`A_OKAY`/`A_CLSE`/`A_WRTE` commands the real `adb` uses on USB and TCP:
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/AdbConnection.cpp
@@ -460,7 +466,7 @@ void AdbConnection::setAdbPort(int adbPort) {
 
 ### 20.9.1 Handshake and connection state
 
-The client state is the `AdbState` enum in `AdbConnection.h`: `disconnected`, `socket`, `connecting`, `authorizing`, `offer_key`, `connected`, `failed`. On connect it sends `A_CNXN` with a banner and version; `adbd` replies with `A_AUTH` (triggering the signature flow of Section 20.7), then its own `A_CNXN`. `handleConnect` parses the device banner — `device::ro.product.name=...;features=...` — extracting the **feature set** so callers can query `hasFeature("shell_v2")`, and finally moves to `connected`:
+The client state is the `AdbState` enum in `AdbConnection.h`: `disconnected`, `socket`, `connecting`, `authorizing`, `offer_key`, `connected`, `failed`. On connect it sends `A_CNXN` with a banner and version. `adbd` replies with `A_AUTH`, which triggers the signature flow of Section 20.7. Then it sends its own `A_CNXN`. `handleConnect` parses the device banner — `device::ro.product.name=...;features=...` — and extracts the **feature set** so callers can query `hasFeature("shell_v2")`. Then it moves to `connected`:
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/AdbConnection.cpp
@@ -497,9 +503,9 @@ struct ShellHeader {
 } __attribute__((packed));
 ```
 
-`AdbShellStream::isV1` reports which protocol is in use; for v1 the exit code is never set and stderr is folded into stdout, while v2 separates the three streams. This is what backs the gRPC `logcat` and shell RPCs and the file-push helpers without ever shelling out to `adb`.
+`AdbShellStream::isV1` reports which protocol is in use. For v1 the exit code is never set and stderr is folded into stdout. Protocol v2 separates the three streams. This is what backs the gRPC `logcat` and shell RPCs and the file-push helpers without ever shelling out to `adb`.
 
-`AdbInterfaceImpl::runAdbCommand` falls back to this in-process path for `shell` and `logcat` only under a precise condition: the emulator was launched with `-no-direct-adb`, the direct bridge (`AdbConnection`) has already `failed()`, and the command is one of those two. In that case it builds an `AdbDirect` rather than an `AdbThroughExe`:
+`AdbInterfaceImpl::runAdbCommand` falls back to this in-process path for `shell` and `logcat` only under a precise condition. Three things must be true. The emulator was launched with `-no-direct-adb`. The direct bridge (`AdbConnection`) has already `failed()`. The command is one of those two. In that case it builds an `AdbDirect` rather than an `AdbThroughExe`:
 
 ```cpp
 // Source: external/qemu/android/emu/adb/interface/src/android/emulation/control/adb/AdbInterface.cpp
@@ -509,7 +515,7 @@ if (getConsoleAgents()->settings->android_cmdLineOptions()->no_direct_adb &&
 }
 ```
 
-Because a public key can only ever be offered by one connection at a time (`b/150160590`), the static `AdbConnection::failed()` guard ensures the in-process client and the external `adb` server never both try to authorize, which would otherwise leave the device flapping between authorized and unauthorized.
+Only one connection at a time can ever offer a public key (`b/150160590`). For this reason, the static `AdbConnection::failed()` guard makes sure the in-process client and the external `adb` server never both try to authorize. Otherwise the device would flap between authorized and unauthorized.
 
 The two host-side clients and how they reach the guest:
 
@@ -535,7 +541,7 @@ flowchart TB
 
 ## 20.10 Observability: Sniffing ADB Traffic
 
-Because the emulator sits in the middle of every ADB transport, it can log the bytes flowing both ways. `AdbMessageSniffer` (`external/qemu/android/android-emu/android/emulation/AdbMessageSniffer.h`) is the decoder; each `AdbGuestPipe` owns two of them — one per direction — created in the pipe constructor and keyed off the AVD's `test_monitorAdb` hardware setting:
+Because the emulator sits in the middle of every ADB transport, it can log the bytes that flow both ways. `AdbMessageSniffer` (`external/qemu/android/android-emu/android/emulation/AdbMessageSniffer.h`) is the decoder. Each `AdbGuestPipe` owns two of them, one per direction. The pipe constructor creates them and keys them off the AVD's `test_monitorAdb` hardware setting:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/emulation/AdbGuestPipe.cpp
@@ -545,9 +551,9 @@ mSendingMesg(AdbMessageSniffer::create("HOST<==GUEST",
         getConsoleAgents()->settings->hw()->test_monitorAdb))
 ```
 
-Separately, launching with `-debug adb` (the `VERBOSE_CHECK(adb)` flag in `adb-server.cpp`) attaches a `StdioStream(stderr)` to the `qemud:adb-debug` pipe, so the raw proxied traffic is dumped as it flows. Both mechanisms are diagnostic only; neither alters the transport.
+Separately, the `-debug adb` launch option (the `VERBOSE_CHECK(adb)` flag in `adb-server.cpp`) attaches a `StdioStream(stderr)` to the `qemud:adb-debug` pipe. The raw proxied traffic is then dumped as it flows. Both mechanisms are diagnostic only; neither alters the transport.
 
-The JDWP and snapshot cases get an extra layer: `AdbHub` (`external/qemu/android/android-emu/android/emulation/AdbHub.h`) parses incoming traffic on a pipe and, for JDWP transports, routes it through a `JdwpProxy` that can answer some messages itself. `AdbHub` is also what lets a snapshot reconnect a fresh host connection to an existing guest stream without disconnecting the guest — `needsHubTranslation()` returns true for JDWP pipes and for pipes reused from a snapshot.
+The JDWP and snapshot cases get an extra layer. `AdbHub` (`external/qemu/android/android-emu/android/emulation/AdbHub.h`) parses incoming traffic on a pipe and, for JDWP transports, routes it through a `JdwpProxy` that can answer some messages itself. `AdbHub` also lets a snapshot reconnect a fresh host connection to an existing guest stream, so the guest does not disconnect. `needsHubTranslation()` returns true for JDWP pipes and for pipes reused from a snapshot.
 
 ## 20.11 Try It
 
@@ -595,13 +601,13 @@ emulator -avd <name> -no-direct-adb -verbose 2>&1 | grep -i 'direct'
 
 ## Summary
 
-- The emulator has no USB and no host-routable guest network, so modern AVDs carry the ADB transport over the in-VM `qemu_pipe` service named `qemud:adb`, with the host process acting as a TCP-to-pipe proxy. Pre-API-16 images fall back to a SLIRP port redirect; the choice is made by `avdInfo_getAdbdCommunicationMode`.
-- Each instance owns an adjacent console/ADB port pair starting at `5554`/`5555` and stepping by two (`android_ports_setup`); the `emulator-NNNN` serial uses the even console port (`android_serial_number_port = adb_port - 1`).
-- The proxy splits into `AdbHostListener` (a loopback TCP server on `adb_port`, plus a random JDWP port) and `AdbGuestPipe::Service`, communicating through the `AdbHostAgent` / `AdbGuestAgent` interfaces in `AdbTypes.h`.
-- Each transport is an `AdbGuestPipe` state machine driven by a four-word protocol: the guest writes `accept`, the emulator waits for the host server then replies `ok`, the guest writes `start`, and from then on bytes are proxied verbatim.
-- `AdbHostServer::notify` sends `host:emulator:<port>` to the `adb` server on port 5037 so emulators on non-standard ports are discovered without waiting for the server's port scan; `getClientPort` honors `ANDROID_ADB_SERVER_PORT`.
-- ADB authentication uses RSA token signing (`ADB_AUTH_TOKEN`/`SIGNATURE`/`RSAPUBLICKEY` with a 20-byte token and 2048-bit key) handled in `adbkey.cpp`; a gRPC `pullAdbKey` RPC shares the private key with trusted clients, and the in-process bridge refuses to install a public key to avoid auth conflicts.
-- `AdbInterface` locates a version-matched `adb` binary (SDK-by-env, SDK-by-path, then `PATH`) and shells out with `-s emulator-NNNN`, while `AdbConnection` is a full in-process ADB client speaking the raw transport directly to `adb_port`, backing `AdbShellStream` for shell/logcat and file push.
+- The emulator has no USB and no host-routable guest network, so modern AVDs carry the ADB transport over the in-VM `qemu_pipe` service named `qemud:adb`. The host process acts as a TCP-to-pipe proxy. Pre-API-16 images fall back to a SLIRP port redirect; the choice is made by `avdInfo_getAdbdCommunicationMode`.
+- Each instance owns an adjacent console/ADB port pair. The pairs start at `5554`/`5555` and step by two (`android_ports_setup`). The `emulator-NNNN` serial uses the even console port (`android_serial_number_port = adb_port - 1`).
+- The proxy splits into `AdbHostListener` (a loopback TCP server on `adb_port`, plus a random JDWP port) and `AdbGuestPipe::Service`. They communicate through the `AdbHostAgent` / `AdbGuestAgent` interfaces in `AdbTypes.h`.
+- Each transport is an `AdbGuestPipe` state machine driven by a four-word protocol. The guest writes `accept`. The emulator waits for the host server, then replies `ok`. The guest writes `start`, and from then on bytes are proxied verbatim.
+- `AdbHostServer::notify` sends `host:emulator:<port>` to the `adb` server on port 5037 so emulators on non-standard ports are discovered without waiting for the server's port scan. `getClientPort` honors `ANDROID_ADB_SERVER_PORT`.
+- ADB authentication uses RSA token signing (`ADB_AUTH_TOKEN`/`SIGNATURE`/`RSAPUBLICKEY` with a 20-byte token and 2048-bit key) handled in `adbkey.cpp`. A gRPC `pullAdbKey` RPC shares the private key with trusted clients, and the in-process bridge refuses to install a public key to avoid auth conflicts.
+- `AdbInterface` locates a version-matched `adb` binary (SDK-by-env, SDK-by-path, then `PATH`) and shells out with `-s emulator-NNNN`. `AdbConnection` is a full in-process ADB client. It speaks the raw transport directly to `adb_port` and backs `AdbShellStream` for shell/logcat and file push.
 - `AdbMessageSniffer`, the `-debug adb` (`qemud:adb-debug`) pipe, and `AdbHub`/`JdwpProxy` give observability and JDWP/snapshot handling on top of the same proxy.
 
 ### Key Source Files

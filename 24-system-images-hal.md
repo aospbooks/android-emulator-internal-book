@@ -1,8 +1,12 @@
 # Chapter 24: System Images and the Goldfish HAL
 
-Every Android Emulator session boots an ordinary Android system image — the same AOSP build that runs on a phone, minus the phone. What makes it run inside QEMU instead of on real silicon is a small family of *virtual* devices named after the project's old codename, **goldfish**, plus a second-generation board called **ranchu**. The guest kernel sees a framebuffer, an audio chip, a battery, an input event device, and a magic "pipe" device. None of them are real hardware. Each is a QEMU device model on the host, and each is matched in the guest by a vendor HAL module — `gralloc.ranchu`, the `RanchuHWC` composer, the goldfish sensors HAL, the goldfish codecs — that knows how to talk to its host counterpart.
+Every Android Emulator session boots an ordinary Android system image — the same AOSP build that runs on a phone, minus the phone. A small family of *virtual* devices makes it run inside QEMU instead of on real silicon. The project's old codename, **goldfish**, names these devices. Besides them, there is a second-generation board called **ranchu**.
 
-This chapter walks the guest image from the outside in: the partition layout the emulator assembles, the ranchu board that exposes the goldfish MMIO devices, the `qemu_pipe` and address-space transports that carry HAL traffic to the host, and the individual HAL modules (graphics, sensors, audio, camera, media, power) that ride those transports. The recurring theme is that the goldfish HAL is *thin*: instead of driving silicon, it serializes a request and hands it to the host, where the real work — GPU rendering, sensor synthesis, camera capture — happens in the emulator process.
+The guest kernel sees a framebuffer, an audio chip, a battery, an input event device, and a magic "pipe" device. None of them are real hardware. Each is a QEMU device model on the host. In the guest, a vendor HAL module matches each one: `gralloc.ranchu`, the `RanchuHWC` composer, the goldfish sensors HAL, and the goldfish codecs. That module knows how to talk to its host counterpart.
+
+This chapter walks the guest image from the outside in. First comes the partition layout the emulator assembles. Next comes the ranchu board that exposes the goldfish MMIO devices. Then come the `qemu_pipe` and address-space transports that carry HAL traffic to the host. Last come the individual HAL modules (graphics, sensors, audio, camera, media, power) that ride those transports.
+
+The recurring theme is that the goldfish HAL is *thin*. It does not drive silicon. It serializes a request and hands it to the host. The real work happens there, in the emulator process: GPU rendering, sensor synthesis, and camera capture.
 
 ---
 
@@ -11,7 +15,7 @@ This chapter walks the guest image from the outside in: the partition layout the
 The emulator's virtual hardware comes in two layers of naming that frequently confuse newcomers.
 
 - **goldfish** is the original ARMv5/x86 virtual board and, more durably, the *family* of virtual peripherals: `goldfish_fb` (framebuffer), `goldfish_audio`, `goldfish_battery`, `goldfish-events` (input), `goldfish_pipe`, and `goldfish_sync`. The peripheral names survived every board revision.
-- **ranchu** is the modern board, built on QEMU's `virt`-style machine. It keeps the goldfish peripherals but moves everything else (CPU, interrupt controller, virtio transports) onto generic, upstream-friendly infrastructure and describes the board to the guest with a flattened device tree (FDT) instead of hard-coded addresses.
+- **ranchu** is the modern board, built on QEMU's `virt`-style machine. It keeps the goldfish peripherals but moves everything else (CPU, interrupt controller, virtio transports) onto generic, upstream-friendly infrastructure. It describes the board to the guest with a flattened device tree (FDT) instead of hard-coded addresses.
 
 The ranchu board lives in `external/qemu/hw/arm/ranchu.c`. Its memory map is an enum of fixed MMIO windows, one per goldfish device:
 
@@ -37,11 +41,11 @@ create_simple_device(vbi, pic, RANCHU_GOLDFISH_PIPE, "goldfish_pipe",
                      "generic,android-pipe", 2, 0, 0);
 ```
 
-The root node itself is tagged `compatible = "ranchu"` and the firmware node carries `hardware = "ranchu"` (`external/qemu/hw/arm/ranchu.c`, around line 155), which is how userspace and the kernel know they are on the emulator and not on real hardware.
+The root node itself is tagged `compatible = "ranchu"`. The firmware node carries `hardware = "ranchu"` (`external/qemu/hw/arm/ranchu.c`, around line 155). This is how userspace and the kernel know they are on the emulator and not on real hardware.
 
 ### 24.1.1 The board-to-guest contract
 
-A guest HAL module never reads `0x9010000` directly. The guest kernel's goldfish drivers bind to the `compatible` strings, expose ordinary Linux device nodes (`/dev/fb0`, an input event node, `/dev/qemu_pipe`), and the HAL talks to those nodes. The emulator only has to keep two things stable: the MMIO register layout of each device and the device-tree `compatible` string. Everything above the driver — the HAL, the framework, the apps — is unmodified AOSP.
+A guest HAL module never reads `0x9010000` directly. The guest kernel's goldfish drivers bind to the `compatible` strings and expose ordinary Linux device nodes (`/dev/fb0`, an input event node, `/dev/qemu_pipe`). The HAL talks to those nodes. The emulator only has to keep two things stable: the MMIO register layout of each device and the device-tree `compatible` string. Everything above the driver — the HAL, the framework, the apps — is unmodified AOSP.
 
 Goldfish device model and guest binding
 
@@ -104,7 +108,7 @@ Before any HAL runs, the emulator has to assemble a disk for the guest. The cano
     _AVD_IMG(VERIFIEDBOOTPARAMS, "VerifiedBootParams.textproto","Verified Boot Parameters") \
 ```
 
-The macro is expanded twice: once to build the `AvdImageType` enum (`AVD_IMAGE_KERNELRANCHU`, `AVD_IMAGE_INITSYSTEM`, and so on) and once to build the filename table. The header comment (`info.h`, near the top) explains that each AVD is a directory of "kernel/disk images" plus a config file, and that an AVD lives under a per-AVD content directory described by a small `.ini` file.
+The macro is expanded twice: once to build the `AvdImageType` enum (`AVD_IMAGE_KERNELRANCHU`, `AVD_IMAGE_INITSYSTEM`, and so on) and once to build the filename table. The header comment (`info.h`, near the top) explains that each AVD is a directory of "kernel/disk images" plus a config file. It also explains that an AVD lives under a per-AVD content directory described by a small `.ini` file.
 
 ### 24.2.1 The "init" / "user" split
 
@@ -119,7 +123,9 @@ The image types fall into four groups:
 3. **Per-AVD writable images** — `system-qemu.img`, `vendor-qemu.img`, `userdata-qemu.img`, `cache.img`, `sdcard.img`. Mutable, AVD-private.
 4. **Verified-boot and crypto** — `encryptionkey.img` and `VerifiedBootParams.textproto`, which carry the dm-verity / AVB parameters the kernel command line needs to mount `/system` and `/vendor` with verification enabled.
 
-The formats are ordinary Android partition formats: the system and vendor partitions are typically ext4 (or, on recent images, mounted from a `super` dynamic-partition container), `userdata` is ext4 with optional file-based or metadata encryption, and the kernel/ramdisk are raw boot artifacts. The emulator treats them as opaque block images and presents them to the guest as virtio-block or goldfish-block disks; the *contents* are standard AOSP and the dm-verity hash tree is what `VerifiedBootParams.textproto` describes.
+The formats are ordinary Android partition formats. The system and vendor partitions are typically ext4 (or, on recent images, mounted from a `super` dynamic-partition container). `userdata` is ext4 with optional file-based or metadata encryption. The kernel and ramdisk are raw boot artifacts.
+
+The emulator treats them as opaque block images. It presents them to the guest as virtio-block or goldfish-block disks. The *contents* are standard AOSP, and the dm-verity hash tree is what `VerifiedBootParams.textproto` describes.
 
 Partition derivation across boots
 
@@ -174,7 +180,7 @@ From the guest's point of view the protocol is: open `/dev/qemu_pipe`, write a N
 //      connect to the ADB pipe service ...
 ```
 
-The `pipe:` prefix selects a pipe service; `qemud:` selects the qemud multiplexer (see below); the remainder names a specific qemud service. New pipe service handlers register at emulation-startup time and are dispatched by the bytes the guest writes after opening the device. The codec path (and the large DMA buffer transfers behind gralloc) use the address-space device instead (Section 24.7.3), but sensors, camera, and several smaller services all ride the pipe through qemud; the graphics render-control channel itself also rides the pipe (Section 24.4).
+The `pipe:` prefix selects a pipe service; `qemud:` selects the qemud multiplexer (see below); the remainder names a specific qemud service. New pipe service handlers register at emulation-startup time and are dispatched by the bytes the guest writes after opening the device. The codec path and the large DMA buffer transfers behind gralloc use the address-space device instead (Section 24.7.3). Sensors, camera, and several smaller services all ride the pipe through qemud. The graphics render-control channel itself also rides the pipe (Section 24.4).
 
 ### 24.3.1 The qemud multiplexer
 
@@ -191,7 +197,7 @@ extern QemudService* qemud_service_register(const char* serviceName,
                                             QemudServiceLoad serv_load);
 ```
 
-A host module calls `qemud_service_register("sensors", ...)`, and from then on any guest that opens `pipe:qemud:sensors` is routed to that module's connect callback, which creates a `QemudClient` to handle the conversation. The multiplexer lets many independent HAL channels (`sensors`, `camera`, `boot-properties`, and so on) share the single physical pipe device, each demultiplexed by its service name.
+A host module calls `qemud_service_register("sensors", ...)`. From then on, any guest that opens `pipe:qemud:sensors` is routed to that module's connect callback. That callback creates a `QemudClient` to handle the conversation. The multiplexer lets many independent HAL channels (`sensors`, `camera`, `boot-properties`, and so on) share the single physical pipe device, each demultiplexed by its service name.
 
 qemud multiplexing over a single pipe
 
@@ -217,7 +223,7 @@ flowchart LR
 
 ## 24.4 Graphics HAL: Gralloc and the RanchuHWC Composer
 
-Graphics is where the goldfish HAL is most elaborate, because every pixel buffer the framework allocates has to be mirrored as a *color buffer* on the host GPU. Two vendor modules cooperate: the gralloc allocator and the HWComposer.
+Graphics is where the goldfish HAL is most elaborate. This is because every pixel buffer the framework allocates has to be mirrored as a *color buffer* on the host GPU. Two vendor modules cooperate: the gralloc allocator and the HWComposer.
 
 ### 24.4.1 Gralloc over the render-control encoder
 
@@ -253,7 +259,9 @@ When the framework calls `gralloc_alloc`, the module does not allocate GPU memor
 cb->hostHandle = rcEnc->rcCreateColorBuffer(rcEnc, w, h, allocFormat);
 ```
 
-`HostConnection` is the per-process channel to the host renderer; `rcEnc` is the *render-control encoder*, an auto-generated stub (see `device/generic/goldfish-opengl/README` on `emugen`) that serializes calls like `rcCreateColorBuffer` and `rcCloseColorBuffer` and ships them to the host GPU emulation. Each allocated buffer therefore has two halves: a small guest-side `cb_handle_old_t` (an ashmem region plus metadata, defined in `gralloc_old.cpp`) and a host-side color buffer referenced by `cb->hostHandle`. Freeing the buffer calls `rcEnc->rcCloseColorBuffer(rcEnc, cb->hostHandle)`.
+`HostConnection` is the per-process channel to the host renderer. `rcEnc` is the *render-control encoder*, an auto-generated stub (see `device/generic/goldfish-opengl/README` on `emugen`). It serializes calls like `rcCreateColorBuffer` and `rcCloseColorBuffer` and ships them to the host GPU emulation.
+
+Each allocated buffer therefore has two halves. One is a small guest-side `cb_handle_old_t` (an ashmem region plus metadata, defined in `gralloc_old.cpp`). The other is a host-side color buffer referenced by `cb->hostHandle`. Freeing the buffer calls `rcEnc->rcCloseColorBuffer(rcEnc, cb->hostHandle)`.
 
 ### 24.4.2 RanchuHWC: the HWComposer 3 HAL
 
@@ -271,10 +279,10 @@ binder_status_t status =
 
 The service is launched by init from `hwc3.rc` as `vendor.hwcomposer-3 /vendor/bin/hw/android.hardware.graphics.composer3-service.ranchu`, with `onrestart restart surfaceflinger`, and advertised in `hwc3.xml` as the AIDL `android.hardware.graphics.composer3` interface. The composer can take two paths, modeled by interchangeable `FrameComposer` implementations:
 
-- **HostFrameComposer** offloads composition to the host GPU. `HostFrameComposer.cpp` builds a `ComposeDevice` describing the layers and calls render-control entry points such as `rcCreateDisplayById`, `rcSetDisplayPoseDpi`, and the compose calls on `rcEnc` — exactly the same `HostConnection`/`rcEnc` channel gralloc uses.
+- **HostFrameComposer** offloads composition to the host GPU. `HostFrameComposer.cpp` builds a `ComposeDevice` that describes the layers. It calls render-control entry points such as `rcCreateDisplayById`, `rcSetDisplayPoseDpi`, and the compose calls on `rcEnc`. This is exactly the same `HostConnection`/`rcEnc` channel that gralloc uses.
 - **GuestFrameComposer** and **ClientFrameComposer** fall back to CPU composition inside the guest when host composition is unavailable.
 
-Display detection and modes go through DRM (`DrmClient`, `DrmConnector`, `DrmCrtc`, `DrmMode` in the same directory); the DrmClient opens a separate virtio-gpu DRM device via `OpenVirtioGpuDrmFd()` rather than the legacy goldfish_fb MMIO device. The composer's vsync is driven by a `VsyncThread`, and presentation fences are coordinated through the goldfish sync device (Section 24.6).
+Display detection and modes go through DRM (`DrmClient`, `DrmConnector`, `DrmCrtc`, `DrmMode` in the same directory). The DrmClient opens a separate virtio-gpu DRM device via `OpenVirtioGpuDrmFd()` rather than the legacy goldfish_fb MMIO device. The composer's vsync is driven by a `VsyncThread`. Presentation fences are coordinated through the goldfish sync device (Section 24.6).
 
 Graphics HAL color-buffer flow
 
@@ -323,13 +331,13 @@ The wire format is a human-readable, newline-framed text protocol, documented in
 
 The conversation is symmetric and trivial for the guest HAL:
 
-1. On startup the HAL sends `list-sensors` and gets back a bitmap of which sensors this AVD has (`hw-sensors.cpp` handles the 12-byte `list-sensors` message near line 480).
+1. On startup the HAL sends `list-sensors` and gets back a bitmap of this AVD's sensors (`hw-sensors.cpp` handles the 12-byte `list-sensors` message near line 480).
 2. The HAL enables sensors it wants with `set:accelerometer:1`, and sets the polling interval with `set-delay:<ms>`.
 3. The host then pushes `acceleration:x:y:z` and friends on a timer (default 800ms), so the HAL just reads lines and forwards them to the framework.
 
 There is one piece of cleverness: a `wake` command. The HAL sends `wake` to the host whenever it needs to unblock its own blocking read thread; the host immediately echoes `wake` back. This ping-pong lets the HAL stay a simple read-loop without condition variables. The connect callback marks the client as framed (`qemud_client_set_framing(client, 1)`), so the multiplexer prepends a length to each message and the HAL reads whole lines atomically.
 
-The values the host streams come from the UI's virtual sensor controls, the accelerometer model, recorded sensor sessions (`android/sensor_replay/`), or mock providers — but the HAL neither knows nor cares where they originated.
+The values the host streams come from the UI's virtual sensor controls, the accelerometer model, recorded sensor sessions (`android/sensor_replay/`), or mock providers. The HAL neither knows nor cares where they originated.
 
 ---
 
@@ -339,11 +347,11 @@ Not everything goes through the pipe. Four goldfish peripherals are plain MMIO r
 
 ### 24.6.1 Input events
 
-`external/qemu/hw/input/goldfish_events.c` (device-tree `compatible = "google,goldfish-events-keypad"`) presents an evdev-style register interface. The host injects key, touch, and rotary events through QEMU's `ui/input` layer; the guest kernel surfaces them as a standard `/dev/input/eventN` node, so the upstream Android input stack works unmodified. The device handles multitouch with a configurable axis range (`MTS_TOUCH_AXIS_RANGE_MAX`).
+`external/qemu/hw/input/goldfish_events.c` (device-tree `compatible = "google,goldfish-events-keypad"`) presents an evdev-style register interface. The host injects key, touch, and rotary events through QEMU's `ui/input` layer. The guest kernel surfaces them as a standard `/dev/input/eventN` node, so the upstream Android input stack works unmodified. The device handles multitouch with a configurable axis range (`MTS_TOUCH_AXIS_RANGE_MAX`).
 
 ### 24.6.2 Audio
 
-`external/qemu/hw/audio/goldfish_audio.c` is a minimal codec with a tiny register set: write-buffer addresses and lengths for playback, a read buffer for capture, and an interrupt-status register. The guest audio HAL writes PCM into guest memory, programs the buffer registers, and the device copies the samples into QEMU's `audio/audio.h` backend (the host's PulseAudio/CoreAudio/WASAPI output):
+`external/qemu/hw/audio/goldfish_audio.c` is a minimal codec with a tiny register set: write-buffer addresses and lengths for playback, a read buffer for capture, and an interrupt-status register. The guest audio HAL writes PCM into guest memory, and programs the buffer registers. Then the device copies the samples into QEMU's `audio/audio.h` backend (the host's PulseAudio/CoreAudio/WASAPI output):
 
 ```c
 // Source: external/qemu/hw/audio/goldfish_audio.c
@@ -369,11 +377,11 @@ BATTERY_VOLTAGE     = 0x1C,
 BATTERY_TEMP        = 0x20,
 ```
 
-When you change the charge level or AC state in the extended-controls UI (or via the console `power` commands), the host writes these registers and raises an interrupt with `BATTERY_STATUS_CHANGED` / `AC_STATUS_CHANGED` set. The guest's goldfish power-supply driver reports the new values up to the framework's battery service, which is what drives the status-bar battery icon. There is no separate "power HAL pipe" — the data path is the register file plus an IRQ.
+When you change the charge level or AC state in the extended-controls UI (or via the console `power` commands), the host writes these registers. It also raises an interrupt with `BATTERY_STATUS_CHANGED` / `AC_STATUS_CHANGED` set. The guest's goldfish power-supply driver reports the new values up to the framework's battery service, which is what drives the status-bar battery icon. There is no separate "power HAL pipe" — the data path is the register file plus an IRQ.
 
 ### 24.6.4 Sync and fences
 
-`external/qemu/hw/misc/goldfish_sync.c` provides host-backed sync timelines so the guest can create real fence file descriptors for buffers that the *host* is still rendering. The HWC and gralloc paths use it to express "this color buffer is done compositing" without busy-waiting: the guest gets a fence fd immediately, and the host signals the corresponding timeline (via `goldfish_sync_timeline_inc` over the host->guest `SYNC_REG_BATCH_COMMAND` path) when the GPU work completes. (The opposite-direction guest->host command `SYNC_GUEST_CMD_TRIGGER_HOST_WAIT` is the guest asking the host to wait on host GPU/CPU work, not a timeline signal.) This is the glue that lets the host-composited graphics path participate in Android's normal fence-based buffer lifecycle.
+`external/qemu/hw/misc/goldfish_sync.c` provides host-backed sync timelines so the guest can create real fence file descriptors for buffers that the *host* is still rendering. The HWC and gralloc paths use it to express "this color buffer is done compositing" without busy-waiting. The guest gets a fence fd immediately. The host signals the corresponding timeline (via `goldfish_sync_timeline_inc` over the host->guest `SYNC_REG_BATCH_COMMAND` path) when the GPU work completes. (The opposite-direction guest->host command `SYNC_GUEST_CMD_TRIGGER_HOST_WAIT` is the guest asking the host to wait on host GPU/CPU work, not a timeline signal.) This is the glue that lets the host-composited graphics path participate in Android's normal fence-based buffer lifecycle.
 
 Direct-MMIO HAL data paths
 
@@ -420,11 +428,11 @@ QemudService* serv = qemud_service_register(kServiceCamera, 0,
         this, &connectStatic, nullptr, nullptr);
 ```
 
-The protocol is a small set of text queries — `list`, `connect`, `start`, `frame`, `stop`, `disconnect` — declared as string-view constants in the same file. `list` enumerates the cameras the host exposes (real webcams found by `camera_enumerate_devices`, plus the synthetic fake/emulated camera); `connect` opens one; `start` configures the pixel format and frame size; and each `frame` query pulls a captured frame. The host does pixel-format conversion when the guest requests a format the webcam cannot produce natively, replying with explicit error strings such as `"No conversion exist for the requested pixel format"`.
+The protocol is a small set of text queries — `list`, `connect`, `start`, `frame`, `stop`, `disconnect` — declared as string-view constants in the same file. `list` enumerates the cameras the host exposes (real webcams found by `camera_enumerate_devices`, plus the synthetic fake/emulated camera). `connect` opens one. `start` configures the pixel format and frame size. Each `frame` query pulls a captured frame. The host does pixel-format conversion when the guest requests a format the webcam cannot produce natively, replying with explicit error strings such as `"No conversion exist for the requested pixel format"`.
 
 ### 24.7.2 Goldfish codecs over shared memory
 
-Hardware video decode is emulated by the goldfish codecs in `device/generic/goldfish-opengl/system/codecs/`. There are two generations: a legacy OpenMAX (`omx/`) plugin and the current Codec2 (`c2/`) service. The Codec2 service is started by init as `android.hardware.media.c2@1.0-service-goldfish` and creates a `GoldfishComponentStore` that hands out AVC (H.264), HEVC, VP8, and VP9 decoders (`c2/decoders/avcdec`, `hevcdec`, `vpxdec`).
+Hardware video decode is emulated by the goldfish codecs in `device/generic/goldfish-opengl/system/codecs/`. There are two generations: a legacy OpenMAX (`omx/`) plugin and the current Codec2 (`c2/`) service. init starts the Codec2 service as `android.hardware.media.c2@1.0-service-goldfish`. It creates a `GoldfishComponentStore` that hands out AVC (H.264), HEVC, VP8, and VP9 decoders (`c2/decoders/avcdec`, `hevcdec`, `vpxdec`).
 
 The decoders do not decode on the guest CPU. They forward compressed bitstreams to the host through the **address-space** transport, abstracted by `GoldfishMediaTransport` in `device/generic/goldfish-opengl/system/codecs/c2/decoders/base/include/goldfish_media_utils.h`. The interface is deliberately tiny — pick a codec and an operation, then ping the host:
 
@@ -449,11 +457,13 @@ if (goldfish_address_space_ping(mHandle, &pingInfo) == false) {
 }
 ```
 
-Because the region is shared host/guest memory, the guest never copies frame data across a pipe: it writes the compressed input into the mapped region, pings `DecodeImage`, and reads decoded YUV (or a host color-buffer handle) back from the same region after `GetImage`. The implementation (`goldfish_media_utils.cpp`) subdivides the ~32 MB shared region into 32 base lots of 1 MB each, handed out by `getMemorySlot` / `returnMemorySlot` so multiple decoder instances can share the region; a single decoder can grab a larger contiguous span (the slot search assigns 32M, 16M, 8M, 4M, 2M, or 1M depending on concurrency).
+Because the region is shared host/guest memory, the guest never copies frame data across a pipe. It writes the compressed input into the mapped region and pings `DecodeImage`. After `GetImage`, it reads decoded YUV (or a host color-buffer handle) back from the same region.
+
+The implementation (`goldfish_media_utils.cpp`) subdivides the ~32 MB shared region into 32 base lots of 1 MB each. `getMemorySlot` / `returnMemorySlot` hand out these lots so multiple decoder instances can share the region. A single decoder can grab a larger contiguous span (the slot search assigns 32M, 16M, 8M, 4M, 2M, or 1M depending on concurrency).
 
 ### 24.7.3 The address-space device
 
-The transport underneath both the codecs and the DMA-capable gralloc path is `external/qemu/hw/pci/goldfish_address_space.c`, a PCI device that hands out host-physical memory the guest can map directly. `GoldfishAddressSpaceOps` carries only snapshot load/save hooks: the `load` and `save` callbacks that `goldfish_address_space_set_service_ops` installs. Subdevice-type multiplexing — Graphics, Media, and other zero-copy consumers — is handled at the host-common address-space layer, where the `ping` metadata field selects which context handles each connection:
+The transport underneath both the codecs and the DMA-capable gralloc path is `external/qemu/hw/pci/goldfish_address_space.c`. It is a PCI device that hands out host-physical memory the guest can map directly. `GoldfishAddressSpaceOps` carries only snapshot load/save hooks: the `load` and `save` callbacks that `goldfish_address_space_set_service_ops` installs. Subdevice-type multiplexing — Graphics, Media, and other zero-copy consumers — is handled at the host-common address-space layer. There, the `ping` metadata field selects which context handles each connection:
 
 ```c
 // Source: external/qemu/hw/pci/goldfish_address_space.c
@@ -486,9 +496,9 @@ sequenceDiagram
 Two mechanisms decide which goldfish HAL actually loads, and they differ by HAL generation.
 
 - **Legacy `hw_module_t` HALs** (the old gralloc) are resolved by suffix. The framework's `hw_get_module()` reads a build property such as `ro.hardware.gralloc` and `dlopen`s `gralloc.<value>.so` from `/vendor/lib*/hw/`. The emulator's product config sets that property to `ranchu` (or `goldfish`), which is why `Android.bp` builds both `gralloc.ranchu` and `gralloc.goldfish` from the same `gralloc_old.cpp`.
-- **AIDL/HIDL HALs** (HWC3, Codec2, and increasingly everything else) are registered as services. An `init` `.rc` file launches the binary, the binary calls `AServiceManager_addService`, and a vendor interface manifest (`hwc3.xml`, the codec service `.xml`) tells the framework which implementation backs a given interface. There is no filename-suffix magic; the manifest is the binding.
+- **AIDL/HIDL HALs** (HWC3, Codec2, and increasingly everything else) are registered as services. An `init` `.rc` file launches the binary. The binary calls `AServiceManager_addService`. A vendor interface manifest (`hwc3.xml`, the codec service `.xml`) tells the framework which implementation backs a given interface. There is no filename-suffix magic; the manifest is the binding.
 
-In both cases the *vendor* partition is where these modules live (`vendor: true` in every `Android.bp` shown above), which is exactly why the partition split in Section 24.2 keeps a separate `vendor.img` — the goldfish HAL is vendor code layered on top of a generic system image.
+In both cases these modules live in the *vendor* partition (`vendor: true` in every `Android.bp` shown above). This is exactly why the partition split in Section 24.2 keeps a separate `vendor.img`. The goldfish HAL is vendor code layered on top of a generic system image.
 
 HAL selection by generation
 
@@ -516,13 +526,13 @@ flowchart TB
 
 ## 24.9 Putting It Together: Boot to First Frame
 
-Tracing a single cold boot ties the layers together. The emulator assembles the partitions, the ranchu board exposes the goldfish devices, the kernel binds drivers by device-tree `compatible` strings, init starts the vendor HAL services, and the framework begins talking to the host.
+Tracing a single cold boot ties the layers together. The emulator assembles the partitions. The ranchu board exposes the goldfish devices. The kernel binds drivers by device-tree `compatible` strings. init starts the vendor HAL services. Then the framework starts to talk to the host.
 
 1. The emulator resolves the AVD's images from `AVD_IMAGE_LIST`, derives the writable `*-qemu.img` copies if needed, and boots `kernel-ranchu` with `ramdisk.img`.
 2. `ranchu.c` builds the device tree; the guest kernel probes `goldfish_fb`, `goldfish_pipe`, `goldfish_sync`, and the rest by `compatible` string.
-3. init mounts `/system` and `/vendor` (with AVB parameters from `VerifiedBootParams.textproto`), then starts vendor services: `vendor.hwcomposer-3` (RanchuHWC), the Codec2 goldfish service, and the sensor and camera HALs.
+3. init mounts `/system` and `/vendor` (with AVB parameters from `VerifiedBootParams.textproto`). Then it starts vendor services: `vendor.hwcomposer-3` (RanchuHWC), the Codec2 goldfish service, and the sensor and camera HALs.
 4. SurfaceFlinger loads `gralloc.ranchu`, which opens a `HostConnection` and starts creating host color buffers via `rcCreateColorBuffer`.
-5. RanchuHWC composes those color buffers on the host (`HostFrameComposer` to `rcCompose`), using goldfish sync fences to stay inside Android's normal buffer protocol — and the first frame appears in the emulator window.
+5. RanchuHWC composes those color buffers on the host (`HostFrameComposer` to `rcCompose`). It uses goldfish sync fences to stay inside Android's normal buffer protocol. Then the first frame appears in the emulator window.
 
 End-to-end boot data flow
 
@@ -545,7 +555,7 @@ flowchart LR
 
 These commands assume a built emulator and an installed system image. Replace `<avd>` with one of your AVD names from `emulator -list-avds`.
 
-- List the disk images the emulator knows how to assemble, and confirm the init/user split, by inspecting an AVD content directory:
+- List the disk images the emulator knows how to assemble. Confirm the init/user split by looking inside an AVD content directory:
 
 ```bash
 emulator -list-avds
@@ -589,13 +599,13 @@ adb shell 'ls -l /dev/qemu_pipe; ls -l /dev/goldfish_* 2>/dev/null'
 
 ## Summary
 
-- The emulator's virtual hardware is the **goldfish** peripheral family on the **ranchu** board (`external/qemu/hw/arm/ranchu.c`), which exposes `goldfish_fb`, `goldfish_audio`, `goldfish_battery`, `goldfish-events`, `goldfish_pipe`, and `goldfish_sync` and describes them to the guest with device-tree `compatible` strings.
-- A guest **system image** is assembled from the partition set in `AVD_IMAGE_LIST` (`info.h`): read-only `INIT*` images shared across AVDs, per-AVD writable `*-qemu.img` copies, boot artifacts, and verified-boot parameters.
-- Most HALs share one transport, the **goldfish pipe** (`/dev/qemu_pipe`), multiplexed into named services by **qemud** (`qemud_service_register`); bulk data uses the **goldfish address-space** PCI device for zero-copy shared memory.
-- The **graphics** HAL is the richest: `gralloc.ranchu` mirrors every buffer as a host color buffer via `rcCreateColorBuffer`, and `RanchuHWC` (AIDL HWComposer3) composes them on the host through the same `HostConnection`/`rcEnc` render-control channel.
-- The **sensors** HAL is a newline-framed text protocol (`list-sensors`, `set:...`, `acceleration:x:y:z`) over `qemud:sensors`; the **camera** HAL uses a similar `connect`/`start`/`frame` protocol; the **codecs** ping compressed bitstreams to the host through shared address-space memory slots.
+- The emulator's virtual hardware is the **goldfish** peripheral family on the **ranchu** board (`external/qemu/hw/arm/ranchu.c`). The board exposes `goldfish_fb`, `goldfish_audio`, `goldfish_battery`, `goldfish-events`, `goldfish_pipe`, and `goldfish_sync`. It describes them to the guest with device-tree `compatible` strings.
+- A guest **system image** is assembled from the partition set in `AVD_IMAGE_LIST` (`info.h`). The set has read-only `INIT*` images shared across AVDs, per-AVD writable `*-qemu.img` copies, boot artifacts, and verified-boot parameters.
+- Most HALs share one transport, the **goldfish pipe** (`/dev/qemu_pipe`). **qemud** (`qemud_service_register`) multiplexes it into named services. Bulk data uses the **goldfish address-space** PCI device for zero-copy shared memory.
+- The **graphics** HAL is the richest. `gralloc.ranchu` mirrors every buffer as a host color buffer via `rcCreateColorBuffer`. `RanchuHWC` (AIDL HWComposer3) composes them on the host through the same `HostConnection`/`rcEnc` render-control channel.
+- The **sensors** HAL is a newline-framed text protocol (`list-sensors`, `set:...`, `acceleration:x:y:z`) over `qemud:sensors`. The **camera** HAL uses a similar `connect`/`start`/`frame` protocol. The **codecs** ping compressed bitstreams to the host through shared address-space memory slots.
 - **Input, audio, battery/power, and sync** are direct MMIO register files plus interrupts, with the HAL sitting above ordinary Linux device nodes.
-- HAL selection differs by generation: legacy HALs load by `ro.hardware.*` filename suffix from `/vendor/.../hw/`, while AIDL/HIDL HALs are launched by init `.rc` files and bound through vendor interface manifests — all of it vendor code on top of a generic system image.
+- HAL selection differs by generation. Legacy HALs load by `ro.hardware.*` filename suffix from `/vendor/.../hw/`. AIDL/HIDL HALs are launched by init `.rc` files and bound through vendor interface manifests. All of it is vendor code on top of a generic system image.
 
 ### Key Source Files
 

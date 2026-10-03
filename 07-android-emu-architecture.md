@@ -1,22 +1,26 @@
 # Chapter 7: android-emu Architecture
 
-Below QEMU's command line and above its virtual hardware sits a body of C++ code that is the actual personality of the Android Emulator: the option parser, the AVD model, the sensor and battery state, the snapshot machinery, the gRPC control plane, and the host-side half of every pipe and goldfish device. This is `android-emu`. It is deliberately built so it does not depend on QEMU at all — it talks to the virtual machine through a small set of plain-C function-pointer tables, and a separate glue layer fills those tables in with QEMU implementations. Swap the glue and the same `android-emu` core could, in principle, drive a different VMM.
+A body of C++ code sits below QEMU's command line and above its virtual hardware. This code is the actual personality of the Android Emulator. It contains the option parser, the AVD model, the sensor and battery state, the snapshot machinery, and the gRPC control plane. It also contains the host-side half of every pipe and goldfish device.
 
-This chapter explains how that decoupling is engineered. We start with the layering of the three foundation libraries (`aemu/base`, `android-emu-base`, and `android-emu` proper), then the event-loop abstraction (`Looper`) and how it is mapped onto QEMU's main loop, the `VmLock` that serializes all access to virtual device state, the agents/console interface pattern that is the seam between core and VMM, and finally how everything is wired together during process startup.
+This is `android-emu`. It is deliberately built so that it does not depend on QEMU at all. It talks to the virtual machine through a small set of plain-C function-pointer tables. A separate glue layer fills those tables in with QEMU implementations. Swap the glue and the same `android-emu` core could, in principle, drive a different VMM.
+
+This chapter explains how that decoupling is engineered. We start with the layering of the three foundation libraries (`aemu/base`, `android-emu-base`, and `android-emu` proper). Then we cover the event-loop abstraction (`Looper`) and how it maps onto QEMU's main loop. Next comes the `VmLock`, which serializes all access to virtual device state. After that comes the agents/console interface pattern, which is the seam between core and VMM. Finally, we show how everything is wired together during process startup.
 
 ---
 
 ## 7.1 Three Libraries, One Core
 
-The "android-emu core" is not one library. It is a stack of three, each with a clearly bounded job, and confusing them is the most common source of disorientation when first reading the tree.
+The "android-emu core" is not one library. It is a stack of three, each with a clearly bounded job. Confusing them is the most common source of disorientation when first reading the tree.
 
-The lowest layer is `aemu/base`, which lives in `hardware/google/aemu/base/`. It is a freestanding C++ utility library — threads, locks, file paths, streams, sockets, string formatting — that its README describes as "an utility library for common functions used in the Android Emulator." Its CMake target is `aemu-base`, defined in `hardware/google/aemu/base/CMakeLists.txt`, and its headers are exposed under the `aemu/base/` include prefix (for example `aemu/base/async/Looper.h`). This library is shared with the gfxstream graphics project, which is why it lives under `hardware/google/aemu/` rather than inside the QEMU fork.
+The lowest layer is `aemu/base`, which lives in `hardware/google/aemu/base/`. It is a freestanding C++ utility library with threads, locks, file paths, streams, sockets, and string formatting. Its README describes it as "an utility library for common functions used in the Android Emulator." Its CMake target is `aemu-base`, defined in `hardware/google/aemu/base/CMakeLists.txt`, and its headers are exposed under the `aemu/base/` include prefix (for example `aemu/base/async/Looper.h`). This library is shared with the gfxstream graphics project, which is why it lives under `hardware/google/aemu/` rather than inside the QEMU fork.
 
-The next layer is `android-emu-base`. Its build rule is in `external/qemu/android/android-emu-base/CMakeLists.txt`, and its opening comment repeats the same discipline: "This is a very generic library, and should have no knowledge of the emulator whatsoever." It compiles the legacy `android::base` sources (under `android/base/` and `android/utils/`) plus a couple of `aemu/base/system/` files, and links the `android-emu-base-headers` interface target (privately), which in turn re-exports `aemu-base.headers`. In practice `android-emu-base` is the older, emulator-grown utility code, and `aemu/base` is the newer, project-shared utility code; both expose the `android::base` C++ namespace, and over time functionality has migrated from the former toward the latter.
+The next layer is `android-emu-base`. Its build rule is in `external/qemu/android/android-emu-base/CMakeLists.txt`. Its opening comment repeats the same discipline: "This is a very generic library, and should have no knowledge of the emulator whatsoever." It compiles the legacy `android::base` sources (under `android/base/` and `android/utils/`) plus a couple of `aemu/base/system/` files. It also links the `android-emu-base-headers` interface target (privately). That target in turn re-exports `aemu-base.headers`.
 
-On top of those sits `android-emu` itself, in `external/qemu/android/android-emu/`. Its CMake fragment is `external/qemu/android/android-emu/android-emu.cmake`, and that file's dependency lists show it building on `android-emu-base`, `android-emu-base-headers`, and `qemu-host-common-headers`. This is the layer that knows what an Android Virtual Device is — sensors, battery, telephony, snapshots, ADB, the gRPC services — but still does not know what QEMU is.
+In practice `android-emu-base` is the older, emulator-grown utility code. `aemu/base` is the newer, project-shared utility code. Both expose the `android::base` C++ namespace, and over time functionality has migrated from the former toward the latter.
 
-Sitting beside `android-emu` (not under it) is `hardware/google/aemu/host-common/`. This is the contract surface: it defines the C structs and abstract C++ classes — `VmLock`, `vm_operations.h`, `AndroidPipe`, `DeviceContextRunner`, and the graphics/display agent interfaces (`window_agent.h`, `display_agent.h`, `multi_display_agent.h`, `record_screen_agent.h`) — that `android-emu` calls and that the VMM glue implements. The bulk of the agent interfaces — battery, sensors, telephony, clipboard, and about twenty others — reside instead in `external/qemu/android/emu/agents/include/android/emulation/control/`. Its CMake target produces the interface library `aemu-host-common.headers`; the `qemu-host-common-headers` target that `android-emu` actually links is the qemu-side re-export of it, defined in `external/qemu/android/emu/host-common/CMakeLists.txt`.
+On top of those sits `android-emu` itself, in `external/qemu/android/android-emu/`. Its CMake fragment is `external/qemu/android/android-emu/android-emu.cmake`, and that file's dependency lists show it building on `android-emu-base`, `android-emu-base-headers`, and `qemu-host-common-headers`. This layer knows what an Android Virtual Device is: sensors, battery, telephony, snapshots, ADB, and the gRPC services. But it still does not know what QEMU is.
+
+Sitting beside `android-emu` (not under it) is `hardware/google/aemu/host-common/`. This is the contract surface. It defines the C structs and abstract C++ classes that `android-emu` calls and that the VMM glue implements. These include `VmLock`, `vm_operations.h`, `AndroidPipe`, `DeviceContextRunner`, and the graphics/display agent interfaces (`window_agent.h`, `display_agent.h`, `multi_display_agent.h`, `record_screen_agent.h`). The bulk of the agent interfaces — battery, sensors, telephony, clipboard, and about twenty others — reside instead in `external/qemu/android/emu/agents/include/android/emulation/control/`. Its CMake target produces the interface library `aemu-host-common.headers`; the `qemu-host-common-headers` target that `android-emu` actually links is the qemu-side re-export of it, defined in `external/qemu/android/emu/host-common/CMakeLists.txt`.
 
 The foundation libraries and their dependency direction
 
@@ -41,11 +45,11 @@ The arrows that matter most: `android-emu` depends downward on `host-common` and
 
 ### 7.1.1 Why the include prefixes differ
 
-Reading the source you will see two header styles intermixed: `#include "aemu/base/..."` and `#include "android/base/..."` and `#include "host-common/..."`. These prefixes map directly to the three libraries above. `aemu/base/` resolves into `hardware/google/aemu/base/include/`, `host-common/` into `hardware/google/aemu/host-common/include/`, and `android/` paths into either `android-emu-base` or `android-emu` depending on the file. The prefix tells you which layer you are in and therefore what that file is allowed to know about — `host-common` and `aemu/base` headers never mention QEMU types.
+Reading the source you will see two header styles intermixed: `#include "aemu/base/..."` and `#include "android/base/..."` and `#include "host-common/..."`. These prefixes map directly to the three libraries above. `aemu/base/` resolves into `hardware/google/aemu/base/include/`, `host-common/` into `hardware/google/aemu/host-common/include/`, and `android/` paths into either `android-emu-base` or `android-emu` depending on the file. The prefix tells you which layer you are in. It also tells you what that file is allowed to know about. `host-common` and `aemu/base` headers never mention QEMU types.
 
 ## 7.2 The Looper: an Event Loop You Can Re-Host
 
-Almost every long-lived activity in `android-emu` — watching a socket, firing a timer, deferring work to the main thread — is expressed against an abstract event loop called `Looper`, declared in `hardware/google/aemu/base/include/aemu/base/async/Looper.h`. The header describes it plainly: "A Looper is an abstraction for an event loop that can wait for either I/O events on file descriptors, or timers."
+Almost every long-lived activity in `android-emu` is expressed against an abstract event loop called `Looper`. Examples are socket watches, timers, and work deferred to the main thread. The loop is declared in `hardware/google/aemu/base/include/aemu/base/async/Looper.h`. The header describes it plainly. "A Looper is an abstraction for an event loop that can wait for either I/O events on file descriptors, or timers."
 
 `Looper` is a pure interface. It exposes `createTimer()` and `createFdWatch()` factory methods, a `runWithDeadlineMs()` driver, and a `forceQuit()`. There is a default standalone implementation (`DefaultLooper`, used by tests and tools that have no VM), created via the static `Looper::create()`:
 
@@ -65,7 +69,7 @@ The point of the abstraction is that the production build does not use `DefaultL
 
 ### 7.2.1 ThreadLooper and the main-thread rendezvous
 
-Because there are many host threads (the UI thread, vCPU threads, gRPC worker threads, async I/O threads), code frequently needs a way to get "the loop for *this* thread" or to push a closure onto "the main loop." That is `ThreadLooper`, in `hardware/google/aemu/base/include/aemu/base/async/ThreadLooper.h`:
+There are many host threads (the UI thread, vCPU threads, gRPC worker threads, async I/O threads). So code frequently needs a way to get "the loop for *this* thread" or to push a closure onto "the main loop." That is `ThreadLooper`, in `hardware/google/aemu/base/include/aemu/base/async/ThreadLooper.h`:
 
 ```cpp
 // Source: hardware/google/aemu/base/include/aemu/base/async/ThreadLooper.h
@@ -79,13 +83,15 @@ public:
 };
 ```
 
-`ThreadLooper::get()` returns a thread-local `Looper`, lazily created on first use. `runOnMainLooper()` is the standard mechanism for marshalling work back onto the thread that owns the VM — you will see it called from `external/qemu/android-qemu2-glue/main.cpp` to hand UI- or control-originated actions to the main loop. We will see in the next section why "the main loop thread" is also "the thread that may touch device state."
+`ThreadLooper::get()` returns a thread-local `Looper`, lazily created on first use. `runOnMainLooper()` is the standard mechanism to marshal work back onto the thread that owns the VM. You will see it called from `external/qemu/android-qemu2-glue/main.cpp` to hand UI- or control-originated actions to the main loop. We will see in the next section why "the main loop thread" is also "the thread that may touch device state."
 
 ## 7.3 Mapping the Looper onto QEMU
 
-The glue implementation of `Looper` is `QemuLooper`, in `external/qemu/android-qemu2-glue/base/async/Looper.cpp`. Its header comment states the central constraint bluntly: there is a single global QEMU event loop, so "all instances returned by createLooper() will really use the same state! In other words, don't call it more than once!"
+The glue implementation of `Looper` is `QemuLooper`, in `external/qemu/android-qemu2-glue/base/async/Looper.cpp`. Its header comment states the central constraint bluntly. There is a single global QEMU event loop, so "all instances returned by createLooper() will really use the same state! In other words, don't call it more than once!"
 
-`QemuLooper` translates each abstract operation into a QEMU primitive. Timers map to QEMU clocks and QEMU timers; the clock enum is checked against QEMU's at compile time with a `static_assert` so the values cannot drift. File-descriptor watches are the interesting case. QEMU dispatches read and write readiness through separate callbacks, so `QemuLooper` collects fired watches into a pending set and drains them from a *bottom-half* — a callback QEMU runs after it finishes its I/O dispatch pass:
+`QemuLooper` translates each abstract operation into a QEMU primitive. Timers map to QEMU clocks and QEMU timers. The clock enum is checked against QEMU's at compile time with a `static_assert`, so the values cannot drift.
+
+File-descriptor watches are the interesting case. QEMU dispatches read and write readiness through separate callbacks. So `QemuLooper` collects fired watches into a pending set. It drains them from a *bottom-half*, which is a callback that QEMU runs after it finishes its I/O dispatch pass:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/base/async/Looper.cpp
@@ -134,7 +140,7 @@ sequenceDiagram
 
 ## 7.4 VmLock: One Mutex to Serialize Device State
 
-QEMU runs each virtual CPU on its own host thread, and the device model is not thread-safe across them. QEMU protects it with a single global mutex — the "iothread" lock. Any `android-emu` code on any other thread that wants to poke a virtual device (set the battery level, inject a sensor reading, write to a pipe) must hold that lock first. `VmLock`, declared in `hardware/google/aemu/host-common/include/host-common/VmLock.h`, is the abstraction that lets `android-emu` express "take the VM lock" without including a single QEMU header.
+QEMU runs each virtual CPU on its own host thread, and the device model is not thread-safe across them. QEMU protects it with a single global mutex — the "iothread" lock. Any `android-emu` code on any other thread must hold that lock before it pokes a virtual device. Examples are to set the battery level, to inject a sensor reading, and to write to a pipe. `VmLock`, declared in `hardware/google/aemu/host-common/include/host-common/VmLock.h`, is the abstraction that lets `android-emu` express "take the VM lock" without including a single QEMU header.
 
 The header spells out the design: "Glue code should call `VmLock::set()` to inject their own implementation into the process. The default implementation doesn't do anything." So `VmLock` is yet another injected interface — `android-emu` calls `VmLock::get()`, the glue provides the real one. The base class methods are no-ops:
 
@@ -174,10 +180,10 @@ Raw `lock()`/`unlock()` calls are rare in the codebase. `VmLock.h` ships a famil
 
 - `ScopedVmLock` locks on construction and unlocks on destruction, unconditionally.
 - `RecursiveScopedVmLock` checks `isLockedBySelf()` first and only locks if the current thread does not already hold it — safe to nest.
-- `RecursiveScopedVmLockIfInstance` does the same but no-ops entirely if no `VmLock` has been installed yet (useful for code that may run before the glue wires things up, or in unit tests).
-- `ScopedVmUnlock` is the inverse: if the calling thread holds the lock, it temporarily releases it for the scope and re-takes it after — used when a section must *not* hold the VM lock.
+- `RecursiveScopedVmLockIfInstance` does the same, but it does nothing at all if no `VmLock` has been installed yet. This is useful for code that may run before the glue wires things up, or in unit tests.
+- `ScopedVmUnlock` is the inverse. If the calling thread holds the lock, it temporarily releases it for the scope and re-takes it after. It is used when a section must *not* hold the VM lock.
 
-The `RecursiveScopedVmLockIfInstance` variant is the one you see throughout the agent implementations, precisely because agents can be called from contexts where the lock state is unknown.
+The `RecursiveScopedVmLockIfInstance` variant is the one you see throughout the agent implementations. The reason is that agents can be called from contexts where the lock state is unknown.
 
 How VmLock decouples android-emu from the QEMU iothread mutex
 
@@ -203,11 +209,13 @@ flowchart TD
 
 ## 7.5 DeviceContextRunner: Deferring Work to the VM Thread
 
-Holding the lock is not always enough. Some operations should run *on the main loop thread*, not merely under the lock — for example because they touch QEMU timers or because the device's callback model assumes that thread. `DeviceContextRunner<T>`, a template in `hardware/google/aemu/host-common/include/host-common/DeviceContextRunner.h`, encodes this policy. Its header comment states the rule directly: operations that change global VM state "should happen in a thread that holds the global VM lock," and the runner ensures that "if the current thread already owns the lock, the operation is performed as-is; otherwise, it is queued and will be run in the main-loop thread as soon as possible."
+Holding the lock is not always enough. Some operations should run *on the main loop thread*, not merely under the lock. Two example reasons are that they touch QEMU timers or that the device's callback model assumes that thread. `DeviceContextRunner<T>`, a template in `hardware/google/aemu/host-common/include/host-common/DeviceContextRunner.h`, encodes this policy. Its header comment states the rule directly. Operations that change global VM state "should happen in a thread that holds the global VM lock".
+
+The runner ensures that "if the current thread already owns the lock, the operation is performed as-is; otherwise, it is queued and will be run in the main-loop thread as soon as possible."
 
 You subclass `DeviceContextRunner<OP>` for some copyable operation type `OP`, implement `performDeviceOperation(const OP&)`, call `init()` with a `VmLock` at setup time, and thereafter call `queueDeviceOperation(op)` from anywhere. Because dispatch may be deferred, `queueDeviceOperation` returns `void` — it is fire-and-forget.
 
-The clearest real use is the Android pipe subsystem. `AndroidPipe::initThreading()` in `hardware/google/aemu/host-common/AndroidPipe.cpp` wires the pipe "waker" — the mechanism that signals a guest pipe is ready — through a `DeviceContextRunner` so wake commands raised on a worker thread are replayed safely on the VM thread:
+The clearest real use is the Android pipe subsystem. `AndroidPipe::initThreading()` in `hardware/google/aemu/host-common/AndroidPipe.cpp` wires the pipe "waker" through a `DeviceContextRunner`. The waker is the mechanism that signals a guest pipe is ready. So wake commands raised on a worker thread are replayed safely on the VM thread:
 
 ```cpp
 // Source: hardware/google/aemu/host-common/AndroidPipe.cpp
@@ -218,7 +226,7 @@ void AndroidPipe::initThreading(VmLock* vmLock) {
 }
 ```
 
-This is the bridge between the two foundations of Sections 7.3 and 7.4: `VmLock` decides *whether* it is safe to act now, and the `Looper` (through `runOnMainLooper`-style deferral) decides *where* the deferred action runs.
+This is the bridge between the two foundations of Sections 7.3 and 7.4. `VmLock` decides *whether* it is safe to act now. The `Looper` (through `runOnMainLooper`-style deferral) decides *where* the deferred action runs.
 
 ## 7.6 The Agents Pattern: the Seam Between Core and VMM
 
@@ -258,7 +266,7 @@ extern "C" const QAndroidBatteryAgent* const gQAndroidBatteryAgent =
     &sQAndroidBatteryAgent;
 ```
 
-This one file demonstrates the whole pattern: an interface defined in the agents headers (visible to the core), an implementation in the glue (visible to QEMU), a `VmLock` acquisition for safety, and a global pointer the factory will collect.
+This one file demonstrates the whole pattern. The interface is defined in the agents headers and is visible to the core. The implementation is in the glue and is visible to QEMU. It also takes a `VmLock` for safety. Finally, it exports a global pointer that the factory will collect.
 
 The control flow when a UI control changes the battery level
 
@@ -292,7 +300,7 @@ Individual agent structs are useless until something gathers them into one table
     /* ... 25 entries total ... */
 ```
 
-The same macro, expanded with different "X" definitions, generates the struct of pointers, the factory getter declarations, and the factory setters — so adding an agent means editing one list rather than four parallel ones. `AndroidConsoleAgents` itself is built by expanding the list into `const type* name;` fields:
+The same macro, expanded with different "X" definitions, generates the struct of pointers, the factory getter declarations, and the factory setters. So an agent needs an edit to one list rather than four parallel ones. `AndroidConsoleAgents` itself is built by expanding the list into `const type* name;` fields:
 
 ```c
 // Source: external/qemu/android/emu/agents/include/android/console.h
@@ -303,7 +311,7 @@ typedef struct AndroidConsoleAgents {
 CONSOLE_API const AndroidConsoleAgents* getConsoleAgents();
 ```
 
-The injection machinery lives in `external/qemu/android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp`. A process calls `injectConsoleAgents(factory)` at least once (repeated calls are permitted and issue a non-fatal warning rather than aborting, a fact the debug path exploits to layer a second factory); the factory's `android_get_*` methods are invoked for each agent to fill a static `AndroidConsoleAgents`, and a flag flips to mark the agents available. Reading them before any injection is a fatal error:
+The injection machinery lives in `external/qemu/android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp`. A process calls `injectConsoleAgents(factory)` at least once. Repeated calls are permitted and issue a non-fatal warning rather than aborting, and the debug path exploits this to layer a second factory. The factory's `android_get_*` methods are invoked for each agent to fill a static `AndroidConsoleAgents`. Then a flag flips to mark the agents available. A read of the agents before any injection is a fatal error:
 
 ```cpp
 // Source: external/qemu/android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp
@@ -365,7 +373,7 @@ flowchart TB
 
 ### 7.7.2 A parallel pattern: the graphics agents
 
-The same idiom is reused for graphics. `hardware/google/aemu/host-common/include/host-common/GraphicsAgentFactory.h` defines `GRAPHICS_AGENTS_LIST` and a `GraphicsAgentFactory` with `injectGraphicsAgents()`, carrying a smaller set (`QAndroidEmulatorWindowAgent`, `QAndroidDisplayAgent`, `QAndroidRecordScreenAgent`, `QAndroidMultiDisplayAgent`, `QAndroidVmOperations`). It exists so the gfxstream renderer, which lives in `host-common` and below, can reach the host window and display agents without depending on the full console-agent set in `android-emu`. Recognizing one X-macro factory teaches you both.
+The same idiom is reused for graphics. `hardware/google/aemu/host-common/include/host-common/GraphicsAgentFactory.h` defines `GRAPHICS_AGENTS_LIST` and a `GraphicsAgentFactory` with `injectGraphicsAgents()`, carrying a smaller set (`QAndroidEmulatorWindowAgent`, `QAndroidDisplayAgent`, `QAndroidRecordScreenAgent`, `QAndroidMultiDisplayAgent`, `QAndroidVmOperations`). It exists so the gfxstream renderer can reach the host window and display agents without a dependency on the full console-agent set in `android-emu`. The renderer lives in `host-common` and below. Recognizing one X-macro factory teaches you both.
 
 ## 7.8 VM Lifecycle Through the vm Agent
 
@@ -391,9 +399,9 @@ typedef struct QAndroidVmOperations {
 } QAndroidVmOperations;
 ```
 
-The QEMU implementation is `external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp`. During setup the glue hands this same `vm` agent to the parts of the system that need to drive the machine: `external/qemu/android-qemu2-glue/qemu-setup.cpp` retrieves `getConsoleAgents()->vm` and passes it to `goldfish_address_space_set_vm_operations` and to `androidSnapshot_initialize`. So the snapshot subsystem — covered in its own chapter — reaches QEMU's save/load entirely through this one function table.
+The QEMU implementation is `external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp`. During setup the glue hands this same `vm` agent to the parts of the system that need to drive the machine. `external/qemu/android-qemu2-glue/qemu-setup.cpp` retrieves `getConsoleAgents()->vm` and passes it to `goldfish_address_space_set_vm_operations` and to `androidSnapshot_initialize`. So the snapshot subsystem — covered in its own chapter — reaches QEMU's save/load entirely through this one function table.
 
-The header also documents the shutdown causes (`QemuShutdownCause`) and uses `static_assert` macros to verify they match QEMU's own enum values, the same defensive technique used for the clock enum in the Looper. The interface and the implementation are kept honest at compile time.
+The header also documents the shutdown causes (`QemuShutdownCause`). It uses `static_assert` macros to verify that they match QEMU's own enum values. This is the same defensive technique as for the clock enum in the Looper. The interface and the implementation are kept honest at compile time.
 
 ## 7.9 Process Lifecycle and Initialization Order
 
@@ -441,7 +449,7 @@ auto vm = getConsoleAgents()->vm; // the vm-operations agent
 androidSnapshot_initialize(vm, getConsoleAgents()->emu);
 ```
 
-The dependency chain is visible in the order: install a `Looper` for the main thread and register it as the per-thread setup callback for any future QEMU thread; install the `VmLock` (asserting none existed before); then initialize the pipe and sync services, which need that `VmLock` so their `DeviceContextRunner`s can defer work; finally fetch the `vm` agent and hand it to the snapshot machinery.
+The order shows the dependency chain. First, install a `Looper` for the main thread and register it as the per-thread setup callback for any future QEMU thread. Second, install the `VmLock` and assert that none existed before. Then initialize the pipe and sync services. These services need that `VmLock` so their `DeviceContextRunner`s can defer work. Finally, fetch the `vm` agent and hand it to the snapshot machinery.
 
 Startup ordering of the core interfaces
 
@@ -520,13 +528,13 @@ grep -n "qemu_looper_setForThread\|VmLock::set\|qemu_android_pipe_init" \
 ## Summary
 
 - `android-emu` is layered over foundation libraries: `aemu/base` (shared, project-wide utilities under `hardware/google/aemu/base/`), `android-emu-base` (legacy `android::base` utilities under `external/qemu/android/android-emu-base/`), and `host-common` (the interface contract under `hardware/google/aemu/host-common/`). The core deliberately never includes a QEMU header.
-- The `Looper` interface in `aemu/base/async/Looper.h` abstracts the event loop. In production it is not the standalone `DefaultLooper` but `QemuLooper` (`android-qemu2-glue/base/async/Looper.cpp`), which maps timers to QEMU clocks and drains fd-watches from a QEMU bottom-half; `runWithDeadlineMs()` is forbidden and `forceQuit()` becomes a VM shutdown request.
+- The `Looper` interface in `aemu/base/async/Looper.h` abstracts the event loop. In production it is not the standalone `DefaultLooper` but `QemuLooper` (`android-qemu2-glue/base/async/Looper.cpp`). It maps timers to QEMU clocks and drains fd-watches from a QEMU bottom-half. `runWithDeadlineMs()` is forbidden, and `forceQuit()` becomes a VM shutdown request.
 - `ThreadLooper` gives per-thread loopers and `runOnMainLooper()` for marshalling work back to the VM thread.
 - `VmLock` (`host-common/VmLock.h`) is an injected interface whose QEMU implementation is literally `qemu_mutex_lock_iothread()`. RAII helpers — `ScopedVmLock`, `RecursiveScopedVmLock`, `RecursiveScopedVmLockIfInstance`, `ScopedVmUnlock` — serialize all access to virtual device state.
-- `DeviceContextRunner<T>` builds on `VmLock` to either run an operation immediately (if the lock is held) or defer it to the main loop thread; the Android pipe waker uses it via `AndroidPipe::initThreading(vmLock)`.
+- `DeviceContextRunner<T>` builds on `VmLock` to either run an operation immediately (if the lock is held) or defer it to the main loop thread. The Android pipe waker uses it via `AndroidPipe::initThreading(vmLock)`.
 - Agents are plain-C function-pointer structs (one per capability, e.g. `QAndroidBatteryAgent`, `QAndroidVmOperations`) defined in the agents headers and implemented in `android-qemu2-glue/qemu-*-agent-impl`. They are the seam that decouples the core from the VMM.
 - A single X-macro, `ANDROID_CONSOLE_AGENTS_LIST`, generates the `AndroidConsoleAgents` struct, the factory getters, and the injection setters. `injectConsoleAgents()` may be called more than once (repeated calls issue a non-fatal warning); `getConsoleAgents()` is fatal before the first injection. The graphics path reuses the identical pattern via `GRAPHICS_AGENTS_LIST`.
-- Startup ordering is strict: `process_early_setup` then `injectQemuConsoleAgents` (before option parsing) then `qemu_android_emulation_early_setup`, which installs the `Looper`, then the `VmLock`, then pipe/sync services, then hands the `vm` agent to the snapshot subsystem.
+- Startup ordering is strict. First comes `process_early_setup`. Then comes `injectQemuConsoleAgents` (before option parsing). Then comes `qemu_android_emulation_early_setup`. It installs the `Looper`, then the `VmLock`, then pipe/sync services, and then hands the `vm` agent to the snapshot subsystem.
 
 ### Key Source Files
 

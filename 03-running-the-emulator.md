@@ -1,8 +1,10 @@
 # Chapter 3: Running the Emulator
 
-Typing `emulator @Pixel_8` looks like launching a single program, but the binary you invoke does almost no emulation. It is a thin launcher whose job is to figure out *which* architecture-specific QEMU binary to run, set up the library search path so the bundled graphics and Qt libraries are found, and then `execv()` into the real engine. The real engine, in turn, parses dozens of command-line options, reconciles them against the Android Virtual Device (AVD) on disk, materializes a `hardware-qemu.ini` that captures the final hardware configuration, and only then hands a translated argument vector to `qemu_main()`.
+Typing `emulator @Pixel_8` looks like launching a single program, but the binary you invoke does almost no emulation. It is a thin launcher. Its job is to figure out *which* architecture-specific QEMU binary to run. It also sets up the library search path, so that the bundled graphics and Qt libraries are found. Last, it calls `execv()` to go into the real engine.
 
-This chapter walks the full path from process spawn to `boot completed`. We follow the launcher in `android/emulator/main-emulator.cpp`, the AVD discovery code in `android/emu/avd/`, the X-macro command-line option system in `android/emu/cmdline/`, the option-to-hardware translation in the QEMU glue, and the small set of special options (`-accel-check`, `-qemu`, `-gpu`) that change the launch flow entirely. By the end you should be able to read the verbose log of any emulator launch and know which source function produced each line.
+The real engine, in turn, parses dozens of command-line options. It reconciles them against the Android Virtual Device (AVD) on disk. It materializes a `hardware-qemu.ini` that captures the final hardware configuration. Only then does it hand a translated argument vector to `qemu_main()`.
+
+This chapter walks the full path from process spawn to `boot completed`. We follow the launcher in `android/emulator/main-emulator.cpp`. We then look at the AVD discovery code in `android/emu/avd/` and the X-macro command-line option system in `android/emu/cmdline/`. We also follow the option-to-hardware translation in the QEMU glue. Last, we look at the small set of special options (`-accel-check`, `-qemu`, `-gpu`) that change the launch flow entirely. By the end you should be able to read the verbose log of any emulator launch and know which source function produced each line.
 
 ---
 
@@ -18,11 +20,13 @@ The program installed as `emulator` (or `emulator.exe`) is not the emulator. Its
  */
 ```
 
-The launcher's `main()` does a handful of things and then disappears: it parses just enough of the command line to learn the AVD name and target architecture, locates the matching `qemu-system-*` binary inside the bundled `qemu/<os>-<hostarch>/` directory, prepends the right directories to the dynamic library search path, and finally calls `safe_execv()` to replace itself with the engine. Because it uses `execv` rather than spawning a child, the engine inherits the launcher's process id on POSIX, which keeps the process tree flat.
+The launcher's `main()` does a handful of things and then disappears. It parses just enough of the command line to learn the AVD name and target architecture. It locates the matching `qemu-system-*` binary inside the bundled `qemu/<os>-<hostarch>/` directory. It prepends the right directories to the dynamic library search path. Finally, it calls `safe_execv()` to replace itself with the engine. Because it uses `execv` and does not spawn a child, the engine inherits the launcher's process id on POSIX, which keeps the process tree flat.
 
 ### 3.1.1 Why a separate launcher exists
 
-A single `emulator` entry point can drive ARM64, x86, and x86\_64 guests, each of which is a *different* QEMU binary compiled for a different target. The launcher decides which one to run from the AVD's CPU architecture rather than forcing the user to know it. It also centralizes host-environment fixups that must happen *before* the engine's shared libraries load: forcing `LC_ALL=C` to dodge locale-dependent parsing bugs, setting `MESA_RGB_VISUAL`, and on Linux pointing `XDG_RUNTIME_DIR` at a writable directory so lavapipe can create the temp files it needs for memory-fd export.
+A single `emulator` entry point can drive ARM64, x86, and x86\_64 guests. Each of these guests needs a *different* QEMU binary, compiled for a different target. The launcher decides which one to run from the AVD's CPU architecture, so the user does not need to know it.
+
+It also centralizes host-environment fixups that must happen *before* the engine's shared libraries load. It forces `LC_ALL=C` to dodge locale-dependent parsing bugs. It sets `MESA_RGB_VISUAL`. On Linux, it also points `XDG_RUNTIME_DIR` at a writable directory, so lavapipe can create the temp files it needs for memory-fd export.
 
 ```cpp
 // Source: external/qemu/android/emulator/main-emulator.cpp
@@ -32,7 +36,7 @@ System::get()->envSet("MESA_RGB_VISUAL", "TrueColor 24");
 
 ### 3.1.2 Selecting the engine binary
 
-`getQemuExecutablePath()` turns the AVD architecture into a QEMU architecture and builds a path. The mapping lives in `getQemuArch()`: on an x86\_64 host, `x86` maps to `i386` and `x86_64` maps to `x86_64`; on an aarch64 host, `arm64` maps to `aarch64`. The final path follows the pattern `<progDir>/qemu/<os>-<hostArch>/qemu-system-<qemuArch>` — with a `-headless` suffix when the engine should run without a window.
+`getQemuExecutablePath()` turns the AVD architecture into a QEMU architecture and builds a path. The mapping lives in `getQemuArch()`. On an x86\_64 host, `x86` maps to `i386` and `x86_64` maps to `x86_64`. On an aarch64 host, `arm64` maps to `aarch64`. The final path follows the pattern `<progDir>/qemu/<os>-<hostArch>/qemu-system-<qemuArch>` — with a `-headless` suffix when the engine should run without a window.
 
 ```cpp
 // Source: external/qemu/android/emulator/main-emulator.cpp
@@ -42,7 +46,7 @@ System::get()->envSet("MESA_RGB_VISUAL", "TrueColor 24");
 
 Only the "ranchu" (QEMU2) virtual board is supported; `isCpuArchSupportedByRanchu()` accepts `arm64`, `x86`, and `x86_64`, and the launcher panics for anything else. The classic engine path (`getClassicEmulatorPath()`) is still present but deprecated, and `-engine classic` prints a warning.
 
-The launcher tries several candidate directories for the binary — the program directory reported by the runtime, a sibling `emulator/` directory derived from it, and the directory of `argv[0]` — because in platform builds the reported program directory is sometimes wrong (the code references bug 65257562 for this).
+The launcher tries several candidate directories for the binary. These are the program directory reported by the runtime, a sibling `emulator/` directory derived from it, and the directory of `argv[0]`. It tries several because in platform builds the reported program directory is sometimes wrong. The code references bug 65257562 for this.
 
 Launcher to engine handoff
 
@@ -59,7 +63,7 @@ flowchart TD
 
 ### 3.1.3 Setting up the library search path
 
-`updateLibrarySearchPath()` prepends `<launcherDir>/lib64` and then a renderer-specific subdirectory (`gles_angle` or `gles_swiftshader`) plus a `vulkan` directory for ICDs. Which GLES directory wins depends on the `-gpu` value the launcher already scraped: `-gpu lavapipe` or any mode whose name contains `angle` forces the software ANGLE path. When the window is shown, `androidQtSetupEnv()` additionally adds the bundled Qt directory. These environment changes survive the `execv`, so the engine loads the bundled libraries instead of any system copies.
+`updateLibrarySearchPath()` prepends `<launcherDir>/lib64` and then a renderer-specific subdirectory (`gles_angle` or `gles_swiftshader`) plus a `vulkan` directory for ICDs. Which GLES directory wins depends on the `-gpu` value the launcher already scraped. `-gpu lavapipe` or any mode whose name contains `angle` forces the software ANGLE path. When the window is shown, `androidQtSetupEnv()` additionally adds the bundled Qt directory. These environment changes survive the `execv`, so the engine loads the bundled libraries instead of any system copies.
 
 ## 3.2 What an AVD Is on Disk
 
@@ -75,7 +79,7 @@ An AVD is two pieces of state: a small *root ini* and a *content directory*. The
 
 ### 3.2.1 Two ini files, two jobs
 
-`config.ini` is *device* configuration: CPU architecture, RAM size, screen geometry, which sensors and cameras exist, which skin to load, and the `image.sysdir.N` keys that point at the system image. The engine reads it as the source of truth for hardware. The launcher reads a couple of keys from it directly to bootstrap — most importantly `hw.cpu.arch`, via `_getAvdConfigValue()`:
+`config.ini` is *device* configuration. It describes the CPU architecture, RAM size, and screen geometry. It also says which sensors and cameras exist and which skin to load. The `image.sysdir.N` keys point at the system image. The engine reads it as the source of truth for hardware. The launcher reads a couple of keys from it directly to bootstrap — most importantly `hw.cpu.arch`, via `_getAvdConfigValue()`:
 
 ```c
 // Source: external/qemu/android/emu/avd/src/android/avd/util.c
@@ -91,7 +95,7 @@ char* path_getAvdTargetArch( const char* avdName )
 
 ### 3.2.2 Resolving the content directory
 
-`path_getAvdContentPath()` reads the root ini and prefers the relative path key. It joins `path.rel` to the AVD home directory's parent and checks that a `config.ini` exists there; only if that fails does it fall back to the absolute `path` key. The relative-path-first policy lets an `.android` directory be copied between machines or home directories without rewriting absolute paths.
+`path_getAvdContentPath()` reads the root ini and prefers the relative path key. It joins `path.rel` to the AVD home directory's parent and checks that a `config.ini` exists there. Only if that fails does it fall back to the absolute `path` key. The relative-path-first policy lets an `.android` directory be copied between machines or home directories without rewriting absolute paths.
 
 ```c
 // Source: external/qemu/android/emu/avd/src/android/avd/util.c
@@ -105,7 +109,7 @@ if (relPath != NULL) {
 
 ### 3.2.3 Finding the system image
 
-The system image is not stored in the content directory; `config.ini` only records *where to search* for it with the `image.sysdir.1` and `image.sysdir.2` keys (at most `MAX_SEARCH_PATHS`, which is 2). `path_getAvdSystemPath()` reads each key, prefixes it with the SDK root when it is relative, and returns the first existing directory. The launcher uses this to sanity-check that a valid system path exists before it bothers launching the engine, panicking with a hint to set `ANDROID_SDK_ROOT` when it cannot.
+The system image is not stored in the content directory. `config.ini` only records *where to search* for it with the `image.sysdir.1` and `image.sysdir.2` keys (at most `MAX_SEARCH_PATHS`, which is 2). `path_getAvdSystemPath()` reads each key, prefixes it with the SDK root when it is relative, and returns the first existing directory. The launcher uses this to sanity-check that a valid system path exists before it starts the engine. When it cannot find one, it panics with a hint to set `ANDROID_SDK_ROOT`.
 
 AVD on-disk layout and resolution
 
@@ -121,7 +125,7 @@ flowchart TD
 
 ## 3.3 Discovering AVDs
 
-`-list-avds` does not consult a registry; it scans the filesystem. `avdScanner_new()` opens the AVD home directory (`~/.android/avd` by default, or `<sdk_home>/avd`) and `avdScanner_next()` walks every directory entry, treating any name ending in `.ini` as an AVD and returning the name with the suffix stripped:
+`-list-avds` does not consult a registry; it scans the filesystem. `avdScanner_new()` opens the AVD home directory (`~/.android/avd` by default, or `<sdk_home>/avd`). Then `avdScanner_next()` walks every directory entry. It treats any name that ends in `.ini` as an AVD and returns the name with the suffix stripped:
 
 ```c
 // Source: external/qemu/android/emu/avd/src/android/avd/scanner.c
@@ -141,13 +145,13 @@ When you name an AVD that does not resolve, the launcher prints the search order
 
 ## 3.4 The Command-Line Option System
 
-The emulator has well over a hundred options. Rather than a giant `if`/`strcmp` ladder, they are declared once in an X-macro header, `android/emu/cmdline/include/android/cmdline-options.h`, and that single file is `#include`d in several contexts with different macro definitions. Each option is one of three kinds:
+The emulator has well over a hundred options. Rather than a giant `if`/`strcmp` ladder, they are declared once in an X-macro header, `android/emu/cmdline/include/android/cmdline-options.h`. That single file is `#include`d in several contexts with different macro definitions. Each option is one of three kinds:
 
 - `OPT_FLAG(name, descr)` — a boolean flag backed by an `int`
 - `OPT_PARAM(name, template, descr)` — a string-valued option backed by a `char*`
 - `OPT_LIST(name, template, descr)` — a repeatable option backed by a `ParamList*` linked list
 
-A `CFG_*` variant marks options that describe AVD configuration and are ignored when `-avd` is given (they only matter when creating an AVD or running without one).
+A `CFG_*` variant marks options that describe AVD configuration and are ignored when `-avd` is given. They only matter when an AVD is created or when no AVD is used.
 
 ### 3.4.1 The struct and the table from one header
 
@@ -163,7 +167,7 @@ typedef struct AndroidOptions {
 } AndroidOptions;
 ```
 
-The parser, `cmdline-option.cpp`, includes the *same* header to build a parallel table of `{name, struct-offset, type}` records, so the field list and the parse table can never drift apart:
+The parser, `cmdline-option.cpp`, includes the *same* header to build a parallel table of `{name, struct-offset, type}` records. So the field list and the parse table can never drift apart:
 
 ```cpp
 // Source: external/qemu/android/emu/cmdline/src/android/cmdline-option.cpp
@@ -180,7 +184,9 @@ static const OptionInfo  option_keys[] = {
 
 ### 3.4.2 How parsing actually works
 
-`android_parse_options()` walks `argv` from the front. It special-cases `@name` as shorthand for `-avd name`, stops at the first argument that is not an option, translates dashes in the option name to underscores (so `-no-window` matches the field `no_window`), and looks the translated name up in `option_keys`. For a flag it writes `1` to the `int` field at the recorded offset; for a param it `strdup`s the next argument into the `char*` field; for a list it pushes onto a linked list (later reversed so order is preserved). Anything it does not recognize stops the loop and is left in `argv` for downstream handling — including everything after `-qemu`.
+`android_parse_options()` walks `argv` from the front. It special-cases `@name` as shorthand for `-avd name`. It stops at the first argument that is not an option. It translates dashes in the option name to underscores (so `-no-window` matches the field `no_window`). Then it looks the translated name up in `option_keys`.
+
+For a flag it writes `1` to the `int` field at the recorded offset. For a param it `strdup`s the next argument into the `char*` field. For a list it pushes onto a linked list (later reversed so order is preserved). Anything it does not recognize stops the loop and is left in `argv` for downstream handling — including everything after `-qemu`.
 
 X-macro option flow
 
@@ -201,7 +207,7 @@ flowchart LR
 
 ## 3.5 The Engine's main(): From Options to QEMU
 
-When the engine binary starts, control reaches `main()` in `android-qemu2-glue/main.cpp`. After early setup and crash-handler init, it kicks off an asynchronous host-GPU query, injects the console agents that give the rest of the code access to global state, records the original command line for diagnostics, and then calls the big workhorse:
+When the engine binary starts, control reaches `main()` in `android-qemu2-glue/main.cpp`. After early setup and crash-handler init, it kicks off an asynchronous host-GPU query. It injects the console agents that give the rest of the code access to global state. It records the original command line for diagnostics. Then it calls the big workhorse:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/main.cpp
@@ -215,7 +221,7 @@ if (!emulator_parseCommonCommandLineOptions(&argc, &argv,
 }
 ```
 
-`emulator_parseCommonCommandLineOptions()` (in `android/android-emu/android/main-common.c`) first calls `android_parse_options()` to fill `opts`, reconfigures logging from the parsed flags, injects the options into the global console-agent state, and then scans the *remaining* arguments for `-qemu`.
+`emulator_parseCommonCommandLineOptions()` (in `android/android-emu/android/main-common.c`) first calls `android_parse_options()` to fill `opts`. It reconfigures logging from the parsed flags and injects the options into the global console-agent state. Then it scans the *remaining* arguments for `-qemu`.
 
 ### 3.5.1 The -qemu passthrough boundary
 
@@ -230,7 +236,9 @@ if (!strcmp(opt, "-qemu")) {
 }
 ```
 
-Two paths reach `qemu_main()` without the normal AVD-driven translation. The launcher itself short-circuits when it sees a leading `-qemu` (or `-fuchsia`) and sets `forceEngineLaunch`, letting the engine boot without an AVD. Inside the engine, when `emulator_parseCommonCommandLineOptions()` returns `false` with `exitStatus == EMULATOR_EXIT_STATUS_POSITIONAL_QEMU_PARAMETER` (defined as `-1` in `main-common.h`), the glue copies the remaining positional arguments straight into the QEMU argument vector and jumps to `enter_qemu_main_loop()`, skipping option translation entirely. The Fuchsia branch does the same with a few extra `-kernel`/`-L` arguments and feature-flag defaults.
+Two paths reach `qemu_main()` without the normal AVD-driven translation. The launcher itself short-circuits when it sees a leading `-qemu` (or `-fuchsia`) and sets `forceEngineLaunch`. This lets the engine boot without an AVD.
+
+Inside the engine, `emulator_parseCommonCommandLineOptions()` sometimes returns `false` with `exitStatus == EMULATOR_EXIT_STATUS_POSITIONAL_QEMU_PARAMETER` (defined as `-1` in `main-common.h`). When it does, the glue copies the remaining positional arguments straight into the QEMU argument vector. Then it jumps to `enter_qemu_main_loop()` and skips option translation entirely. The Fuchsia branch does the same with a few extra `-kernel`/`-L` arguments and feature-flag defaults.
 
 ### 3.5.2 Building the AVD and the hardware config
 
@@ -245,7 +253,7 @@ if (ret == 0 && i->configIni != NULL)
     ret = androidHwConfig_read(hw, i->configIni);         // config.ini overrides skin
 ```
 
-The precedence is defaults, then the skin's `hardware.ini`, then the device's `config.ini` — the comment in the source notes that `config.ini` overriding the skin "is preferable to the opposite order." Command-line options that map to hardware fields are applied on top of this by the glue before the final ini is written.
+The precedence is defaults, then the skin's `hardware.ini`, then the device's `config.ini`. The comment in the source notes that `config.ini` overriding the skin "is preferable to the opposite order." Command-line options that map to hardware fields are applied on top of this by the glue before the final ini is written.
 
 Engine launch sequence
 
@@ -269,7 +277,7 @@ sequenceDiagram
 
 ## 3.6 Generating hardware-qemu.ini
 
-Once the merged `AndroidHwConfig` is final, the glue serializes it to disk and tells QEMU where to find it. `genHwIniFile()` writes a clean copy (dropping defaulted entries so it can be compared against a snapshot's recorded config), and the path is passed as `-android-hw`:
+Once the merged `AndroidHwConfig` is final, the glue serializes it to disk and tells QEMU where to find it. `genHwIniFile()` writes a clean copy that drops defaulted entries, so it can be compared against a snapshot's recorded config. The path is passed as `-android-hw`:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/main.cpp
@@ -289,7 +297,7 @@ HWCFG_STRING(
   ...
 ```
 
-So a property added to `hardware-properties.ini` automatically becomes a `config.ini` key the loader understands, a field in `AndroidHwConfig`, and a line the writer emits into `hardware-qemu.ini` — no hand-written plumbing. This `hardware-qemu.ini` is the contract between the android-emu side and the QEMU machine model: when QEMU starts, it reads it back via `-android-hw` to learn how many cores, how much RAM, which serial-port naming scheme, and which virtual devices to instantiate.
+So a property added to `hardware-properties.ini` automatically becomes three things. It becomes a `config.ini` key the loader understands, a field in `AndroidHwConfig`, and a line the writer emits into `hardware-qemu.ini`. No hand-written plumbing is needed. This `hardware-qemu.ini` is the contract between the android-emu side and the QEMU machine model. When QEMU starts, it reads it back via `-android-hw`. It learns how many cores, how much RAM, which serial-port naming scheme, and which virtual devices to instantiate.
 
 ## 3.7 Acceleration, GPU Modes, and -accel-check
 
@@ -309,7 +317,7 @@ bool ret = sys.runCommand(
         System::kInfinite, &exit_code);
 ```
 
-`emulator-check` (`android/emulator-check/main-emulator-check.cpp`) is a tiny program with a table of subcommands — `accel`, `cpu-info`, `window-mgr`, `desktop-env`, and on Windows `hyper-v`/`whpx`. The `accel` handler calls `androidCpuAcceleration_getStatus()` and returns its numeric status plus a human message. The status codes are a stable contract: `cpu_accelerator.h` declares the enum with the comment "don't change these numbers / Android Studio depends on them," where `0` means `ANDROID_CPU_ACCELERATION_READY` and non-zero values encode specific failures (no VT-x, `/dev/kvm` missing, permission denied, Hyper-V conflict, and so on).
+`emulator-check` (`android/emulator-check/main-emulator-check.cpp`) is a tiny program with a table of subcommands — `accel`, `cpu-info`, `window-mgr`, `desktop-env`, and on Windows `hyper-v`/`whpx`. The `accel` handler calls `androidCpuAcceleration_getStatus()` and returns its numeric status plus a human message. The status codes are a stable contract. `cpu_accelerator.h` declares the enum with the comment "don't change these numbers / Android Studio depends on them," where `0` means `ANDROID_CPU_ACCELERATION_READY`. Non-zero values encode specific failures (no VT-x, `/dev/kvm` missing, permission denied, Hyper-V conflict, and so on).
 
 ### 3.7.2 Choosing the accelerator
 
@@ -323,7 +331,7 @@ case ANDROID_CPU_ACCELERATOR_WHPX: return "-enable-whpx";
 case ANDROID_CPU_ACCELERATOR_AEHD: return "-enable-aehd";
 ```
 
-Because x86/x86\_64 guests run unacceptably slowly under pure TCG translation, the code refuses to start an x86 guest in `auto` mode when no hardware accelerator is available and prints a link to the acceleration setup docs. On Apple silicon the same guard applies to arm64 guests and prefers Hypervisor.framework (HVF). The accelerators themselves are the subject of a later chapter; here the point is that the *choice* is made during launch and emitted as a QEMU flag.
+Pure TCG translation makes x86/x86\_64 guests run unacceptably slowly. So the code refuses to start an x86 guest in `auto` mode when no hardware accelerator is available. It also prints a link to the acceleration setup docs. On Apple silicon the same guard applies to arm64 guests and prefers Hypervisor.framework (HVF). The accelerators themselves are the subject of a later chapter. Here the point is that the *choice* is made during launch and emitted as a QEMU flag.
 
 ### 3.7.3 GPU modes
 
@@ -342,7 +350,7 @@ The `-gpu <mode>` option (declared `OPT_PARAM(gpu, ...)`) selects the graphics b
 }
 ```
 
-`host` uses the machine's real GPU; `swiftshader` and `swangle` are CPU software rasterizers; `lavapipe` is a software Vulkan implementation. The full list the config accepts also includes `auto`, which probes the host GPU (the asynchronous query started at the top of `main()`) and picks `host` when a usable GPU is found, falling back to software otherwise. The launcher reads `-gpu` early because it affects the library search path — `lavapipe` and `angle` modes force the software-ANGLE library directory before the engine loads, as we saw in section 3.1.3.
+`host` uses the machine's real GPU; `swiftshader` and `swangle` are CPU software rasterizers; `lavapipe` is a software Vulkan implementation. The full list the config accepts also includes `auto`. This mode probes the host GPU (the asynchronous query started at the top of `main()`). It picks `host` when a usable GPU is found and falls back to software otherwise. The launcher reads `-gpu` early because it affects the library search path. `lavapipe` and `angle` modes force the software-ANGLE library directory before the engine loads, as we saw in section 3.1.3.
 
 GPU mode resolution
 
@@ -360,11 +368,11 @@ flowchart TD
 
 ## 3.8 The Lifecycle: Launch to Boot Complete
 
-With options parsed, the AVD merged, `hardware-qemu.ini` written, and accelerator/GPU chosen, the glue builds the final QEMU argument vector and spawns the VM. `skin_winsys_spawn_thread()` runs `enter_qemu_main_loop()` on a dedicated thread, which calls `run_qemu_main()` — the QEMU machine setup that creates the CPUs, RAM, and virtual devices described by the hardware ini.
+With options parsed, the AVD merged, `hardware-qemu.ini` written, and accelerator/GPU chosen, the glue builds the final QEMU argument vector and spawns the VM. `skin_winsys_spawn_thread()` runs `enter_qemu_main_loop()` on a dedicated thread. That function calls `run_qemu_main()`. This is the QEMU machine setup that creates the CPUs, RAM, and virtual devices described by the hardware ini.
 
 ### 3.8.1 Window vs. headless
 
-The relationship between `-no-window` and the headless binary is subtle. The launcher treats both `-no-window` and `-no-qt` as a request for a headless launch and selects the `qemu-system-*-headless` binary. Inside the engine, `emulator_parseCommonCommandLineOptions()` then *forces* `opts->no_window = false`, because (per the in-source comment referencing bug 143949261) windowlessness is now an inherent property of which binary was selected, not a runtime flag. So the launcher's binary choice, not the option value the engine sees, is what determines whether a UI thread is created.
+The relationship between `-no-window` and the headless binary is subtle. The launcher treats both `-no-window` and `-no-qt` as a request for a headless launch and selects the `qemu-system-*-headless` binary. Inside the engine, `emulator_parseCommonCommandLineOptions()` then *forces* `opts->no_window = false`. The in-source comment (bug 143949261) gives the reason. Windowlessness is now an inherent property of which binary was selected, not a runtime flag. So the launcher's binary choice, not the option value the engine sees, is what determines whether a UI thread is created.
 
 ### 3.8.2 Signaling boot completion
 
@@ -379,7 +387,7 @@ The guest tells the host it has finished booting over a QEMU pipe named `QemuMis
 }
 ```
 
-`bootCompleteFunction()` computes the boot time, reports it as a metric, touches `bootcompleted.ini` in the content directory, and flips the global flag through `set_guest_boot_completed(true)`. That `bootcompleted.ini` file is why the launcher deletes it at the start of every run: a stale copy from a previous boot must not be mistaken for the current one. If `-quit-after-boot` (the `test_quitAfterBootTimeOut` field) was set, the same function shuts the VM down immediately after boot completes — the mechanism behind smoke-test invocations.
+`bootCompleteFunction()` computes the boot time, reports it as a metric, touches `bootcompleted.ini` in the content directory, and flips the global flag through `set_guest_boot_completed(true)`. That `bootcompleted.ini` file is why the launcher deletes it at the start of every run. A stale copy from a previous boot must not be mistaken for the current one. If `-quit-after-boot` (the `test_quitAfterBootTimeOut` field) was set, the same function shuts the VM down immediately after boot completes — the mechanism behind smoke-test invocations.
 
 Boot completion signaling
 
@@ -403,7 +411,9 @@ The launcher captures restart parameters with `initializeEmulatorRestartParamete
 
 ## 3.9 One Engine, Many Form Factors
 
-There is no separate "Wear emulator" or "Android TV emulator" binary. The same `qemu-system-*` engine and the same launcher you have followed through this chapter boot a watch, a television, a foldable phone, a car head unit, a desktop, and an XR headset. What differs is entirely *data*: the AVD's `config.ini`, the system image's `build.prop`, and the chosen skin. Three pieces of derived state turn that data into device-specific behavior — an `AvdFlavor` classification, a hardware profile of geometry and input devices, and per-device sensor configuration — and all three flow through the same `avdInfo_initHwConfig` merge (section 3.5.2) into one `hardware-qemu.ini`.
+There is no separate "Wear emulator" or "Android TV emulator" binary. The same `qemu-system-*` engine and the same launcher you have followed through this chapter boot many device types. They boot a watch, a television, a foldable phone, a car head unit, a desktop, and an XR headset.
+
+What differs is entirely *data*: the AVD's `config.ini`, the system image's `build.prop`, and the chosen skin. Three pieces of derived state turn that data into device-specific behavior. They are an `AvdFlavor` classification, a hardware profile of geometry and input devices, and per-device sensor configuration. All three flow through the same `avdInfo_initHwConfig` merge (section 3.5.2) into one `hardware-qemu.ini`.
 
 One AVD configuration, many form factors
 
@@ -472,11 +482,11 @@ Skins layer a bezel and a set of orientation layouts on top of that geometry. Th
 #define  SKIN_DEFAULT    "HVGA"
 ```
 
-A phone needs one skin; a foldable needs two (the open "default" and the folded "closed"), which is why the Pixel Fold has dedicated skin-name constants. The skin's own `hardware.ini` participates in the merge from section 3.5.2, sitting between the built-in defaults and `config.ini`.
+A phone needs one skin. A foldable needs two (the open "default" and the folded "closed"), which is why the Pixel Fold has dedicated skin-name constants. The skin's own `hardware.ini` participates in the merge from section 3.5.2, sitting between the built-in defaults and `config.ini`.
 
 ### 3.9.3 Foldables, rollables, and the resizable AVD
 
-Folding and rolling devices add a block of `hw.sensor.*` keys that configure the `FoldableModel` covered in Chapter 10. The schema (`hw-config-defs.h`) declares `hw.sensor.hinge` (`:710`), `hw.sensor.hinge.count` (`:717`), `hw.sensor.hinge.ranges`, `hw.sensor.posture_list`, and the rollable equivalents under `hw.sensor.roll`. Setting a hinge angle through the control plane recomputes a discrete posture (`POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, `POSTURE_TENT`) — the state machine in section 10.7 — and the display side (section 17.10) lights the inner or outer panel accordingly.
+Folding and rolling devices add a block of `hw.sensor.*` keys that configure the `FoldableModel` covered in Chapter 10. The schema (`hw-config-defs.h`) declares `hw.sensor.hinge` (`:710`), `hw.sensor.hinge.count` (`:717`), `hw.sensor.hinge.ranges`, `hw.sensor.posture_list`, and the rollable equivalents under `hw.sensor.roll`. Setting a hinge angle through the control plane recomputes a discrete posture (`POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, `POSTURE_TENT`). This is the state machine in section 10.7. The display side (section 17.10) then lights the inner or outer panel accordingly.
 
 A Pixel-class fold is special-cased. `android_foldable_is_pixel_fold` (`external/qemu/android/android-emu/android/hw-sensors.cpp:1438`) returns true when the device name contains `fold` and the `SupportPixelFold` feature is on, or whenever the resizable-34 configuration is active:
 
@@ -512,11 +522,11 @@ The three sizes (geometry plus density) come from a single `hw.resizable.configs
 "tablet-2-1920-1200-240";
 ```
 
-Each entry is `name-id-width-height-dpi`; switching presets reconfigures the panel without relaunching the engine, which is how a single resizable image previews phone, unfolded, and tablet layouts.
+Each entry is `name-id-width-height-dpi`. Switching presets reconfigures the panel without relaunching the engine. This is how a single resizable image previews phone, unfolded, and tablet layouts.
 
 ### 3.9.4 How the flavor steers the runtime
 
-Once classified, the flavor reaches into both the display pipeline and the UI. On the display side, automotive devices get a multi-display *stacked* layout: `getDisplayType` (`external/qemu/android/android-emu/android/emulation/AutoDisplays.cpp:33`) maps the AVD to `DISTANT_DISPLAY`, `DYNAMIC_MULTI_DISPLAY`, or `GENERIC_DISPLAY`, and `MultiDisplay::recomputeStackedLayoutLocked` arranges the cluster and center-stack panels (section 17.8). The `setMultiDisplay` entry point refuses TV and Wear flavors outright (section 17.6).
+Once classified, the flavor reaches into both the display pipeline and the UI. On the display side, automotive devices get a multi-display *stacked* layout. `getDisplayType` (`external/qemu/android/android-emu/android/emulation/AutoDisplays.cpp:33`) maps the AVD to `DISTANT_DISPLAY`, `DYNAMIC_MULTI_DISPLAY`, or `GENERIC_DISPLAY`. `MultiDisplay::recomputeStackedLayoutLocked` arranges the cluster and center-stack panels (section 17.8). The `setMultiDisplay` entry point refuses TV and Wear flavors outright (section 17.6).
 
 On the UI side, the extended-controls window enables or hides whole panels by flavor. The multi-display panel, for instance, is gated so that TV, Wear, XR, and Glasses never see it (`external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/extended-window.cpp:226`):
 
@@ -526,7 +536,9 @@ avdFlavor != AVD_TV &&
 avdFlavor != AVD_WEAR && avdFlavor != AVD_XR && avdFlavor != AVD_GLASSES &&
 ```
 
-Further down, the same constructor branches once per flavor. The Android Auto branch (`:348`) adds car-specific controls (car data buttons, sensor replay, and a rotary controller). The TV (`:332`), Wear (`:341`), and XR/Glasses (`:376`) branches do the opposite — they hide controls that are inappropriate for those form factors, such as location, cellular, fingerprint, and telephony buttons. The sensor layer makes the matching move at init time — a Wear OS image auto-enables the heart-rate and wrist-tilt sensors and an Automotive image enables the heading sensor, as Chapter 10 describes. The net effect is that one engine presents itself as whatever device the AVD's flavor, profile, and skin describe.
+Further down, the same constructor branches once per flavor. The Android Auto branch (`:348`) adds car-specific controls (car data buttons, sensor replay, and a rotary controller). The TV (`:332`), Wear (`:341`), and XR/Glasses (`:376`) branches do the opposite. They hide controls that are inappropriate for those form factors, such as location, cellular, fingerprint, and telephony buttons.
+
+The sensor layer makes the matching move at init time. A Wear OS image auto-enables the heart-rate and wrist-tilt sensors, and an Automotive image enables the heading sensor, as Chapter 10 describes. The net effect is that one engine presents itself as whatever device the AVD's flavor, profile, and skin describe.
 
 ## 3.10 Try It
 
@@ -557,14 +569,14 @@ emulator-check cpu-info
 emulator @My_AVD -verbose -debug-init
 ```
 
-- Inspect an AVD's input config and the generated hardware config side by side (run once after a boot so `hardware-qemu.ini` exists):
+- Inspect an AVD's input config and the generated hardware config side by side. If `hardware-qemu.ini` does not exist, boot the AVD once first:
 
 ```bash
 cat ~/.android/avd/My_AVD.avd/config.ini
 cat ~/.android/avd/My_AVD.avd/hardware-qemu.ini
 ```
 
-- Force a software renderer and a specific accelerator state, then pass a raw flag straight through to QEMU after the `-qemu` boundary:
+- Force a software renderer and a specific accelerator state. Then pass a raw flag straight through to QEMU after the `-qemu` boundary:
 
 ```bash
 emulator @My_AVD -gpu swiftshader -accel off -qemu -m 4096
@@ -578,16 +590,16 @@ emulator @My_AVD -no-window -quit-after-boot 120
 
 ## Summary
 
-- The installed `emulator` program is a thin launcher in `android/emulator/main-emulator.cpp`; it picks the right `qemu-system-*` binary by AVD architecture, fixes up the library search path, and `safe_execv`s into the real engine.
-- An AVD is a root ini (`~/.android/avd/<name>.ini`) pointing at a content directory; `config.ini` is device configuration *input* while `hardware-qemu.ini` is *generated output* the engine recreates each launch.
-- `-list-avds` scans the filesystem via `avdScanner_*`, treating every `*.ini` in the AVD home as an AVD; the AVD home is resolved through `ANDROID_AVD_HOME`, `ANDROID_SDK_HOME`, then `$HOME/.android/avd`.
-- Command-line options are declared once in the `cmdline-options.h` X-macro header and reused to define the `AndroidOptions` struct and the parser's offset table, so the two can never drift.
+- The installed `emulator` program is a thin launcher in `android/emulator/main-emulator.cpp`. It picks the right `qemu-system-*` binary by AVD architecture, fixes up the library search path, and `safe_execv`s into the real engine.
+- An AVD is a root ini (`~/.android/avd/<name>.ini`) that points at a content directory. `config.ini` is device configuration *input* while `hardware-qemu.ini` is *generated output* the engine recreates each launch.
+- `-list-avds` scans the filesystem via `avdScanner_*`. It treats every `*.ini` in the AVD home as an AVD. The AVD home is resolved through `ANDROID_AVD_HOME`, `ANDROID_SDK_HOME`, then `$HOME/.android/avd`.
+- Command-line options are declared once in the `cmdline-options.h` X-macro header and reused to define the `AndroidOptions` struct and the parser's offset table. So the two can never drift.
 - `-qemu` is a hard boundary: everything after it bypasses option translation and goes straight to `qemu_main()`, signaled internally by `EMULATOR_EXIT_STATUS_POSITIONAL_QEMU_PARAMETER`.
 - The final hardware config is built by merging defaults, the skin's `hardware.ini`, and `config.ini`, then serialized by `genHwIniFile()` and handed to QEMU as `-android-hw`.
-- `-accel-check` forwards to the standalone `emulator-check` binary and returns stable status codes that Android Studio depends on; the normal path turns the accelerator choice into a QEMU `-enable-*` flag.
+- `-accel-check` forwards to the standalone `emulator-check` binary and returns stable status codes that Android Studio depends on. The normal path turns the accelerator choice into a QEMU `-enable-*` flag.
 - `-gpu` selects between the host GPU and software renderers (`swiftshader`, `swangle`, `lavapipe`); `auto` probes the host GPU asynchronously during `main()`.
 - Boot completion is signaled by the guest writing `bootcomplete` to `QemuMiscPipe`, which runs `bootCompleteFunction()`, touches `bootcompleted.ini`, and flips the `guest_boot_completed` global.
-- One engine serves every form factor: an `AvdFlavor` recovered from `build.prop` (`AVD_PHONE`/`AVD_TV`/`AVD_WEAR`/`AVD_ANDROID_AUTO`/`AVD_DESKTOP`/`AVD_XR`/`AVD_GLASSES`), a `hw.device.name` profile of geometry and input, optional `hw.sensor.hinge.*` foldable config, and the `resizable` AVD's preset sizes all feed the same `hardware-qemu.ini` and then steer sensors (Ch 10), displays (Ch 17), and which UI panels appear (Ch 22).
+- One engine serves every form factor. An `AvdFlavor` is recovered from `build.prop` (`AVD_PHONE`/`AVD_TV`/`AVD_WEAR`/`AVD_ANDROID_AUTO`/`AVD_DESKTOP`/`AVD_XR`/`AVD_GLASSES`). A `hw.device.name` profile gives geometry and input. Optional `hw.sensor.hinge.*` foldable config and the `resizable` AVD's preset sizes are further inputs. All of these feed the same `hardware-qemu.ini`. They then steer sensors (Ch 10), displays (Ch 17), and which UI panels appear (Ch 22).
 
 ### Key Source Files
 

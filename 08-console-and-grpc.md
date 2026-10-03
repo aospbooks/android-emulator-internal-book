@@ -1,6 +1,8 @@
 # Chapter 8: Console and gRPC Control Plane
 
-A running emulator is not a closed box. From the moment it boots it exposes two out-of-band control surfaces that let other processes inspect and steer it without going through the guest at all: a line-oriented telnet **console** on TCP port 5554, and a modern **gRPC** service that speaks a protobuf-defined API. The console is the old, human-typeable interface that has existed since the earliest SDK emulators — you telnet in, type `help`, and issue commands like `geo fix`, `power capacity`, or `redir add`. The gRPC plane is what Android Studio's embedded emulator, the `adb` discovery path, and modern automation tooling actually use: a strongly typed, streaming, authenticated RPC surface backed by the same in-process agents the console reaches.
+A running emulator is not a closed box. From the moment it boots, it exposes two out-of-band control surfaces. Other processes use them to inspect and steer the emulator without going through the guest at all. One is a line-oriented telnet **console** on TCP port 5554. The other is a modern **gRPC** service that speaks a protobuf-defined API.
+
+The console is the old, human-typeable interface that has existed since the earliest SDK emulators. You telnet in, type `help`, and issue commands like `geo fix`, `power capacity`, or `redir add`. Android Studio's embedded emulator, the `adb` discovery path, and modern automation tooling actually use the gRPC plane. It is a strongly typed, streaming, authenticated RPC surface backed by the same in-process agents the console reaches.
 
 This chapter walks both surfaces from the wire down to the agents that ultimately mutate emulator state. Both are implemented inside the `android-emu` host process; both are wired to the guest through the same `AndroidConsoleAgents` table. Understanding them is the key to understanding how anything outside the guest — Studio, a test harness, `adb`, a Python script — drives the device.
 
@@ -43,7 +45,7 @@ for (; tries > 0; tries--, base_port += 2) {
 }
 ```
 
-That is why the first emulator answers on console port 5554 and ADB 5555, the second on 5556/5557, and so on, and why the AVD shows up to `adb` as `emulator-5554`. The gRPC port is computed separately in `qemu_setup_grpc` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`) as `android_serial_number_port + 3000`, scanning a 1000-port range until one binds. None of these ports is fixed; clients discover the actual numbers from a registration file, covered in section 8.8.
+That is why the first emulator answers on console port 5554 and ADB 5555, and the second on 5556/5557, and so on. It is also why the AVD shows up to `adb` as `emulator-5554`. The gRPC port is computed separately in `qemu_setup_grpc` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`) as `android_serial_number_port + 3000`, scanning a 1000-port range until one binds. None of these ports is fixed; clients discover the actual numbers from a registration file, covered in section 8.8.
 
 ### 8.1.2 The two planes at a glance
 
@@ -96,7 +98,7 @@ if (fd4 < 0 && fd6 < 0) {
 global->looper = looper_getForThread();
 ```
 
-Binding to `socket_loopback4_server` / `socket_loopback6_server` rather than a wildcard address is the console's first line of defense: a remote machine cannot reach port 5554 at all, only processes on the same host can. Each accepted connection becomes a `ControlClientRec` — a small struct holding the socket, a 4096-byte line buffer, and a pointer into the current command table:
+Binding to `socket_loopback4_server` / `socket_loopback6_server` rather than a wildcard address is the console's first line of defense. A remote machine cannot reach port 5554 at all. Only processes on the same host can. Each accepted connection becomes a `ControlClientRec` — a small struct holding the socket, a 4096-byte line buffer, and a pointer into the current command table:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -112,11 +114,11 @@ typedef struct ControlClientRec_ {
 } ControlClientRec;
 ```
 
-The console is fully event-driven and single-threaded. There is no per-client thread; instead, `control_client_read` is registered as a `LoopIo` read callback. Bytes arrive, are fed one at a time into `control_client_read_byte`, and when a newline is seen the accumulated line is dispatched by `control_client_do_command`. That dispatcher runs on the same main looper as the rest of the emulator, which is why console commands that must touch QEMU state are safe to call agent methods directly.
+The console is fully event-driven and single-threaded. There is no per-client thread; instead, `control_client_read` is registered as a `LoopIo` read callback. Bytes arrive, are fed one at a time into `control_client_read_byte`, and when a newline is seen the accumulated line is dispatched by `control_client_do_command`. That dispatcher runs on the same main looper as the rest of the emulator. This is why console commands that must touch QEMU state are safe to call agent methods directly.
 
 ### 8.2.1 The OK / KO protocol
 
-The console wire protocol is deliberately trivial and human-friendly. Every command either succeeds — the handler returns 0 and the dispatcher writes `OK`, possibly after the command's own output — or fails, writing a line that begins with `KO:` and a reason. The relevant dispatch logic:
+The console wire protocol is deliberately trivial and human-friendly. Every command either succeeds or fails. On success, the handler returns 0 and the dispatcher writes `OK`, possibly after the command's own output. On failure, the console writes a line that begins with `KO:` and a reason. The relevant dispatch logic:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -129,7 +131,7 @@ if (cmd->handler) {
 }
 ```
 
-A `KO:` prefix is the universal failure signal a script can grep for. Before a command is even looked up, the dispatcher runs two cheap security checks: it rejects anything that looks like an HTTP request line and anything that is not valid UTF-8, closing the connection in both cases. This stops a browser or a port scanner that stumbles onto port 5554 from being parsed as console input:
+A `KO:` prefix is the universal failure signal a script can grep for. Before a command is even looked up, the dispatcher runs two cheap security checks. It rejects anything that looks like an HTTP request line. It also rejects anything that is not valid UTF-8. In both cases it closes the connection. This stops a browser or a port scanner that stumbles onto port 5554 from being parsed as console input:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -148,7 +150,7 @@ if (android_http_is_request_line(line, line_len)) {
 
 ## 8.3 Console Command Tables
 
-Commands are not parsed ad hoc; they are described by static tables of `CommandDefRec`. Each entry pairs a pipe-separated set of names, a one-line abstract, an optional long description, and either a handler function or a pointer to a sub-command table:
+Commands are not parsed ad hoc; they are described by static tables of `CommandDefRec`. Each entry pairs a pipe-separated set of names, a one-line abstract, and an optional long description. It also holds either a handler function or a pointer to a sub-command table:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -162,7 +164,7 @@ typedef struct CommandDefRec_ {
 } CommandDefRec;
 ```
 
-`find_command` walks a table, splitting each `names` field on `|` so that `help|h|?` matches `help`, `h`, or `?`. When a matched entry has no handler but does have a `subcommands` table, the dispatcher consumes the next token and recurses — this is how `geo fix`, `power capacity`, `redir add tcp:...`, and `sms send` are structured as nested tables. The top-level `main_commands` table aggregates per-subsystem tables such as `network_commands`, `redir_commands`, `power_commands`, `geo_commands`, `sensor_commands`, `snapshot_commands`, and `event_commands`, each defined next to its handlers.
+`find_command` walks a table, splitting each `names` field on `|` so that `help|h|?` matches `help`, `h`, or `?`. When a matched entry has no handler but does have a `subcommands` table, the dispatcher consumes the next token and recurses. This is how `geo fix`, `power capacity`, `redir add tcp:...`, and `sms send` are structured as nested tables. The top-level `main_commands` table aggregates per-subsystem tables such as `network_commands`, `redir_commands`, `power_commands`, `geo_commands`, `sensor_commands`, `snapshot_commands`, and `event_commands`, each defined next to its handlers.
 
 A representative leaf handler reads or writes through an agent and writes a reply. For example `do_avd_grpc_port` reaches the gRPC agent to report the live gRPC port — the bridge between the two control planes:
 
@@ -179,7 +181,7 @@ do_avd_grpc_port(ControlClient client, char* args) {
 }
 ```
 
-The `kill` command (`do_kill`) is the bluntest: it stops any active screen recording, prints a farewell, and tears the process down. On headless ARM hosts that support snapshot save, it sends `SIGINT` to itself (`kill(getpid(), SIGINT)`) so a graceful quickboot save can run first; otherwise it routes through the UI/libui agent's `requestExit`. (On Windows the snapshot-save path uses `requestExit` instead of `SIGINT`.)
+The `kill` command (`do_kill`) is the bluntest: it stops any active screen recording, prints a farewell, and tears the process down. On headless ARM hosts that support snapshot save, it sends `SIGINT` to itself (`kill(getpid(), SIGINT)`). This lets a graceful quickboot save run first. Otherwise it routes through the UI/libui agent's `requestExit`. (On Windows the snapshot-save path uses `requestExit` instead of `SIGINT`.)
 
 ### 8.3.1 Command dispatch flow
 
@@ -226,7 +228,7 @@ case CONSOLE_AUTH_STATUS_REQUIRED:
     break;
 ```
 
-The pre-auth table, `main_commands_preauth`, intentionally exposes almost nothing: `help`, `help-verbose`, `ping`, `quit`, the `auth` command itself, and a tiny `avd` sub-table with only `name` and `grpc`. Those two read-only `avd` queries are special-cased so that older Android Studio versions can read the AVD name and gRPC port before authenticating:
+The pre-auth table, `main_commands_preauth`, intentionally exposes almost nothing. It holds `help`, `help-verbose`, `ping`, `quit`, the `auth` command itself, and a tiny `avd` sub-table with only `name` and `grpc`. Those two read-only `avd` queries are special-cased so that older Android Studio versions can read the AVD name and gRPC port before authenticating:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -244,7 +246,7 @@ extern const CommandDefRec main_commands_preauth[] = {
 
 ### 8.4.1 The auth token file
 
-The token itself lives in `~/.emulator_console_auth_token`. The logic in `external/qemu/android/emu/telnet/auth/src/android/console_auth.cpp` creates it on first use, generating 96 bits of random data and base64-encoding it. The file is created with mode `0600` — readable and writable only by the owning user — and atomically with `O_CREAT | O_EXCL` so a concurrent emulator cannot race it:
+The token itself lives in `~/.emulator_console_auth_token`. The logic in `external/qemu/android/emu/telnet/auth/src/android/console_auth.cpp` creates it on first use, generating 96 bits of random data and base64-encoding it. The file is created with mode `0600`, which is readable and writable only by the owning user. The creation is atomic with `O_CREAT | O_EXCL`, so a concurrent emulator cannot race it:
 
 ```cpp
 // Source: external/qemu/android/emu/telnet/auth/src/android/console_auth.cpp
@@ -254,11 +256,13 @@ ScopedFd fd(HANDLE_EINTR(android_open(
         user_read_only)));
 ```
 
-If the file already exists, it is read back and trimmed; the contents become the expected token. Three status values flow out of this: a file that cannot be created *and* cannot be read — for example, a permission error on the containing directory — yields `CONSOLE_AUTH_STATUS_ERROR` (the console is disabled entirely). On a normal system a missing file is simply created fresh with a random token on first use, yielding `CONSOLE_AUTH_STATUS_REQUIRED`. An empty token string yields `CONSOLE_AUTH_STATUS_DISABLED` (no auth required), and any non-empty token yields `CONSOLE_AUTH_STATUS_REQUIRED`. Emptying the file is the supported way to turn console auth off.
+If the file already exists, it is read back and trimmed; the contents become the expected token. Three status values flow out of this. A file that cannot be created *and* cannot be read yields `CONSOLE_AUTH_STATUS_ERROR` (the console is disabled entirely). An example is a permission error on the containing directory.
+
+On a normal system a missing file is simply created fresh with a random token on first use, yielding `CONSOLE_AUTH_STATUS_REQUIRED`. An empty token string yields `CONSOLE_AUTH_STATUS_DISABLED` (no auth required), and any non-empty token yields `CONSOLE_AUTH_STATUS_REQUIRED`. Emptying the file is the supported way to turn console auth off.
 
 ### 8.4.2 Constant-time comparison
 
-The `do_auth` handler compares the supplied token against the file's token, then swaps the client onto the full `main_commands` table on success. The comparison is deliberately constant-time to blunt timing attacks — `const_time_strcmp` always inspects every byte rather than returning early on the first mismatch, so an attacker cannot learn how many leading characters were correct:
+The `do_auth` handler compares the supplied token against the file's token, then swaps the client onto the full `main_commands` table on success. The comparison is deliberately constant-time to blunt timing attacks. `const_time_strcmp` always inspects every byte rather than returning early on the first mismatch. So an attacker cannot learn how many leading characters were correct:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/console.cpp
@@ -316,7 +320,9 @@ service EmulatorController {
 }
 ```
 
-The four RPC shapes map directly to gRPC streaming modes: `get`/`set`/`send` are unary, `stream*` returning a `stream` is server-streaming (the emulator pushes values as they change), and input injection RPCs such as `streamInputEvent` and `injectWheel` take a `stream` parameter for client-streaming. A header comment also warns maintainers that adding or removing an RPC requires updating the metrics SQL via `external/qemu/android/scripts/gen-grpc-sql.py`, and that deleted methods must be logged with a removal date — the API is versioned by social contract because the proto itself is `proto3` with no explicit version field.
+The four RPC shapes map directly to gRPC streaming modes. The `get`/`set`/`send` RPCs are unary. A `stream*` RPC that returns a `stream` is server-streaming (the emulator pushes values as they change). Input injection RPCs such as `streamInputEvent` and `injectWheel` take a `stream` parameter for client-streaming.
+
+A header comment also warns maintainers about two rules. Adding or removing an RPC requires an update to the metrics SQL via `external/qemu/android/scripts/gen-grpc-sql.py`. Deleted methods must be logged with a removal date. The API is versioned by social contract, because the proto itself is `proto3` with no explicit version field.
 
 ### 8.5.1 The server implementation maps RPCs to agents
 
@@ -334,7 +340,7 @@ public:
         : mAgents(agents), mKeyEventSender(agents), ... {}
 ```
 
-Each unary RPC is a thin translation: deserialize the protobuf, hop to the main looper if it must touch QEMU state, call the agent, and fill the reply. `setBattery` is typical — note the `runOnMainLooper` thread hop, because gRPC handlers run on gRPC's own thread pool, not the emulator main thread:
+Each unary RPC is a thin translation. It deserializes the protobuf, hops to the main looper if it must touch QEMU state, calls the agent, and fills the reply. `setBattery` is typical. Note the `runOnMainLooper` thread hop. It is needed because gRPC handlers run on gRPC's own thread pool, not the emulator main thread:
 
 ```cpp
 // Source: .../emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
@@ -356,7 +362,7 @@ This is the same `agents->battery` the console's `power` commands use; the gRPC 
 
 ### 8.5.2 getStatus assembles a snapshot of the device
 
-`getStatus` is a good window into how much the gRPC plane exposes. It reads the VM configuration through `agents->vm->getVmConfiguration`, asks the boot tracker whether the guest finished booting, pulls the guest heartbeat counter, the process uptime, the build version string, and the QEMU hardware config map, then folds in a `BugreportInfo` for Android version and hypervisor details:
+`getStatus` is a good window into how much the gRPC plane exposes. It reads the VM configuration through `agents->vm->getVmConfiguration`. It asks the boot tracker whether the guest finished booting. It pulls the guest heartbeat counter, the process uptime, the build version string, and the QEMU hardware config map. Then it folds in a `BugreportInfo` for Android version and hypervisor details:
 
 ```cpp
 // Source: .../emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
@@ -399,7 +405,7 @@ sequenceDiagram
 
 ## 8.6 Bootstrapping and Registering gRPC Services
 
-The whole gRPC stack is stood up in `qemu_setup_grpc` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`). That function gathers a long list of service factories — the emulator controller, waterfall (the ADB-over-gRPC transport), snapshot, UI controller, stats, modem, car, sensor, bluetooth, virtual scene, screen recorder, and AVD services — and hands them to a fluent `EmulatorControllerService::Builder`:
+The whole gRPC stack is stood up in `qemu_setup_grpc` (`external/qemu/android-qemu2-glue/qemu-setup.cpp`). That function gathers a long list of service factories and hands them to a fluent `EmulatorControllerService::Builder`. The list holds the emulator controller, waterfall (the ADB-over-gRPC transport), snapshot, UI controller, stats, modem, car, sensor, bluetooth, virtual scene, screen recorder, and AVD services:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/qemu-setup.cpp
@@ -418,7 +424,7 @@ auto builder = EmulatorControllerService::Builder()
         .withService(bluetooth);
 ```
 
-Note the distinction between `withService` and `withSecureService`. The service registered with `withSecureService` is the separate `adb` service (`getAdbService`, the `Adb::Service` that hands out the ADB private key), not waterfall — the `Builder::build` step only registers it when TLS with client-certificate validation is active. The waterfall transport (`h2o = getWaterfallService(...)`) is registered with the ordinary `withService` and is not gated on TLS; everything else likewise registers unconditionally.
+Note the distinction between `withService` and `withSecureService`. The service registered with `withSecureService` is the separate `adb` service, not waterfall. It is `getAdbService`, the `Adb::Service` that hands out the ADB private key. The `Builder::build` step only registers it when TLS with client-certificate validation is active. The waterfall transport (`h2o = getWaterfallService(...)`) is registered with the ordinary `withService` and is not gated on TLS; everything else likewise registers unconditionally.
 
 `Builder::build` in `external/qemu/android/android-grpc/services-stack/src/android/emulation/control/GrpcServices.cpp` is where the gRPC `ServerBuilder` is finally assembled. It picks credentials, attaches an auth metadata processor when a token or JWT path was configured, registers every service, installs interceptors, and calls `BuildAndStart`:
 
@@ -506,7 +512,7 @@ if (mSecurity == Security::Insecure) {
 
 ### 8.7.1 The AnyTokenAuth processor
 
-When auth is active, the builder constructs an `AnyTokenAuth` — a composite that succeeds if *any* of its child validators accepts the credential — and installs it via `SetAuthMetadataProcessor`. For a static token it adds a `StaticTokenAuth` issued as `android-studio`; for JWTs it adds a `JwtTokenAuth` watching a key directory:
+When auth is active, the builder constructs an `AnyTokenAuth` and installs it via `SetAuthMetadataProcessor`. It is a composite that succeeds if *any* of its child validators accepts the credential. For a static token it adds a `StaticTokenAuth` issued as `android-studio`; for JWTs it adds a `JwtTokenAuth` watching a key directory:
 
 ```cpp
 // Source: .../services-stack/src/android/emulation/control/GrpcServices.cpp
@@ -523,7 +529,7 @@ mCredentials->SetAuthMetadataProcessor(std::make_shared<AnyTokenAuth>(
         std::move(anyauth), allowList.get()));
 ```
 
-Every validator derives from `BasicTokenAuth` (`external/qemu/android/android-grpc/security/include/android/emulation/control/secure/BasicTokenAuth.h`). Its `Process` method reads the gRPC `:path` pseudo-header to learn which method is being invoked, asks the allow list whether that path even requires authentication, and only then extracts and checks the `authorization: Bearer <token>` header:
+Every validator derives from `BasicTokenAuth` (`external/qemu/android/android-grpc/security/include/android/emulation/control/secure/BasicTokenAuth.h`). Its `Process` method reads the gRPC `:path` pseudo-header to learn which method is being invoked. It asks the allow list whether that path even requires authentication. Only then does it extract and check the `authorization: Bearer <token>` header:
 
 ```cpp
 // Source: .../security/src/android/emulation/control/secure/BasicTokenAuth.cpp
@@ -539,11 +545,11 @@ if (header == auth_metadata.end()) {
 }
 ```
 
-`StaticTokenAuth::canHandleToken` compares the presented token against `"Bearer " + token`; `isTokenValid` then also consults `allowList()->isRed(issuer, path)` so even a valid token cannot reach a method the allow list forbids for that issuer.
+`StaticTokenAuth::canHandleToken` compares the presented token against `"Bearer " + token`. `isTokenValid` then also consults `allowList()->isRed(issuer, path)`. So even a valid token cannot reach a method the allow list forbids for that issuer.
 
 ### 8.7.2 The allow list
 
-The allow list (`external/qemu/android/android-grpc/security/src/.../secure/emulator_access.json`) is JSON describing three categories: `unprotected` regexes that need no token at all, and per-issuer `allowed` and `protected` method lists. Its own header comment spells out the contract — methods not on either list are *always* rejected, and `protected` methods are reachable only when the JWT's `aud` claim names that method. The default ships `android-studio` with broad access to `EmulatorController` and `UiController` and warns that removing that entry breaks the embedded emulator. A custom file can be supplied with `-grpc-allowlist`.
+The allow list (`external/qemu/android/android-grpc/security/src/.../secure/emulator_access.json`) is JSON describing three categories: `unprotected` regexes that need no token at all, and per-issuer `allowed` and `protected` method lists. Its own header comment spells out the contract. Methods not on either list are *always* rejected. `protected` methods are reachable only when the JWT's `aud` claim names that method. The default ships `android-studio` with broad access to `EmulatorController` and `UiController` and warns that removing that entry breaks the embedded emulator. A custom file can be supplied with `-grpc-allowlist`.
 
 ### 8.7.3 JWT discovery directory
 
@@ -560,7 +566,7 @@ path_mkdir_if_needed(jwkDir.c_str(), 0700);
 builder.withJwtAuthDiscoveryDir(jwkDir, jwkLoadedFile);
 ```
 
-`JwtTokenAuth` (backed by Tink and a `JwkDirectoryObserver`) loads any `.jwk` public key dropped into that directory. A client that wants access generates a keypair, drops the public JWK in the directory, and signs short-lived JWTs whose `iss` is on the allow list and whose `exp` is unexpired. This lets a trusted local process mint its own credentials without the emulator ever handing out a long-lived secret.
+`JwtTokenAuth` (backed by Tink and a `JwkDirectoryObserver`) loads any `.jwk` public key dropped into that directory. A client that wants access generates a keypair and drops the public JWK in the directory. Then it signs short-lived JWTs whose `iss` is on the allow list and whose `exp` is unexpired. This lets a trusted local process mint its own credentials without the emulator ever handing out a long-lived secret.
 
 ```mermaid
 flowchart TB
@@ -604,11 +610,11 @@ for (const auto& elem : mStudioConfig) {
 }
 ```
 
-The properties written by `qemu_setup_grpc` include `port.serial`, `port.adb`, `avd.name`, `avd.id`, `grpc.port`, `grpc.token`, `grpc.allowlist`, and any TLS certificate paths. The file is named `pid_<pid>.ini`, and on POSIX it is chmod'd to set the sticky bit (`S_ISVTX`) plus owner read/write only, so it survives temp-directory garbage collection but stays private to the user.
+The properties written by `qemu_setup_grpc` include `port.serial`, `port.adb`, `avd.name`, `avd.id`, `grpc.port`, `grpc.token`, `grpc.allowlist`, and any TLS certificate paths. The file is named `pid_<pid>.ini`. On POSIX it is chmod'd to set the sticky bit (`S_ISVTX`) plus owner read/write only. So it survives temp-directory garbage collection but stays private to the user.
 
 The discovery directory resolves under the user's local config root via `ConfigDirs::getDiscoveryDirectory` (`external/qemu/android/emu/files/src/android/emulation/ConfigDirs.cpp`), which lands at `.../avd/running` and is created with mode `0700`. A client — Studio, `adb`, or a script — lists that directory, parses each `pid_*.ini`, and reads the ports and token it needs. The same `EmulatorAdvertisement::garbageCollect` path uses a `PidChecker` to delete stale files left by emulators that crashed.
 
-This is the missing link between the two control planes: a console client that has authenticated can run `avd grpc` to print the live gRPC port, and any client can instead read `grpc.port` and `grpc.token` straight from the discovery file. That is exactly how Android Studio attaches to an embedded emulator — read the file, dial the gRPC port, present the bearer token.
+This is the missing link between the two control planes. A console client that has authenticated can run `avd grpc` to print the live gRPC port. Any client can instead read `grpc.port` and `grpc.token` straight from the discovery file. That is exactly how Android Studio attaches to an embedded emulator. It reads the file, dials the gRPC port, and presents the bearer token.
 
 ```mermaid
 flowchart LR
@@ -635,7 +641,7 @@ flowchart LR
 
 ## 8.9 Driving the VM: setVmState and the Lifecycle Verbs
 
-One area where the gRPC API is noticeably richer than the console is whole-VM lifecycle control. The `VmRunState` message defines a `RunState` enum with explicit transition semantics documented per value: `RUNNING`, `PAUSED`, `RESTORE_VM`, `SAVE_VM`, `SHUTDOWN`, `TERMINATE`, `RESET`, `RESTART`, `START`, and `STOP`, plus the unobservable `UNKNOWN` and `INTERNAL_ERROR`. The proto comments distinguish states you can transition *to* from states the emulator only reports.
+One area where the gRPC API is noticeably richer than the console is whole-VM lifecycle control. The `VmRunState` message defines a `RunState` enum with explicit transition semantics documented per value. The values are `RUNNING`, `PAUSED`, `RESTORE_VM`, `SAVE_VM`, `SHUTDOWN`, `TERMINATE`, `RESET`, `RESTART`, `START`, and `STOP`, plus the unobservable `UNKNOWN` and `INTERNAL_ERROR`. The proto comments distinguish states you can transition *to* from states the emulator only reports.
 
 `setVmState` translates each verb to a `QAndroidVmOperations` call, again on the main looper because these transitions take the QEMU I/O lock:
 
@@ -654,7 +660,9 @@ switch (state) {
 }
 ```
 
-The mirror RPC, `getVmState`, reads `vm->getRunState()` and maps QEMU's internal run state back into the same enum, so a client can poll the VM, pause it for a debugger, resume it, or terminate it — the gRPC equivalents of the console's `kill`. `SHUTDOWN` versus `TERMINATE` is the meaningful split: `SHUTDOWN` requests a graceful close (so quickboot can save), while `TERMINATE` kills the process immediately with no cleanup, risking snapshot corruption. Choosing the right verb matters for CI pipelines that recycle devices.
+The mirror RPC, `getVmState`, reads `vm->getRunState()` and maps QEMU's internal run state back into the same enum. So a client can poll the VM, pause it for a debugger, resume it, or terminate it. These are the gRPC equivalents of the console's `kill`.
+
+`SHUTDOWN` versus `TERMINATE` is the meaningful split. `SHUTDOWN` requests a graceful close (so quickboot can save). `TERMINATE` kills the process immediately with no cleanup, risking snapshot corruption. Choosing the right verb matters for CI pipelines that recycle devices.
 
 ---
 
@@ -716,13 +724,13 @@ emulator -avd <name> -grpc 8554
 
 ## Summary
 
-- The emulator exposes two out-of-band control surfaces — a telnet **console** (default port 5554) and a **gRPC** service (a dynamically chosen port near `serial_port + 3000`) — and both reach the guest through the single shared `AndroidConsoleAgents` table, so a console command and its gRPC equivalent call the same agent.
+- The emulator exposes two out-of-band control surfaces. One is a telnet **console** (default port 5554). The other is a **gRPC** service (a dynamically chosen port near `serial_port + 3000`). Both reach the guest through the single shared `AndroidConsoleAgents` table, so a console command and its gRPC equivalent call the same agent.
 - The console is a single-threaded, loopback-only TCP server driven by `LoopIo`. Commands live in static `CommandDefRec` tables that nest into sub-commands, and every command answers with `OK` or a `KO:` failure line.
-- Console auth is a per-user secret in `~/.emulator_console_auth_token` (mode `0600`, 96 random bits, base64). Until a client sends `auth <token>` it sees only the pre-auth table (`help`, `ping`, `quit`, `avd name`, `avd grpc`); the token is checked in constant time to resist timing attacks.
+- Console auth is a per-user secret in `~/.emulator_console_auth_token` (mode `0600`, 96 random bits, base64). Until a client sends `auth <token>` it sees only the pre-auth table (`help`, `ping`, `quit`, `avd name`, `avd grpc`). The token is checked in constant time to resist timing attacks.
 - The `EmulatorController` gRPC service defines ~50 RPCs following a `get`/`set`/`send`/`stream` naming convention that maps onto unary, server-streaming, and client-streaming gRPC modes. Handlers deserialize protobuf and hop to the main looper before touching QEMU state.
-- The gRPC server is assembled by `EmulatorControllerService::Builder` in `GrpcServices.cpp`, which registers all services (secure ones only under TLS), installs four interceptors (logging, breadcrumb, metrics, idle-timeout), and starts the server.
+- `EmulatorControllerService::Builder` in `GrpcServices.cpp` assembles the gRPC server. It registers all services (secure ones only under TLS), installs four interceptors (logging, breadcrumb, metrics, idle-timeout), and starts the server.
 - gRPC security stacks three layers: transport credentials (Local, TLS, or Insecure), a token/JWT check via `AnyTokenAuth`/`StaticTokenAuth`/`JwtTokenAuth`, and a per-method allow list. Requesting token auth without TLS silently restricts the port to localhost.
-- Clients discover a running emulator through a per-process `pid_<pid>.ini` file written by `EmulatorAdvertisement` into the `avd/running` discovery directory; it carries `grpc.port`, `grpc.token`, and the console/ADB ports.
+- Clients discover a running emulator through a per-process `pid_<pid>.ini` file written by `EmulatorAdvertisement` into the `avd/running` discovery directory. It carries `grpc.port`, `grpc.token`, and the console/ADB ports.
 - Whole-VM lifecycle control via `setVmState`/`getVmState` is the gRPC verb set the console lacks, distinguishing graceful `SHUTDOWN` (allows quickboot save) from immediate `TERMINATE`.
 
 ### Key Source Files

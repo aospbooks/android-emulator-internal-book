@@ -1,8 +1,12 @@
 # Chapter 23: WebRTC and the Embedded Emulator
 
-The Qt UI in the previous chapter draws the guest screen into a window on the same machine that runs the emulator. That model breaks down the moment the person looking at the screen is not sitting at the host: an Android Studio user whose emulator runs in a tool window inside the IDE, a developer on a remote workstation, a CI dashboard that wants a live view of a headless device farm. For those cases the emulator ships a second front end that has no window of its own. It encodes the guest display into a video stream, ships it to a browser-style client over WebRTC, and accepts mouse, touch, keyboard, and adb input back over the same peer connection. This is the machinery behind the *embedded emulator* (the device that shows up inside Android Studio) and behind remote streaming in general.
+The Qt UI in the previous chapter draws the guest screen into a window on the same machine that runs the emulator. That model breaks down when the person who looks at the screen is not at the host. One example is an Android Studio user whose emulator runs in a tool window inside the IDE. Another is a developer on a remote workstation. A third is a CI dashboard that wants a live view of a headless device farm.
 
-This chapter walks the WebRTC path end to end: the gRPC signaling service that bootstraps a connection, the `Switchboard` and `Participant` objects that drive the JSEP handshake inside the emulator process, the in-process video and audio sources that turn framebuffer updates into encoded media tracks, and the data channels that carry input events back into the same `EventSender` plumbing the gRPC controller uses. Almost all of the code lives under `external/qemu/android/android-webrtc/`, with the wire contract defined in `hardware/google/aemu/protos/services/webrtc/`. The whole subsystem is gated behind an `ANDROID_WEBRTC` build flag, so it is present only in builds that link the Chromium WebRTC library out of `external/webrtc/`.
+For those cases the emulator ships a second front end that has no window of its own. It encodes the guest display into a video stream and ships it to a browser-style client over WebRTC. It also accepts mouse, touch, keyboard, and adb input back over the same peer connection. This is the machinery behind the *embedded emulator* (the device that shows up inside Android Studio) and behind remote streaming in general.
+
+This chapter walks the WebRTC path end to end. It covers the gRPC signaling service that bootstraps a connection. It also covers the `Switchboard` and `Participant` objects that drive the JSEP handshake inside the emulator process. Then it covers the in-process video and audio sources that turn framebuffer updates into encoded media tracks. Last, it covers the data channels that carry input events back into the same `EventSender` plumbing the gRPC controller uses.
+
+Almost all of the code lives under `external/qemu/android/android-webrtc/`, with the wire contract defined in `hardware/google/aemu/protos/services/webrtc/`. The whole subsystem is gated behind an `ANDROID_WEBRTC` build flag. So it is present only in builds that link the Chromium WebRTC library out of `external/webrtc/`.
 
 ---
 
@@ -12,9 +16,9 @@ The emulator can present its display two ways, and the split matters for everyth
 
 The Qt UI (Chapter 22) is a *local* renderer. It lives in the emulator process, pulls frames from the GPU renderer, and paints them into a window. Input flows from Qt event handlers directly into the user-event agent. There is no network in the loop.
 
-The WebRTC front end is a *remote* renderer. The emulator process produces an encoded media stream and a set of data channels; a separate client — a web page, the Android Studio tool window, or a standalone receiver — consumes them. The emulator never opens a window. This is why a streaming emulator is usually launched with `-no-window` and a `-grpc` port: the gRPC server is the only way in.
+The WebRTC front end is a *remote* renderer. The emulator process produces an encoded media stream and a set of data channels. A separate client consumes them: a web page, the Android Studio tool window, or a standalone receiver. The emulator never opens a window. This is why a streaming emulator is usually launched with `-no-window` and a `-grpc` port: the gRPC server is the only way in.
 
-Both front ends ultimately talk to the same control plane. Mouse, touch, and keyboard events from the WebRTC client are decoded into the same `MouseEvent`, `TouchEvent`, and `KeyboardEvent` protobuf messages the gRPC `EmulatorController` service uses, and handed to the same `EventSender` subclasses. The `EventForwarder` in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.h:72` wires a WebRTC data channel into exactly those senders.
+Both front ends ultimately talk to the same control plane. Mouse, touch, and keyboard events from the WebRTC client are decoded into the same `MouseEvent`, `TouchEvent`, and `KeyboardEvent` protobuf messages the gRPC `EmulatorController` service uses. They are then handed to the same `EventSender` subclasses. The `EventForwarder` in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.h:72` wires a WebRTC data channel into exactly those senders.
 
 ### 23.1.1 Where the code lives
 
@@ -54,7 +58,7 @@ flowchart LR
     WEB <-..->|"media + data (SRTP/DTLS)"| PART
 ```
 
-The dashed line is the direct peer connection: once signaling completes, media and input no longer travel through the gRPC server, they ride the WebRTC transport between the client and the `Participant`.
+The dashed line is the direct peer connection. When signaling completes, media and input no longer travel through the gRPC server. They ride the WebRTC transport between the client and the `Participant`.
 
 ---
 
@@ -75,7 +79,7 @@ service Rtc {
 }
 ```
 
-The service is deliberately *not* a single bidirectional stream. The proto comment in that file explains why: JavaScript gRPC-web clients cannot use bidirectional streaming, so signaling is split into one unary call to start, one unary call to push messages up, and one server-streaming call (`ReceiveJsepMessageStream`) to pull messages down. A polling unary `ReceiveJsepMessage` exists as a fallback for proxies that cannot do server streaming at all.
+The service is deliberately *not* a single bidirectional stream. The proto comment in that file explains why. JavaScript gRPC-web clients cannot use bidirectional streaming. Because of this, signaling is split into three calls. One unary call starts the session, one unary call pushes messages up, and one server-streaming call (`ReceiveJsepMessageStream`) pulls messages down. A polling unary `ReceiveJsepMessage` exists as a fallback for proxies that cannot do server streaming at all.
 
 ### 23.2.1 The four signaling RPCs
 
@@ -95,7 +99,7 @@ reply->mutable_id()->set_guid(id);
 After that the client uses the GUID on every other call.
 
 1. `SendJsepMessage` carries the client's SDP answers and ICE candidates *up* into the emulator. The handler pulls `jsep_msg.id().guid()` and `jsep_msg.message()` and calls `getBridge()->acceptJsepMessage(id, msg)`.
-2. `ReceiveJsepMessageStream` carries the server's offer and trickled ICE candidates *down* to the client. The handler loops, calling `getBridge()->nextMessage(id, &msg, 250)` with a 250 ms timeout so the thread can notice client cancellation, and writes any non-empty message to the gRPC stream.
+2. `ReceiveJsepMessageStream` carries the server's offer and trickled ICE candidates *down* to the client. The handler loops and calls `getBridge()->nextMessage(id, &msg, 250)` with a 250 ms timeout, so the thread can notice client cancellation. It writes any non-empty message to the gRPC stream.
 3. `ReceiveJsepMessage` is the deprecated polling version that blocks up to five seconds for a single message.
 
 ### 23.2.2 JSEP messages are opaque JSON
@@ -107,13 +111,13 @@ Notice that the JSEP payload is a plain string, not a structured protobuf. The `
 3. `candidate` — an `RTCIceCandidateInit`.
 4. `bye` — a hang-up; the server has torn the stream down.
 
-Keeping the payload as JSON is what lets a browser act as a near-zero-translation peer: the strings the emulator emits are the strings the WebRTC JavaScript API expects.
+The payload stays JSON. This lets a browser act as a near-zero-translation peer, because the strings the emulator emits are the strings the WebRTC JavaScript API expects.
 
 ### 23.2.3 What "v2" actually changed
 
-The `v2` in the filename is easy to misread. It is not a second streaming stack, a new transport, or a new codec path. `RtcServiceV2.cpp` constructs the same `Switchboard` as v1, hands it the same `-turncfg` and `-dump-audio` arguments, and its `SendJsepMessage`, `ReceiveJsepMessageStream`, and `ReceiveJsepMessage` bodies are the v1 handlers with the payload unwrapped from an envelope. Both services are registered on the same gRPC server (Section 23.10), each with its own `Switchboard`, so an `ANDROID_WEBRTC` build answers `android.emulation.control.Rtc` and `android.emulation.control.v2.Rtc` simultaneously.
+The `v2` in the filename is easy to misread. It is not a second streaming stack, a new transport, or a new codec path. `RtcServiceV2.cpp` constructs the same `Switchboard` as v1 and hands it the same `-turncfg` and `-dump-audio` arguments. Its `SendJsepMessage`, `ReceiveJsepMessageStream`, and `ReceiveJsepMessage` bodies are the v1 handlers with the payload unwrapped from an envelope. Both services are registered on the same gRPC server (Section 23.10), each with its own `Switchboard`. So an `ANDROID_WEBRTC` build answers `android.emulation.control.Rtc` and `android.emulation.control.v2.Rtc` simultaneously.
 
-Two things are genuinely different. The first is API hygiene: every RPC now takes and returns a named message (`RtcStreamRequest`, `SendJsepMessageRequest`, `ReceiveJsepMessageResponse`) instead of a bare `RtcId`, `JsepMsg`, or `google.protobuf.Empty`, which leaves room to add fields without breaking the wire. `RtcId` is renamed `Id`. `RtcStreamRequest` also declares a `google.protobuf.Any payload` as an extension point for "extra information needed by the server" — nothing in the tree reads it today.
+Two things are genuinely different. The first is API hygiene. Every RPC now takes and returns a named message (`RtcStreamRequest`, `SendJsepMessageRequest`, `ReceiveJsepMessageResponse`) instead of a bare `RtcId`, `JsepMsg`, or `google.protobuf.Empty`. This leaves room to add fields without breaking the wire. `RtcId` is renamed `Id`. `RtcStreamRequest` also declares a `google.protobuf.Any payload` as an extension point for "extra information needed by the server" — nothing in the tree reads it today.
 
 The second is the only new capability: the client can supply its own ICE servers.
 
@@ -125,7 +129,7 @@ message RtcStreamRequest {
 }
 ```
 
-`IceServerConfig` comes from `hardware/google/aemu/protos/services/webrtc/ice_config.proto:52` — a structured version of an `RTCConfiguration`, with a repeated `ice_servers` list of URL/username/credential triples, a TLS certificate policy, and an `ice_transport_policy` string. In v1 there is no such field: TURN configuration can only come from the host, by way of the `-turncfg` command (Section 23.9). In v2, `RequestRtcStream` serializes whatever the client sent back to JSON and feeds it to the bridge, which is where the `jsonStr` branch shown in Section 23.2.1 comes from:
+`IceServerConfig` comes from `hardware/google/aemu/protos/services/webrtc/ice_config.proto:52`. It is a structured version of an `RTCConfiguration`. It has a repeated `ice_servers` list of URL/username/credential triples, a TLS certificate policy, and an `ice_transport_policy` string. In v1 there is no such field: TURN configuration can only come from the host, by way of the `-turncfg` command (Section 23.9). In v2, `RequestRtcStream` serializes whatever the client sent back to JSON and feeds it to the bridge. This is where the `jsonStr` branch shown in Section 23.2.1 comes from:
 
 ```cpp
 // Source: external/qemu/android/android-webrtc/android-webrtc/android/emulation/control/RtcServiceV2.cpp
@@ -137,9 +141,9 @@ auto status = google::protobuf::util::MessageToJsonString(
         request->ice_server_config(), &jsonStr, options);
 ```
 
-A config the protobuf runtime cannot render as JSON is rejected with `INVALID_ARGUMENT` rather than silently dropped. Note `preserve_proto_field_names`: the JSON handed downstream uses the proto's snake_case spelling, so the servers arrive under `ice_servers`, which is precisely the second key `RtcConfig::parse` looks for (`external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/RtcConfig.cpp:65`). The transport policy does not survive the same trip — it is emitted as `ice_transport_policy`, while the parser only tests the camelCase `iceTransportPolicy` (same file, line 104), so a client asking for relay-only transport through the v2 message does not get it.
+A config the protobuf runtime cannot render as JSON is rejected with `INVALID_ARGUMENT` rather than silently dropped. Note `preserve_proto_field_names`: the JSON handed downstream uses the proto's snake_case spelling. The servers therefore arrive under `ice_servers`, which is precisely the second key `RtcConfig::parse` looks for (`external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/RtcConfig.cpp:65`). The transport policy does not survive the same trip. It is emitted as `ice_transport_policy`, but the parser only tests the camelCase `iceTransportPolicy` (same file, line 104). So a client that asks for relay-only transport through the v2 message does not get it.
 
-The 2026 build change that put "WebRTC v2" back in the changelog is narrower still: it added `rtc_service_v2_java_proto` and `rtc_service_v2_java_grpc` to `hardware/google/aemu/protos/services/webrtc/BUILD.bazel:77`, so JVM clients can be generated from the v2 contract the way C++ clients already were. One thing to watch when consuming those: both protos declare `java_package = "com.android.emulator.control"` with `java_multiple_files = true`, so the v1 and v2 `JsepMsg` classes land on the same fully-qualified name. A JVM client depends on one target or the other, not both.
+The 2026 build change that put "WebRTC v2" back in the changelog is narrower still. It added `rtc_service_v2_java_proto` and `rtc_service_v2_java_grpc` to `hardware/google/aemu/protos/services/webrtc/BUILD.bazel:77`. So JVM clients can be generated from the v2 contract the way C++ clients already were. One thing to watch when those are consumed: both protos declare `java_package = "com.android.emulator.control"` with `java_multiple_files = true`. So the v1 and v2 `JsepMsg` classes land on the same fully-qualified name. A JVM client depends on one target or the other, not both.
 
 JSEP handshake over the split gRPC service
 
@@ -181,7 +185,7 @@ This indirection exists because there have historically been two implementations
 
 ### 23.3.1 Why a separate process used to exist
 
-The README in `external/qemu/android/android-webrtc/README.md` explains the original split: the Chromium WebRTC library is built with GN and pulls in dependencies (libyuv, BoringSSL, and friends) whose versions clash with the emulator's own. To keep the two dependency graphs apart, the video bridge was a separate executable that exchanged JSEP over a socket and video over shared memory.
+The README in `external/qemu/android/android-webrtc/README.md` explains the original split. The Chromium WebRTC library is built with GN. It pulls in dependencies (libyuv, BoringSSL, and friends) whose versions clash with the emulator's own. To keep the two dependency graphs apart, the video bridge was a separate executable that exchanged JSEP over a socket and video over shared memory.
 
 ```
 +---------------------------+               +-------------------------+
@@ -192,13 +196,13 @@ The README in `external/qemu/android/android-webrtc/README.md` explains the orig
                                 Memory
 ```
 
-The modern build solves the dependency conflict differently: WebRTC is compiled into a shared library (`android-webrtc`, flagged `AEMU_WEBRTC_SHARED` in its `CMakeLists.txt`) that the emulator loads, so the engine can run in-process without contaminating the rest of the build. The standalone bridge survives only as the `videobridge/` directory for legacy clients.
+The modern build solves the dependency conflict differently. WebRTC is compiled into a shared library (`android-webrtc`, flagged `AEMU_WEBRTC_SHARED` in its `CMakeLists.txt`) that the emulator loads. So the engine can run in-process without contaminating the rest of the build. The standalone bridge survives only as the `videobridge/` directory for legacy clients.
 
 ---
 
 ## 23.4 The Switchboard
 
-`Switchboard` is the heart of the in-process design. Its class comment in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Switchboard.h:41` lists its four jobs: create participants when a user starts a session, remove them on disconnect, route JSEP signals to the right participant, and finalize participants that stop streaming.
+`Switchboard` is the heart of the in-process design. Its class comment in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Switchboard.h:41` lists four jobs. The first two are to create participants when a user starts a session and to remove them on disconnect. The other two are to route JSEP signals to the right participant and to finalize participants that stop streaming.
 
 What makes it interesting is that it implements *two* interfaces at once.
 
@@ -234,7 +238,7 @@ participant->AddAudioTrack(mAudioDumpFile);
 participant->CreateOffer();
 ```
 
-The multi-display branch is worth noting: a single peer connection carries one video track *per emulated display*, so a foldable or a multi-display AVD streams every screen to the same client.
+The multi-display branch is worth noting. A single peer connection carries one video track *per emulated display*. So a foldable or a multi-display AVD streams every screen to the same client.
 
 ### 23.4.2 Direction of message flow
 
@@ -318,17 +322,17 @@ if (mRtcConnection->signalingThread()->IsCurrent()) {
 }
 ```
 
-The Switchboard's `rtcConnectionClosed` likewise posts the actual teardown of a `Participant` onto the signaling thread with `PostDelayedTask`, so the peer connection is always destroyed from the thread that owns it.
+The Switchboard's `rtcConnectionClosed` likewise posts the actual teardown of a `Participant` onto the signaling thread with `PostDelayedTask`. So the peer connection is always destroyed from the thread that owns it.
 
 ---
 
 ## 23.6 The Participant and the JSEP State Machine
 
-A `Participant` represents one peer connection — one connected client. Its class comment in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.h:93` summarizes its three duties: create the audio and video streams, do ICE network discovery, and exchange offers/answers with the remote client. It is also the `PeerConnectionObserver`, so WebRTC calls back into it for every state change and ICE candidate.
+A `Participant` represents one peer connection — one connected client. Its class comment in `external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.h:93` summarizes its three duties. They are to create the audio and video streams, to do ICE network discovery, and to exchange offers/answers with the remote client. It is also the `PeerConnectionObserver`, so WebRTC calls back into it for every state change and ICE candidate.
 
 ### 23.6.1 Initialize, then offer
 
-`Initialize()` creates the peer connection from the parsed `RtcConfig` and opens the four input data channels (Section 23.8). The Switchboard then adds the media tracks and calls `CreateOffer()`. The offer is produced asynchronously; when WebRTC hands it back, `ReceivedSessionDescription` sets it as the local description and ships it to the client as a `sdp` JSEP message.
+`Initialize()` creates the peer connection from the parsed `RtcConfig` and opens the four input data channels (Section 23.8). The Switchboard then adds the media tracks and calls `CreateOffer()`. The offer is produced asynchronously. When WebRTC hands it back, `ReceivedSessionDescription` sets it as the local description and ships it to the client as a `sdp` JSEP message.
 
 ```cpp
 // Source: external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/Participant.cpp
@@ -349,7 +353,7 @@ void Participant::ReceivedSessionDescription(
 
 `IncomingMessage` is the dispatcher for everything coming up from the client. It inspects the JSON keys and routes accordingly: a `candidate` becomes an `AddIceCandidate`, a `start` (re)creates the peer connection, and a `sdp` becomes `HandleOffer`. There is even a compatibility shim for "old JS clients" that double-wrap the candidate and sdp objects.
 
-`OnIceCandidate` is the reverse: when the local ICE agent discovers a candidate, the Participant serializes it to the WebRTC `RTCIceCandidateInit` shape (`sdpMid`, `sdpMLineIndex`, `candidate`) and sends it down as a JSEP message, so candidates trickle to the client as they are found.
+`OnIceCandidate` is the reverse. When the local ICE agent discovers a candidate, the Participant serializes it to the WebRTC `RTCIceCandidateInit` shape (`sdpMid`, `sdpMLineIndex`, `candidate`). It then sends the candidate down as a JSEP message, so candidates trickle to the client as they are found.
 
 Participant connection lifecycle
 
@@ -399,11 +403,11 @@ if (renderer.get()) {
 }
 ```
 
-The capture loop waits up to 125 ms for the next frame event; if no event arrives (timeout), no frame is emitted and the loop simply rechecks whether capture is still active -- this is what lets the loop notice shutdown without blocking indefinitely. Frames are produced only when the renderer fires a FrameBufferChangeEvent.
+The capture loop waits up to 125 ms for the next frame event. If no event arrives (timeout), no frame is emitted. The loop then rechecks whether capture is still active. This lets the loop notice shutdown without blocking indefinitely. Frames are produced only when the renderer fires a FrameBufferChangeEvent.
 
 ### 23.7.2 Screenshot to I420
 
-When a frame is due, the source takes a screenshot in RGB888 through the same `takeScreenshot` / `ScreenshotUtils` path the gRPC screenshot endpoint uses, accounting for device rotation, then converts it to the I420 (YUV 4:2:0) layout WebRTC encoders expect using libyuv:
+When a frame is due, the source takes a screenshot in RGB888 through the same `takeScreenshot` / `ScreenshotUtils` path that the gRPC screenshot endpoint uses. The source accounts for device rotation. Then it converts the screenshot to the I420 (YUV 4:2:0) layout that WebRTC encoders expect, with libyuv:
 
 ```cpp
 // Source: external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/capture/InprocessVideoSource.cpp
@@ -498,9 +502,9 @@ case DataChannelLabel::mouse: {
 }
 ```
 
-Touch events go through the `TouchEventSender`, which translates each `Touch` into Linux multi-touch "Protocol B" events (`EV_ABS`, `LINUX_ABS_MT_SLOT`, `LINUX_ABS_MT_TRACKING_ID`) and scales coordinates to the `0..0x7FFF` evdev range — exactly the logic in `external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/keyboard/TouchEventSender.cpp`. The keyboard sender translates browser key codes to evdev using the Chromium translation tables.
+Touch events go through the `TouchEventSender`. It translates each `Touch` into Linux multi-touch "Protocol B" events (`EV_ABS`, `LINUX_ABS_MT_SLOT`, `LINUX_ABS_MT_TRACKING_ID`). It also scales coordinates to the `0..0x7FFF` evdev range. This is exactly the logic in `external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/keyboard/TouchEventSender.cpp`. The keyboard sender translates browser key codes to evdev using the Chromium translation tables.
 
-This shared-sender design is the reason the embedded emulator behaves identically to a local one: a tap from a browser and a tap from the Qt window end up as the same kernel input events.
+This shared-sender design is the reason the embedded emulator behaves identically to a local one. A tap from a browser and a tap from the Qt window end up as the same kernel input events.
 
 ### 23.8.2 The adb channel
 
@@ -545,18 +549,18 @@ if (exitCode == 0 && turn) {
 }
 ```
 
-Running a command (rather than reading a file) means short-lived TURN credentials can be minted per session — the README shows curling Google's network-traversal API for exactly this. The default budget is overridable with the `ANDROID_EMU_MAX_TURNCFG_TIME` environment variable. If the command does not produce valid JSON the service exits at startup, so a misconfigured TURN setup fails loudly rather than silently dropping connections.
+Running a command (rather than reading a file) means short-lived TURN credentials can be minted per session. The README shows curling Google's network-traversal API for exactly this. The default budget is overridable with the `ANDROID_EMU_MAX_TURNCFG_TIME` environment variable. If the command does not produce valid JSON the service exits at startup, so a misconfigured TURN setup fails loudly rather than silently dropping connections.
 
 ### 23.9.2 From JSON to RTCConfiguration
 
-`RtcConfig::parse` turns that JSON into a WebRTC `RTCConfiguration`. It accepts both Google-style `iceServers` and Twilio-style `ice_servers`, maps `iceTransportPolicy: "relay"` to a relay-only ICE type (forcing all traffic through TURN), and sets `sdp_semantics` to Unified Plan so multiple audio and video tracks can share one connection. If no server is configured at all, it falls back to a public Google STUN server:
+`RtcConfig::parse` turns that JSON into a WebRTC `RTCConfiguration`. It accepts both Google-style `iceServers` and Twilio-style `ice_servers`. It maps `iceTransportPolicy: "relay"` to a relay-only ICE type, which forces all traffic through TURN. It sets `sdp_semantics` to Unified Plan, so multiple audio and video tracks can share one connection. If no server is configured at all, it falls back to a public Google STUN server:
 
 ```cpp
 // Source: external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/RtcConfig.cpp
 const std::string kDefaultStunUri = "stun:stun.l.google.com:19302";
 ```
 
-The validated config is what the Switchboard sends to the client in the `start` message, so both peers configure ICE from the same source of truth.
+The Switchboard sends the validated config to the client in the `start` message. So both peers configure ICE from the same source of truth.
 
 ---
 
@@ -577,11 +581,11 @@ The WebRTC services are registered with the gRPC server during emulator setup, i
 #endif
 ```
 
-These services join the same `EmulatorControllerService` builder that registers the emulator controller, snapshot, sensor, and adb services. That means WebRTC streaming inherits the gRPC server's entire security stack: the same port range, the same TLS options, and the same JWT/token authentication described in the gRPC control-plane chapter. A streaming client must authenticate exactly like any other gRPC client before it can call `RequestRtcStream`.
+These services join the same `EmulatorControllerService` builder that registers the emulator controller, snapshot, sensor, and adb services. That means WebRTC streaming inherits the gRPC server's entire security stack. It uses the same port range, the same TLS options, and the same JWT/token authentication described in the gRPC control-plane chapter. A streaming client must authenticate exactly like any other gRPC client before it can call `RequestRtcStream`.
 
 ### 23.10.1 Discovery for the embedded emulator
 
-Android Studio's embedded emulator finds a running emulator the same way other tools do: through the discovery directory. When the gRPC server comes up it writes a property bag — `grpc.port`, `grpc.token`, the JWT key directory, and the TLS certificate paths — into a per-process discovery file (the `props[...]` assignments in `qemu_setup_grpc`). The IDE reads that file to learn where the gRPC endpoint is and how to authenticate, then drives the `Rtc` service to open the stream.
+Android Studio's embedded emulator finds a running emulator the same way other tools do: through the discovery directory. When the gRPC server comes up, it writes a property bag into a per-process discovery file (the `props[...]` assignments in `qemu_setup_grpc`). The bag holds `grpc.port`, `grpc.token`, the JWT key directory, and the TLS certificate paths. The IDE reads that file to learn where the gRPC endpoint is and how to authenticate, then drives the `Rtc` service to open the stream.
 
 Service registration and the shared gRPC server
 
@@ -614,10 +618,10 @@ flowchart TB
 It is worth pinning down the three ways the emulator's display can reach a human, because they share code in non-obvious ways.
 
 1. The Qt UI renders locally in the emulator process; no gRPC, no WebRTC, input goes straight to the user-event agent (Chapter 22).
-2. The embedded/remote WebRTC front end streams over a peer connection negotiated through the in-process `Switchboard`; input returns over data channels into the same `EventSender` plumbing.
-3. The legacy standalone video bridge (`videobridge/`, built around `GoldfishBridge.cpp` and `StandaloneConnection`) runs WebRTC in a separate process and connects back to the emulator's gRPC endpoint; it exists for clients that cannot link the in-process engine.
+2. The embedded/remote WebRTC front end streams over a peer connection negotiated through the in-process `Switchboard`. Input returns over data channels into the same `EventSender` plumbing.
+3. The legacy standalone video bridge (`videobridge/`, built around `GoldfishBridge.cpp` and `StandaloneConnection`) runs WebRTC in a separate process and connects back to the emulator's gRPC endpoint. It exists for clients that cannot link the in-process engine.
 
-The standalone bridge is itself a gRPC client. `GoldfishBridge.cpp` builds an `EmulatorGrpcClient` pointed at an `--emulator` address and hosts its own `Rtc` service for downstream clients, effectively acting as a streaming proxy in front of a plain emulator. For new deployments the in-process path is preferred; the standalone executable is a compatibility artifact, which is why the v1 service factory and `WebRtcBridge` carry deprecation markers while still resolving to a `Switchboard` underneath.
+The standalone bridge is itself a gRPC client. `GoldfishBridge.cpp` builds an `EmulatorGrpcClient` pointed at an `--emulator` address. It hosts its own `Rtc` service for downstream clients and effectively works as a streaming proxy in front of a plain emulator. For new deployments the in-process path is preferred. The standalone executable is a compatibility artifact. This is why the v1 service factory and `WebRtcBridge` carry deprecation markers while they still resolve to a `Switchboard` underneath.
 
 ---
 
@@ -647,7 +651,7 @@ Capture the guest's audio stream to disk to see the InprocessAudioSource path in
 emulator @my_avd -no-window -grpc 8554 -dump-audio /tmp/guest-audio.pcm
 ```
 
-Point the emulator at a TURN configuration command and watch it validate at startup (a bad command makes the service exit):
+Point the emulator at a TURN configuration command and watch it validate at startup. A bad command makes the service exit:
 
 ```bash
 # The command must print a JSON RTCConfiguration with an iceServers array.
@@ -668,15 +672,15 @@ $EDITOR external/qemu/android/android-webrtc/android-webrtc/android/emulation/co
 
 ## Summary
 
-- The emulator has two front ends sharing one control plane: the local Qt UI (Chapter 22) and a windowless WebRTC stream used by the Android Studio embedded emulator and remote clients.
-- Signaling rides a gRPC `Rtc` service (`rtc_service_v2.proto`) split into `RequestRtcStream`, `SendJsepMessage`, a server-streaming `ReceiveJsepMessageStream`, and a polling fallback — the split exists because JavaScript gRPC-web cannot do bidirectional streams.
+- The emulator has two front ends that share one control plane. They are the local Qt UI (Chapter 22) and a windowless WebRTC stream that the Android Studio embedded emulator and remote clients use.
+- Signaling rides a gRPC `Rtc` service (`rtc_service_v2.proto`). The service is split into `RequestRtcStream`, `SendJsepMessage`, a server-streaming `ReceiveJsepMessageStream`, and a polling fallback. The split exists because JavaScript gRPC-web cannot do bidirectional streams.
 - JSEP messages are opaque JSON blobs (`start`, `sdp`, `candidate`, `bye`) that a browser can hand almost verbatim to its `RTCPeerConnection`.
-- "v2" is an API-shape revision of the same service, not a new streaming stack: it wraps every RPC in a named request/response message, renames `RtcId` to `Id`, reserves an unread `Any payload`, and adds the one real capability v1 lacks — an optional `IceServerConfig` on `RequestRtcStream` that lets the *client* supply ICE/TURN servers instead of relying solely on the host's `-turncfg`. Both versions are served at once, and the recent build work only adds Java proto/gRPC targets for the v2 contract.
-- The gRPC service talks only to an `RtcBridge`; the modern implementation is the in-process `Switchboard`, which also implements `RtcConnection`, making it the seam between the gRPC and WebRTC worlds. The legacy out-of-process `WebRtcBridge`/videobridge is deprecated.
-- Each connected client is a `Participant` that owns a peer connection, drives the offer/answer/ICE handshake, and is torn down on the signaling thread when the connection fails or closes.
-- Video comes from `InprocessVideoSource`, which captures a screenshot on each renderer framebuffer-change event, converts RGB888 to I420 with libyuv, and broadcasts it to the WebRTC encoder; audio comes from `InprocessAudioSource` re-framing guest audio into 10 ms WebRTC packets.
-- Input returns over four data channels (mouse, keyboard, touch, adb) whose `EventForwarder` decodes the same protobuf messages and uses the same `EventSender` plumbing as the gRPC controller, so streamed input is indistinguishable from local input.
-- ICE/TURN is configured by running the `-turncfg` command, validated at startup, parsed by `RtcConfig` into a Unified-Plan `RTCConfiguration`, and sent to the client in the `start` message; absent any server it falls back to a public Google STUN URI.
+- "v2" is an API-shape revision of the same service, not a new streaming stack. It wraps every RPC in a named request/response message, renames `RtcId` to `Id`, and reserves an unread `Any payload`. It also adds the one real capability that v1 lacks: an optional `IceServerConfig` on `RequestRtcStream`. This lets the *client* supply ICE/TURN servers instead of relying only on the host's `-turncfg`. Both versions are served at once. The recent build work only adds Java proto/gRPC targets for the v2 contract.
+- The gRPC service talks only to an `RtcBridge`. The modern implementation is the in-process `Switchboard`, which also implements `RtcConnection`. This makes it the seam between the gRPC and WebRTC worlds. The legacy out-of-process `WebRtcBridge`/videobridge is deprecated.
+- Each connected client is a `Participant` that owns a peer connection and drives the offer/answer/ICE handshake. It is torn down on the signaling thread when the connection fails or closes.
+- Video comes from `InprocessVideoSource`. It captures a screenshot on each renderer framebuffer-change event, converts RGB888 to I420 with libyuv, and broadcasts it to the WebRTC encoder. Audio comes from `InprocessAudioSource`, which re-frames guest audio into 10 ms WebRTC packets.
+- Input returns over four data channels (mouse, keyboard, touch, adb). The `EventForwarder` of each channel decodes the same protobuf messages and uses the same `EventSender` plumbing as the gRPC controller. So streamed input is indistinguishable from local input.
+- ICE/TURN is configured by running the `-turncfg` command. The command output is validated at startup, parsed by `RtcConfig` into a Unified-Plan `RTCConfiguration`, and sent to the client in the `start` message. If no server is present, it falls back to a public Google STUN URI.
 - The Rtc services register with the shared gRPC server under the `ANDROID_WEBRTC` flag, inheriting its TLS and JWT/token authentication and its discovery-file advertisement.
 
 ### Key Source Files

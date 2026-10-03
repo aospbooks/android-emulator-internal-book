@@ -1,8 +1,10 @@
 # Chapter 9: Snapshots and Quickboot
 
-A snapshot is a frozen copy of the entire virtual machine: the contents of guest RAM, the state of every emulated device, the CPU registers, and the disk images, captured at one instant and written to a directory the emulator can later restore from. Quickboot is the feature that makes this invisible to the user — instead of cold-booting Android (kernel, init, zygote, the full launcher startup that takes tens of seconds), the emulator saves a `default_boot` snapshot when you close it and restores that snapshot the next time you start the same AVD, so the device is back on screen in a couple of seconds.
+A snapshot is a frozen copy of the entire virtual machine. It holds the contents of guest RAM, the state of every emulated device, the CPU registers, and the disk images. The emulator captures them at one instant and writes them to a directory that it can later restore from. Quickboot is the feature that makes this invisible to the user.
 
-This chapter follows the machinery end to end. The high-level `Snapshotter` in `android-emu` owns the workflow and the metadata; QEMU's `migration/savevm.c` actually serializes device state and drives RAM iteration; and a set of file hooks redirects RAM page traffic away from QEMU's own vmstate stream into a custom `RamSaver`/`RamLoader` pair that writes a separate `ram.bin` file with zero-page elision, hashing, and optional compression. We also look at file-backed RAM, where guest memory is mapped from a host file and the "save" becomes almost free.
+A cold boot of Android runs the kernel, init, zygote, and the full launcher startup, and that takes tens of seconds. Quickboot avoids it. The emulator saves a `default_boot` snapshot when you close it and restores that snapshot the next time you start the same AVD. The device is then back on screen in a couple of seconds.
+
+This chapter follows the machinery end to end. The high-level `Snapshotter` in `android-emu` owns the workflow and the metadata. QEMU's `migration/savevm.c` serializes device state and drives RAM iteration. A set of file hooks redirects RAM page traffic away from QEMU's own vmstate stream. The traffic goes into a custom `RamSaver`/`RamLoader` pair, which writes a separate `ram.bin` file with zero-page elision, hashing, and optional compression. We also look at file-backed RAM, where guest memory is mapped from a host file and the "save" becomes almost free.
 
 ---
 
@@ -24,9 +26,9 @@ The pieces split across three concerns:
 
 1. Guest RAM, written to `ram.bin` (or memory-mapped through `ram.img` when file-backed RAM is enabled).
 2. GPU texture state, written to `textures.bin` by the `TextureSaver`.
-3. Device and CPU state plus block-device snapshots, handled by QEMU's `migration/savevm.c` and stored inside the qcow2 disk images, alongside `snapshot.pb` metadata that describes the whole thing.
+3. Device and CPU state plus block-device snapshots. QEMU's `migration/savevm.c` handles them and stores them inside the qcow2 disk images. The `snapshot.pb` metadata describes the whole thing.
 
-The base directory is computed in `external/qemu/android/android-emu/android/snapshot/PathUtils.cpp`: `getSnapshotBaseDir()` joins the AVD content path with `snapshots`, and `getSnapshotDir(name)` appends the snapshot name. The disk state does not live in these per-snapshot files — it lives as named qcow2 snapshots inside the AVD's writable qcow2 images, which is why deleting the `default_boot` directory is not enough to fully purge a snapshot.
+The base directory is computed in `external/qemu/android/android-emu/android/snapshot/PathUtils.cpp`: `getSnapshotBaseDir()` joins the AVD content path with `snapshots`, and `getSnapshotDir(name)` appends the snapshot name. The disk state does not live in these per-snapshot files. It lives as named qcow2 snapshots inside the AVD's writable qcow2 images. For this reason, deleting the `default_boot` directory is not enough to fully purge a snapshot.
 
 ### 9.1.1 The directory layout
 
@@ -58,7 +60,7 @@ flowchart TB
 
 ## 9.2 The Snapshotter: Workflow and Ownership
 
-`Snapshotter` (in `external/qemu/android/android-emu/android/snapshot/Snapshotter.h`) is a process-wide singleton retrieved through `Snapshotter::get()`. It does not serialize anything itself; instead it owns a `Saver` and a `Loader`, holds two agent interfaces — `QAndroidVmOperations` (the bridge into QEMU) and `QAndroidEmulatorWindowAgent` (for showing messages) — and registers a set of callbacks that QEMU invokes at the right moments during `savevm`/`loadvm`.
+`Snapshotter` (in `external/qemu/android/android-emu/android/snapshot/Snapshotter.h`) is a process-wide singleton retrieved through `Snapshotter::get()`. It does not serialize anything itself. Instead it owns a `Saver` and a `Loader`. It holds two agent interfaces: `QAndroidVmOperations` (the bridge into QEMU) and `QAndroidEmulatorWindowAgent` (for showing messages). It also registers a set of callbacks that QEMU invokes at the right moments during `savevm`/`loadvm`.
 
 The wiring happens in `Snapshotter::initialize`, which builds a static `SnapshotCallbacks` table and hands it to QEMU through `mVmOperations.setSnapshotCallbacks`:
 
@@ -86,13 +88,13 @@ if (mIsOnExit) {
 mVmOperations.snapshotSave(name, this, nullptr);
 ```
 
-The symmetric `Snapshotter::load` first reads the optional `compatible.pb` and hands it to QEMU, then calls `mVmOperations.snapshotLoad(name, this, nullptr)`. Both `snapshotSave` and `snapshotLoad` are pointers into the QEMU glue, where the real `qemu_savevm` / `qemu_loadvm` calls live. The key inversion of control to keep in mind: the `Snapshotter` calls QEMU, and QEMU calls back into the `Snapshotter` through the registered callbacks — RAM is never handled in a single straight-line function.
+The symmetric `Snapshotter::load` first reads the optional `compatible.pb` and hands it to QEMU, then calls `mVmOperations.snapshotLoad(name, this, nullptr)`. Both `snapshotSave` and `snapshotLoad` are pointers into the QEMU glue, where the real `qemu_savevm` / `qemu_loadvm` calls live. Keep the key inversion of control in mind. The `Snapshotter` calls QEMU, and QEMU calls back into the `Snapshotter` through the registered callbacks. RAM is never handled in a single straight-line function.
 
 ### 9.2.2 Generic save versus quickboot save
 
 There are two paths into a save. `saveGeneric`/`loadGeneric` are for the explicit, user-initiated snapshots (the console `avd snapshot save <name>` command, or Android Studio's snapshot UI). They run extra validation and metrics through `checkSafeToSave`/`checkSafeToLoad` and `handleGenericSave`/`handleGenericLoad`. The quickboot path (covered in 9.7) goes through `Quickboot::save`/`Quickboot::load`, which add their own boot-completion and uptime gating before calling the same `Snapshotter::save`/`Snapshotter::load`.
 
-`checkSafeToSave` refuses to save when the guest has not finished booting (`isSnapshotAlive()`), when no name was supplied, when the disk is under pressure, or when the VM has flagged the save as unsupported:
+`checkSafeToSave` refuses to save in four cases. The first is when the guest has not finished booting (`isSnapshotAlive()`). The others are when no name was supplied, when the disk is under pressure, or when the VM has flagged the save as unsupported:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Snapshotter.cpp
@@ -132,7 +134,7 @@ sequenceDiagram
 
 ## 9.3 The Metadata Protobuf
 
-Every snapshot carries a `snapshot.pb`, a serialized `emulator_snapshot::Snapshot` message defined in `external/qemu/android/emu/protos/snapshot.proto`. This file is what makes a snapshot rejectable: before the emulator commits to loading guest RAM, it reads the protobuf and checks that the current host and configuration are compatible. The header note in the proto file states that the schema is intentionally shared with Android Studio's copy and must be kept in sync.
+Every snapshot carries a `snapshot.pb`, a serialized `emulator_snapshot::Snapshot` message defined in `external/qemu/android/emu/protos/snapshot.proto`. This file is what makes a snapshot rejectable. Before the emulator commits to loading guest RAM, it reads the protobuf. It then checks that the current host and configuration are compatible. The header note in the proto file states that the schema is intentionally shared with Android Studio's copy and must be kept in sync.
 
 The most load-bearing fields:
 
@@ -156,11 +158,11 @@ message Snapshot {
 }
 ```
 
-The `Config` sub-message records the enabled feature flags (as raw `int32` so the proto schema need not change for every new feature), the CPU core count, the RAM size, and the selected GLES/Vulkan renderers. The `Host` sub-message records `gpu_driver` and `hypervisor`. The `Image` list records the disk images that were mounted, with sizes and modification times so the loader can detect a system-image swap.
+The `Config` sub-message records the enabled feature flags. It stores them as raw `int32`, so the proto schema need not change for every new feature. It also records the CPU core count, the RAM size, and the selected GLES/Vulkan renderers. The `Host` sub-message records `gpu_driver` and `hypervisor`. The `Image` list records the disk images that were mounted, with sizes and modification times so the loader can detect a system-image swap.
 
 ### 9.3.1 The version number
 
-The snapshot `version` packs two numbers into one integer. The high bits hold a hand-maintained base version; the low ten bits hold the count of feature-control items, computed at compile time in `external/qemu/android/android-emu/android/snapshot/Snapshot.cpp` by re-including the feature definition headers with `FEATURE_CONTROL_ITEM` defined as `+ 1`, so that adding a feature flag changes the version without anyone editing it:
+The snapshot `version` packs two numbers into one integer. The high bits hold a hand-maintained base version. The low ten bits hold the count of feature-control items. This count is computed at compile time in `external/qemu/android/android-emu/android/snapshot/Snapshot.cpp`, by re-including the feature definition headers with `FEATURE_CONTROL_ITEM` defined as `+ 1`. In this way, adding a feature flag changes the version without anyone editing it:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Snapshot.cpp:429-444
@@ -169,9 +171,9 @@ static constexpr int kVersionBase = 87;
 static constexpr int kVersion = (kVersionBase << 10) + kFeatureOffset;
 ```
 
-`kVersionBase` moves only when the serialized format itself changes, and its recent history is almost entirely graphics: 84 added Vulkan renderer checks, 86 added display ids to the gfxstream stream, and 87 covers the gfxstream save/load changes described in 9.10.
+`kVersionBase` moves only when the serialized format itself changes. Its recent history is almost entirely graphics. Version 84 added Vulkan renderer checks. Version 86 added display ids to the gfxstream stream. Version 87 covers the gfxstream save/load changes described in 9.10.
 
-`isVersionCompatible()` then compares either the full version or just the high bits (`version >> 10`, the base part) depending on the `DownloadableSnapshot` flag, so a feature-count change can be tolerated where a base-version change cannot:
+`isVersionCompatible()` then compares either the full version or just the high bits (`version >> 10`, the base part). The `DownloadableSnapshot` flag decides which. A feature-count change can be tolerated where a base-version change cannot:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Snapshot.cpp:699-709
@@ -205,11 +207,11 @@ if (host.has_hypervisor() &&
 }
 ```
 
-`verifyConfig` checks CPU core count, RAM size, and feature flags; the renderer and AVD config are checked separately. The failure reasons form a tiered enum in `snapshot_common.h` with threshold sentinels — `UnrecoverableErrorLimit = 10000`, `ValidationErrorLimit = 20000`, `InProgressLimit = 30000` — so calling code can bucket a failure into "unrecoverable, delete it" versus "validation mismatch, just cold boot this time" without enumerating every reason. The quickboot loader uses exactly these thresholds when deciding whether to delete a snapshot or merely fall back to a cold boot.
+`verifyConfig` checks CPU core count, RAM size, and feature flags; the renderer and AVD config are checked separately. The failure reasons form a tiered enum in `snapshot_common.h` with threshold sentinels: `UnrecoverableErrorLimit = 10000`, `ValidationErrorLimit = 20000`, and `InProgressLimit = 30000`. Calling code can bucket a failure into "unrecoverable, delete it" or "validation mismatch, just cold boot this time". It does not need to enumerate every reason. The quickboot loader uses exactly these thresholds when deciding whether to delete a snapshot or merely fall back to a cold boot.
 
 ## 9.4 RAM Save: the RamSaver
 
-The largest part of a snapshot is guest RAM, often a gigabyte or more. Saving it naively — copying every byte — would be slow and would store mostly zeros. The `RamSaver` (in `external/qemu/android/android-emu/android/snapshot/RamSaver.cpp` and its header) writes a compact, self-describing `ram.bin` that elides zero pages, deduplicates pages by hash, and can compress and write asynchronously.
+The largest part of a snapshot is guest RAM, often a gigabyte or more. Saving it naively — copying every byte — would be slow and would store mostly zeros. The `RamSaver` (in `external/qemu/android/android-emu/android/snapshot/RamSaver.cpp` and its header) writes a compact, self-describing `ram.bin`. The file elides zero pages and deduplicates pages by hash. The saver can also compress and write asynchronously.
 
 The on-disk file structure is documented in the header itself:
 
@@ -225,7 +227,7 @@ The on-disk file structure is documented in the header itself:
 // EOF
 ```
 
-So the first eight bytes are a big-endian offset pointing at the index that sits at the end of the file. Page data fills the middle. The loader reads the offset first, seeks to the index, and learns where every page lives — which means the load can be random-access and lazy, not a sequential replay.
+So the first eight bytes are a big-endian offset pointing at the index that sits at the end of the file. Page data fills the middle. The loader reads the offset first, seeks to the index, and learns where every page lives. For this reason the load can be random-access and lazy, not a sequential replay.
 
 ### 9.4.1 Registering blocks and saving pages
 
@@ -238,13 +240,15 @@ void RamSaver::registerBlock(const RamBlock& block) {
 }
 ```
 
-Then QEMU iterates pages and calls `savePage`. The first time `savePage` is called for a block, the `RamSaver` resizes the page vector for that whole block and runs a zero-check pass over all its pages at once. The zero check uses a hand-written SSE2 routine (`buffer_zero_sse2` in `Snapshotter.cpp`, modeled on QEMU's `bufferzero.c`) so that all-zero pages get `sizeOnDisk == 0` and occupy nothing on disk. To keep the zero-check and hashing from making cold RAM resident and competing with the OS pager, the saver issues `MemoryHint::DontNeed` over 16 MB ranges as it goes (`kDecommitChunkSize`).
+Then QEMU iterates pages and calls `savePage`.
 
-Several block kinds are skipped entirely in `savePage`: read-only blocks, user-backed blocks (`SNAPSHOT_RAM_USER_BACKED`), and — when saving asynchronously — blocks already mapped shared (`SNAPSHOT_RAM_MAPPED_SHARED`), because a shared mapping is already persisted through its backing file.
+The first time `savePage` is called for a block, the `RamSaver` resizes the page vector for that whole block. It then runs a zero-check pass over all its pages at once. The zero check uses a hand-written SSE2 routine (`buffer_zero_sse2` in `Snapshotter.cpp`, modeled on QEMU's `bufferzero.c`). All-zero pages then get `sizeOnDisk == 0` and occupy nothing on disk. The zero check and the hashing must not make cold RAM resident or compete with the OS pager. To prevent this, the saver issues `MemoryHint::DontNeed` over 16 MB ranges as it goes (`kDecommitChunkSize`).
+
+`savePage` skips several block kinds entirely. These are read-only blocks, user-backed blocks (`SNAPSHOT_RAM_USER_BACKED`), and, when saving asynchronously, blocks already mapped shared (`SNAPSHOT_RAM_MAPPED_SHARED`). The last kind is skipped because a shared mapping is already persisted through its backing file.
 
 ### 9.4.2 The index and incremental save
 
-After all pages are handled, `writeIndex` serializes the `FileIndex` to the tail of the file: version, flags, total page count, then per block the id, page count, page size, and for each non-zero page a packed size, a packed signed delta to the previous file position, and the 16-byte page hash.
+After all pages are handled, `writeIndex` serializes the `FileIndex` to the tail of the file. It writes the version, flags, and total page count. Then, per block, it writes the id, page count, and page size. For each non-zero page it writes a packed size, a packed signed delta to the previous file position, and the 16-byte page hash.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/RamSaver.cpp
@@ -253,7 +257,9 @@ stream.putBe32(uint32_t(mIndex.flags));
 stream.putBe32(uint32_t(mIndex.totalPages));
 ```
 
-The hashes enable incremental saving: when a prior RamLoader is present, any page whose hash matches the corresponding previously-saved page is reused on disk rather than rewritten, and the hash is stored in the index so future saves can do the same comparison. When a previous load left a `RamLoader` around with gap-tracking intact, the new `Saver` passes that loader to the `RamSaver` (`tryIncremental = loader && !loader->hasError() && loader->hasGaps()`), and pages whose hash matches the previously-loaded page can be left in place rather than rewritten. The leftover free space from rewriting is tracked by a `GapTracker`, also serialized into the index (only for version > 1).
+The hashes enable incremental saving. When a prior RamLoader is present, any page whose hash matches the corresponding previously-saved page is reused on disk rather than rewritten. The hash is stored in the index so future saves can do the same comparison.
+
+Sometimes a previous load left a `RamLoader` around with gap-tracking intact. In that case the new `Saver` passes that loader to the `RamSaver` (`tryIncremental = loader && !loader->hasError() && loader->hasGaps()`). Pages whose hash matches the previously-loaded page can then be left in place rather than rewritten. The leftover free space from rewriting is tracked by a `GapTracker`, also serialized into the index (only for version > 1).
 
 ```mermaid
 flowchart LR
@@ -275,7 +281,7 @@ flowchart LR
 
 ### 9.4.3 Compression heuristics
 
-Compression is controlled either by the `ANDROID_SNAPSHOT_COMPRESS` environment variable or by an automatic heuristic in `Saver`'s constructor. The heuristic enables compression when there are at least three CPU cores and either free RAM is below 1536 MB or the snapshot directory is on a spinning disk:
+Compression is controlled either by the `ANDROID_SNAPSHOT_COMPRESS` environment variable or by an automatic heuristic in `Saver`'s constructor. The heuristic enables compression when there are at least three CPU cores. In addition, either free RAM must be below 1536 MB or the snapshot directory must be on a spinning disk:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Saver.cpp
@@ -291,11 +297,11 @@ if (numCores > 2) {
 }
 ```
 
-The idea is that when writing is the bottleneck (slow disk) or memory is scarce, spending spare CPU cores on compression is a net win; on a fast SSD with plenty of RAM, raw pages load faster.
+The idea is this. When writing is the bottleneck (slow disk) or memory is scarce, spending spare CPU cores on compression is a net win. On a fast SSD with plenty of RAM, raw pages load faster.
 
 ## 9.5 RAM Restore: the RamLoader
 
-The `RamLoader` (`external/qemu/android/android-emu/android/snapshot/RamLoader.cpp`) is the inverse. It reads the eight-byte offset, seeks to the index, parses it with `readIndex`, then either eagerly reads every page or registers memory-access watches for on-demand (lazy) loading.
+The `RamLoader` (`external/qemu/android/android-emu/android/snapshot/RamLoader.cpp`) is the inverse. It reads the eight-byte offset, seeks to the index, and parses it with `readIndex`. Then it either eagerly reads every page or registers memory-access watches for on-demand (lazy) loading.
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/RamLoader.cpp
@@ -328,13 +334,15 @@ mAccessWatch->doneRegistering();
 mReaderThread.start();
 ```
 
-With no access watch, `readAllPages` reads everything up front. With an access watch, the loader instead protects all guest RAM, returns control to the VM immediately, and faults pages in on first touch — `loadRam`/`loadRamPage` service the fault by reading just the needed page from `ram.bin`, while a background reader thread fills the rest. This is what makes quickboot feel instant: the guest starts running before all of RAM has been read from disk. `onDemandEnabled()` reports which mode was used, and the metrics record it as `lazy_loaded`. The platform-specific watch implementations live alongside in `MemoryWatch_linux.cpp`, `MemoryWatch_darwin.cpp`, and `MemoryWatch_windows.cpp`.
+With no access watch, `readAllPages` reads everything up front.
 
-When the VM is being shut down or the loader must be torn down deterministically, `join` walks every page and forces a bulk fill before waiting for the reader and watch threads — this guarantees all pages are resident before the underlying file is closed.
+With an access watch, the loader instead protects all guest RAM, returns control to the VM immediately, and faults pages in on first touch. `loadRam`/`loadRamPage` service the fault by reading just the needed page from `ram.bin`. Meanwhile a background reader thread fills the rest. This is what makes quickboot feel instant: the guest starts running before all of RAM has been read from disk. `onDemandEnabled()` reports which mode was used, and the metrics record it as `lazy_loaded`. The platform-specific watch implementations live alongside in `MemoryWatch_linux.cpp`, `MemoryWatch_darwin.cpp`, and `MemoryWatch_windows.cpp`.
+
+When the VM shuts down or the loader must be torn down deterministically, `join` walks every page and forces a bulk fill. Only then does it wait for the reader and watch threads. This guarantees that all pages are resident before the underlying file is closed.
 
 ## 9.6 File-Backed RAM
 
-The save paths above copy RAM out to `ram.bin`. File-backed RAM inverts that: guest memory is mapped directly from a host file (`ram.img`), so the guest's writes go to the file as it runs and a "save" mostly amounts to flushing rather than copying. This is selected at the QEMU level by the `mem_path` / `mem_file_shared` globals, which `vl.c` wires into the snapshot subsystem at startup:
+The save paths above copy RAM out to `ram.bin`. File-backed RAM inverts that. Guest memory is mapped directly from a host file (`ram.img`). The guest's writes go to the file as it runs, so a "save" mostly amounts to flushing rather than copying. This is selected at the QEMU level by the `mem_path` / `mem_file_shared` globals, which `vl.c` wires into the snapshot subsystem at startup:
 
 ```c
 // Source: external/qemu/vl.c
@@ -349,9 +357,9 @@ if (androidSnapshot_quickbootLoad(loadvm)) {
 `androidSnapshot_setRamFile` (in `interface.cpp`) records the path and whether it is shared on the `Snapshotter` (`setRamFile`). The two modes matter:
 
 - Shared mapping (`SNAPSHOT_RAM_FILE_SHARED`): the guest writes through to `ram.img`, so on exit there is little to copy. Save is nearly free.
-- Private mapping (`SNAPSHOT_RAM_FILE_PRIVATE`): the file is the initial image but guest writes are copy-on-write in the host's page cache, so a real save is still needed.
+- Private mapping (`SNAPSHOT_RAM_FILE_PRIVATE`): the file is the initial image, but guest writes are copy-on-write in the host's page cache. A real save is therefore still needed.
 
-`androidSnapshot_getRamFileInfo` reports which of `SNAPSHOT_RAM_FILE_NONE`, `_PRIVATE`, or `_SHARED` is active. A subtlety enforced in `Quickboot::save`: if there is a RAM file but it is not shared, saving is refused outright, because a private file-backed session can't be persisted by flushing alone:
+`androidSnapshot_getRamFileInfo` reports which of `SNAPSHOT_RAM_FILE_NONE`, `_PRIVATE`, or `_SHARED` is active. `Quickboot::save` enforces a subtlety. If there is a RAM file but it is not shared, saving is refused outright, because a private file-backed session can't be persisted by flushing alone:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Quickboot.cpp
@@ -376,7 +384,7 @@ if (androidSnapshot_isRamFileDirty(name)) {
 }
 ```
 
-The dirty flag is just the presence of a `ram.img.dirty` marker file, written by `androidSnapshot_setRamFileDirty`. The flow is: mark dirty before the guest starts mutating the mapping; clear it on a clean save. If the emulator crashes mid-run, the marker survives and the next launch discards the corrupt image and cold-boots — the alternative would be restoring half-updated guest memory.
+The dirty flag is just the presence of a `ram.img.dirty` marker file, written by `androidSnapshot_setRamFileDirty`. The flow is: mark dirty before the guest starts mutating the mapping; clear it on a clean save. If the emulator crashes mid-run, the marker survives. The next launch discards the corrupt image and cold-boots. The alternative would be to restore half-updated guest memory.
 
 ### 9.6.2 Remapping between shared and private at runtime
 
@@ -434,9 +442,11 @@ if (getConsoleAgents()->settings->android_qemu_mode()) {
 
 ### 9.7.1 Load gating and cold-boot fallback
 
-`Quickboot::load` is a decision tree. It returns early to a cold boot when the `FastSnapshotV1` feature is off, when `-no-snapshot-load` was passed, or for specific device types (e.g. automotive distant display). Otherwise it calls `Snapshotter::get().load(true /* isQuickboot */, namestr.data())` and inspects the result. On success it records the load, writes a `snapshot.trace` marker, and starts the liveness monitor. On a recoverable failure it falls back to a cold boot; on an unrecoverable one it deletes the snapshot and resets the VM.
+`Quickboot::load` is a decision tree. It returns early to a cold boot in three cases. The first is when the `FastSnapshotV1` feature is off. The others are when `-no-snapshot-load` was passed, or for specific device types (e.g. automotive distant display).
 
-The `forceSnapshotLoad` flag (the `-force-snapshot-load` command-line option) changes the failure behavior: instead of cold-booting on failure, the emulator deletes the bad snapshot and exits, so an automated workflow that depends on a snapshot does not silently start from scratch.
+Otherwise it calls `Snapshotter::get().load(true /* isQuickboot */, namestr.data())` and inspects the result. On success it records the load, writes a `snapshot.trace` marker, and starts the liveness monitor. On a recoverable failure it falls back to a cold boot; on an unrecoverable one it deletes the snapshot and resets the VM.
+
+The `forceSnapshotLoad` flag (the `-force-snapshot-load` command-line option) changes the failure behavior. On failure the emulator does not cold-boot. Instead it deletes the bad snapshot and exits. An automated workflow that depends on a snapshot then does not silently start from scratch.
 
 ### 9.7.2 The liveness monitor
 
@@ -457,13 +467,17 @@ void Quickboot::onLivenessTimer() {
 }
 ```
 
-If the guest does not come alive within `bootTimeoutMs()` (7 seconds on x86, longer for ARM or read-only mode), the monitor escalates in three stages. On the first timeout it only shows a UI warning ("Attempting to reconnect to the emulator") and increments an internal retry counter — no adb action is taken. On each subsequent timeout below `kMaxAdbConnectionRetries` it shows a second warning ("Final attempt to reconnect to the emulator") and calls `android_adb_reset_connection()` to reset the adb connection. After `kMaxAdbConnectionRetries` retries are exhausted it deletes the `default_boot` snapshot and shows a cold-boot error message. Deleting the snapshot guarantees that the next launch starts clean rather than re-loading a snapshot that hangs.
+If the guest does not come alive within `bootTimeoutMs()` (7 seconds on x86, longer for ARM or read-only mode), the monitor escalates in three stages. On the first timeout it only shows a UI warning ("Attempting to reconnect to the emulator") and increments an internal retry counter. No adb action is taken. On each later timeout below `kMaxAdbConnectionRetries` it shows a second warning ("Final attempt to reconnect to the emulator"). It then calls `android_adb_reset_connection()` to reset the adb connection.
+
+After `kMaxAdbConnectionRetries` retries are exhausted it deletes the `default_boot` snapshot and shows a cold-boot error message. Deleting the snapshot guarantees that the next launch starts clean rather than re-loading a snapshot that hangs.
 
 ### 9.7.3 Save gating
 
-`Quickboot::save` is similarly defensive. It refuses to save when the guest never booted and this was not a quickboot-loaded session, when `FastSnapshotV1` is disabled, when `-no-snapshot-save` was passed, when the UI requested no save-on-exit, when the session was too short (`kMinUptimeForSavingMs = 1500`), or when the VM flagged the state as unsaveable (for example an unsupported Vulkan app). Only past all those gates does it call `Snapshotter::get().save(true /* on exit */, name)`. A failed save deletes the partial snapshot so it cannot be loaded later.
+`Quickboot::save` is similarly defensive. It refuses to save in six cases. The first is when the guest never booted and this was not a quickboot-loaded session. The others are when `FastSnapshotV1` is disabled, when `-no-snapshot-save` was passed, and when the UI requested no save-on-exit. It also refuses when the session was too short (`kMinUptimeForSavingMs = 1500`), or when the VM flagged the state as unsaveable (for example an unsupported Vulkan app).
 
-For file-backed RAM there is an extra step in `androidSnapshot_quickbootSave`: it persists the user's save-on-exit choice into a per-AVD `quickbootChoice.ini` via `androidSnapshot_writeQuickbootChoice`, and clears or sets the dirty flag depending on whether the shared save succeeded.
+Only past all those gates does it call `Snapshotter::get().save(true /* on exit */, name)`. A failed save deletes the partial snapshot so it cannot be loaded later.
+
+For file-backed RAM there is an extra step in `androidSnapshot_quickbootSave`. It persists the user's save-on-exit choice into a per-AVD `quickbootChoice.ini` via `androidSnapshot_writeQuickbootChoice`. It also clears or sets the dirty flag, depending on whether the shared save succeeded.
 
 ```mermaid
 flowchart TB
@@ -498,7 +512,9 @@ if (wasVmRunning && !sExiting) {
 }
 ```
 
-`qemu_savevm` stops the VM, fills a `QEMUSnapshotInfo`, calls the registered `savevm.on_start` callback (which builds the `Saver`), opens a `QEMUFile` backed by a block device, calls `qemu_savevm_state` to write all device state, and finally creates a named qcow2 snapshot with `bdrv_all_create_snapshot`. `qemu_loadvm` mirrors this: it finds the named snapshot, calls `loadvm.on_start` (which builds the `Loader`), does `bdrv_all_goto_snapshot` to revert the disks, resets the system, and replays device state with `qemu_loadvm_state`.
+`qemu_savevm` stops the VM and fills a `QEMUSnapshotInfo`. It calls the registered `savevm.on_start` callback (which builds the `Saver`). It opens a `QEMUFile` backed by a block device and calls `qemu_savevm_state` to write all device state. Finally it creates a named qcow2 snapshot with `bdrv_all_create_snapshot`.
+
+`qemu_loadvm` mirrors this. It finds the named snapshot and calls `loadvm.on_start` (which builds the `Loader`). It does `bdrv_all_goto_snapshot` to revert the disks, resets the system, and replays device state with `qemu_loadvm_state`.
 
 ### 9.8.1 Redirecting RAM out of the vmstate stream
 
@@ -511,7 +527,7 @@ qemu_file_set_pb(f, s_protobuf);
 ret = qemu_savevm_state(f, &local_err);
 ```
 
-Those `sSaveFileHooks` are defined in the glue as `sSaveHooks`. The `save_page` hook tells QEMU "I handled this page, don't write it yourself" by returning `RAM_SAVE_CONTROL_DELAYED` and setting `bytes_sent` non-zero, while forwarding the page to the `RamSaver` through `ramOps.savePage`:
+Those `sSaveFileHooks` are defined in the glue as `sSaveHooks`. The `save_page` hook tells QEMU "I handled this page, don't write it yourself". It does this by returning `RAM_SAVE_CONTROL_DELAYED` and setting `bytes_sent` non-zero. It also forwards the page to the `RamSaver` through `ramOps.savePage`:
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp
@@ -522,7 +538,7 @@ sSnapshotCallbacks.ramOps.savePage(sSnapshotCallbacksOpaque,
 return size_t(RAM_SAVE_CONTROL_DELAYED);
 ```
 
-The `before_ram_iterate` hook, on `RAM_CONTROL_SETUP`, walks every migratable block with `qemu_ram_foreach_migrate_block_with_file_info` and registers each with the `RamSaver`, filling in the host pointer, length, page size, flags, and the relative path to any backing file. The `after_ram_iterate` hook, on `RAM_CONTROL_FINISH`, calls `ramOps.savingComplete` to flush and join.
+The `before_ram_iterate` hook, on `RAM_CONTROL_SETUP`, walks every migratable block with `qemu_ram_foreach_migrate_block_with_file_info`. It registers each block with the `RamSaver`. It fills in the host pointer, length, page size, flags, and the relative path to any backing file. The `after_ram_iterate` hook, on `RAM_CONTROL_FINISH`, calls `ramOps.savingComplete` to flush and join.
 
 The load side uses `sLoadHooks`: its `hook_ram_load` handles `RAM_CONTROL_BLOCK_REG` (register the block on the `RamLoader`) and `RAM_CONTROL_HOOK` (start the loader). A separate `qemu_set_ram_load_callback` routes page faults during lazy loading back through `ramOps.loadRam`. The relevant control-flow constants — `RAM_CONTROL_SETUP`, `RAM_CONTROL_FINISH`, `RAM_CONTROL_BLOCK_REG`, `RAM_CONTROL_HOOK`, and `RAM_SAVE_CONTROL_DELAYED` — are defined in `external/qemu/migration/qemu-file.h`.
 
@@ -542,7 +558,7 @@ flowchart TB
 
 ## 9.9 Textures, Compatibility Protobuf, and Cleanup
 
-Two smaller artifacts round out the format. The `TextureSaver` (constructed in `Saver`'s constructor opening `textures.bin` for writing) serializes GPU texture memory so a restored guest does not have to regenerate it; the `TextureLoader` restores it on load, joined alongside the `RamLoader` in `Loader::complete`. Texture data can be compressed independently of RAM, tracked separately in the metrics (`compressedTextures`).
+Two smaller artifacts round out the format. The `TextureSaver` serializes GPU texture memory so a restored guest does not have to regenerate it. The constructor of `Saver` constructs it and opens `textures.bin` for writing. The `TextureLoader` restores the memory on load. `Loader::complete` joins it alongside the `RamLoader`. Texture data can be compressed independently of RAM, tracked separately in the metrics (`compressedTextures`).
 
 The optional `compatible.pb` is written by `Snapshotter::save` when the VM provides a `setSnapshotProtobuf` hook, and read back by `Snapshotter::load` before the load begins:
 
@@ -558,7 +574,7 @@ if (mVmOperations.setSnapshotProtobuf) {
 
 ### 9.9.1 Delete and invalidate
 
-There are two ways to remove a snapshot. `deleteSnapshot` invalidates it, then deletes the whole directory with `path_delete_dir`. `invalidateSnapshot` is gentler: it writes a `Tombstone` failure into the protobuf, asks QEMU to drop the disk-side snapshot through `snapshotDelete`, and removes the RAM/textures/mapped-RAM files but can leave the metadata around:
+There are two ways to remove a snapshot. `deleteSnapshot` invalidates it, then deletes the whole directory with `path_delete_dir`. `invalidateSnapshot` is gentler. It writes a `Tombstone` failure into the protobuf and asks QEMU to drop the disk-side snapshot through `snapshotDelete`. It removes the RAM/textures/mapped-RAM files but can leave the metadata around:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Snapshotter.cpp
@@ -569,11 +585,15 @@ path_delete_file(PathUtils::join(getSnapshotDir(nameValidated), kMappedRamFileNa
 tombstone.saveFailure(FailureReason::Tombstone);
 ```
 
-The crash interaction is worth noting: `onCrashedSnapshot` treats a crash within `kSnapshotCrashThresholdMs` (two minutes) of loading as a snapshot fault and marks the load failed, so a snapshot that reliably crashes the emulator soon after load will be invalidated rather than re-loaded forever.
+The crash interaction is worth noting. `onCrashedSnapshot` treats a crash within `kSnapshotCrashThresholdMs` (two minutes) of loading as a snapshot fault and marks the load failed. A snapshot that reliably crashes the emulator soon after load is therefore invalidated rather than re-loaded forever.
 
 ## 9.10 Vulkan State and the gfxstream Half of a Snapshot
 
-Everything above treats the GPU as one line item: `textures.bin`, written by the `TextureSaver`. That was an adequate description for as long as the host renderer's job was GL emulation whose interesting state reduced to texture memory. It was never true for Vulkan. A guest Vulkan app leaves the host renderer holding live `VkDevice` handles, device allocations, images with layouts, pipelines, descriptor sets, and command buffers — none of which can be reconstructed from guest RAM pages, because the guest only ever saw opaque handles that the host invented. For years the emulator's answer was to refuse: either the save was skipped outright, or the offending app was force-stopped first so that there was no Vulkan state left to lose. The `VulkanSnapshots` feature replaces that refusal with a real save and restore path implemented inside gfxstream, and the emulator-side gates that used to guard against it have been rewired to defer to it.
+Everything above treats the GPU as one line item: `textures.bin`, written by the `TextureSaver`. That was an adequate description for as long as the host renderer's job was GL emulation whose interesting state reduced to texture memory. It was never true for Vulkan.
+
+A guest Vulkan app leaves the host renderer holding live `VkDevice` handles, device allocations, images with layouts, pipelines, descriptor sets, and command buffers. None of these can be reconstructed from guest RAM pages, because the guest only ever saw opaque handles that the host invented.
+
+For years the emulator's answer was to refuse. Either the save was skipped outright, or the offending app was force-stopped first so that no Vulkan state was left to lose. The `VulkanSnapshots` feature replaces that refusal with a real save and restore path implemented inside gfxstream. The emulator-side gates that used to guard against the loss of Vulkan state now defer to that path.
 
 ### 9.10.1 The VulkanSnapshots feature flag
 
@@ -591,9 +611,9 @@ It ships off. The defaults file gives it one line:
 VulkanSnapshots = off
 ```
 
-Two properties of that declaration matter for the rest of this section. First, the flag is absent from `external/qemu/android/emu/feature/include/android/featurecontrol/FeatureControlDefSnapshotInsensitive.h`, which means `Snapshot::verifyFeatureFlags` treats it like any other state-affecting feature: a snapshot taken with Vulkan snapshots on cannot be loaded with them off, and the reverse also fails. That is not bureaucratic strictness — the flag genuinely changes the stream format, as in `RenderThreadInfo::onSave`, where a 64-bit process id is written only when the feature is enabled (`hardware/google/gfxstream/host/render_thread_info.cpp:71-75`).
+Two properties of that declaration matter for the rest of this section. First, the flag is absent from `external/qemu/android/emu/feature/include/android/featurecontrol/FeatureControlDefSnapshotInsensitive.h`, so `Snapshot::verifyFeatureFlags` treats it like any other state-affecting feature. A snapshot taken with Vulkan snapshots on cannot be loaded with them off, and the reverse also fails. That is not bureaucratic strictness. The flag genuinely changes the stream format. For example, `RenderThreadInfo::onSave` writes a 64-bit process id only when the feature is enabled (`hardware/google/gfxstream/host/render_thread_info.cpp:71-75`).
 
-Second, the emulator does not consume the flag alone; it forwards it into gfxstream's own feature set when the renderer is created:
+Second, the emulator does not consume the flag alone. It forwards the flag into gfxstream's own feature set when the renderer is created:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/opengles.cpp:410-411
@@ -601,7 +621,7 @@ Second, the emulator does not consume the flag alone; it forwards it into gfxstr
  &gfxstream::host::FeatureSet::VulkanSnapshots},
 ```
 
-On the gfxstream side the same feature is declared with a one-line description — "If enabled, supports snapshotting the guest and host Vulkan state" (`hardware/google/gfxstream/host/features/include/gfxstream/host/features.h:359-363`) — and every save/load site checks `m_features.VulkanSnapshots.enabled()`. When gfxstream is built standalone against virtio-gpu instead of the emulator, the same feature is set from an environment variable rather than from feature control:
+On the gfxstream side the same feature is declared with a one-line description: "If enabled, supports snapshotting the guest and host Vulkan state" (`hardware/google/gfxstream/host/features/include/gfxstream/host/features.h:359-363`). Every save/load site checks `m_features.VulkanSnapshots.enabled()`. When gfxstream is built standalone against virtio-gpu instead of the emulator, the same feature is set from an environment variable rather than from feature control:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/virtio_gpu_gfxstream_renderer.cpp:124-126
@@ -612,7 +632,7 @@ GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
 
 ### 9.10.2 The old defense: skipping the save and stopping Vulkan apps
 
-Both of the pre-existing defenses are keyed off the same thing — a host-side registry of live `VkInstance`s. gfxstream reports each instance as it is created and destroyed, through callbacks into the emulator (`hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:1257` and `:10837`), and `FrameBuffer::Impl::registerVulkanInstance` resolves the guest process name for it before handing it over (`hardware/google/gfxstream/host/frame_buffer.cpp:4152-4171`). The emulator keeps them in a small table in the QEMU glue (`external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp:249-285`).
+Both of the pre-existing defenses are keyed off the same thing: a host-side registry of live `VkInstance`s. gfxstream reports each instance as it is created and destroyed, through callbacks into the emulator (`hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:1257` and `:10837`). `FrameBuffer::Impl::registerVulkanInstance` resolves the guest process name for the instance before handing it over (`hardware/google/gfxstream/host/frame_buffer.cpp:4152-4171`). The emulator keeps them in a small table in the QEMU glue (`external/qemu/android-qemu2-glue/qemu-vm-operations-impl.cpp:249-285`).
 
 The first defense is the save-skip predicate consulted by `Snapshotter::checkSafeToSave` (9.2.2) and by `Quickboot::save`:
 
@@ -635,9 +655,9 @@ The first defense is the save-skip predicate consulted by `Snapshotter::checkSaf
     }
 ```
 
-With the feature off and any Vulkan instance alive, the save is refused with `SNAPSHOT_SKIP_UNSUPPORTED_VK_APP`, which `Quickboot::save` maps to `FailureReason::UnsupportedVkApp` for metrics and then deletes the stale snapshot (`external/qemu/android/android-emu/android/snapshot/Quickboot.cpp:668-690`). The comment on the early return is worth reading literally: enabling the feature does not make the skip logic smarter, it disables it.
+With the feature off and any Vulkan instance alive, the save is refused with `SNAPSHOT_SKIP_UNSUPPORTED_VK_APP`. `Quickboot::save` maps this to `FailureReason::UnsupportedVkApp` for metrics. It then deletes the stale snapshot (`external/qemu/android/android-emu/android/snapshot/Quickboot.cpp:668-690`). Read the comment on the early return literally. Enabling the feature does not make the skip logic smarter. It disables the skip logic.
 
-The second defense is blunter. `Snapshotter::stopVulkanAppsIfApplicable` enumerates the registry, force-stops every app in it over adb, and polls up to three times with a growing backoff for the instances to disappear:
+The second defense is blunter. `Snapshotter::stopVulkanAppsIfApplicable` enumerates the registry and force-stops every app in it over adb. Then it polls up to three times, with a growing backoff, for the instances to disappear:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Snapshotter.cpp:836-849
@@ -653,7 +673,9 @@ The second defense is blunter. `Snapshotter::stopVulkanAppsIfApplicable` enumera
     }
 ```
 
-There is no pipe or guest service behind this — it is literally `adb shell am force-stop` per package, which is also why the function gives up in configurations where adb cannot stop the app (XR mode with GuestAngle). It is called from three places: the Qt window's close handler, just before `queueQuitEvent()`, so the apps are dead by the time `vl.c` reaches `androidSnapshot_quickbootSave` (`external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp:2381-2389`); the gRPC snapshot service; and the legacy snapshot UI controller, the only caller that honors the return value and surfaces "Cannot stop Vulkan apps."
+There is no pipe or guest service behind this. It is literally `adb shell am force-stop` per package. For this reason the function gives up in configurations where adb cannot stop the app (XR mode with GuestAngle).
+
+Three places call it. The first is the Qt window's close handler, just before `queueQuitEvent()`. The apps are then dead by the time `vl.c` reaches `androidSnapshot_quickbootSave` (`external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp:2381-2389`). The second is the gRPC snapshot service. The third is the legacy snapshot UI controller. It is the only caller that honors the return value and surfaces "Cannot stop Vulkan apps."
 
 ### 9.10.3 Not stopping Vulkan apps any more
 
@@ -673,11 +695,11 @@ bool Snapshotter::stopVulkanAppsIfApplicable() {
     uint32_t count = 0;
 ```
 
-The placement matters more than it looks. The feature check existed before, but it lived further down, tangled with the `-no-snapshot-save` and XR/GuestAngle conditions that force `needToSaveSnapshot` to false — and a false there meant the function returned `false`, which the legacy UI reported as a failure to stop the apps. Hoisting the check turns "we could not kill the apps, so we cannot snapshot" into "we do not need to kill the apps," and closing the emulator with a Vulkan app in the foreground now saves that app's GPU state instead of terminating it.
+The placement matters more than it looks. The feature check existed before, but it lived further down. It was tangled with the `-no-snapshot-save` and XR/GuestAngle conditions that force `needToSaveSnapshot` to false. A false there meant the function returned `false`, which the legacy UI reported as a failure to stop the apps. Hoisting the check turns "we could not kill the apps, so we cannot snapshot" into "we do not need to kill the apps." Now, when the emulator is closed with a Vulkan app in the foreground, the GPU state of that app is saved. The app is not terminated.
 
 ### 9.10.4 Where gfxstream state enters the snapshot stream
 
-None of this is reached through the RAM or vmstate paths of 9.4 and 9.8. The renderer is snapshotted as a *pipe service*: the goldfish `opengles` pipe registers `preSave`/`postSave` and `preLoad`/`postLoad` hooks, and QEMU calls them while serializing pipe state into the vmstate stream. The whole gfxstream snapshot therefore rides inside QEMU's device-state serialization, wrapped in a `GfxstreamStreamAdapter` that presents the emulator's `base::Stream` as the `gfxstream::Stream` the renderer expects:
+None of this is reached through the RAM or vmstate paths of 9.4 and 9.8. The renderer is snapshotted as a *pipe service*. The goldfish `opengles` pipe registers `preSave`/`postSave` and `preLoad`/`postLoad` hooks. QEMU calls them while it serializes pipe state into the vmstate stream. The whole gfxstream snapshot therefore rides inside QEMU's device-state serialization, wrapped in a `GfxstreamStreamAdapter` that presents the emulator's `base::Stream` as the `gfxstream::Stream` the renderer expects:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/opengl/OpenglEsPipe.cpp:121-129
@@ -693,9 +715,9 @@ void preSave(android::base::Stream* stream) override {
         // ...
 ```
 
-The `textureSaver` handed in here is the same one that writes `textures.bin` (9.9), so texture payloads still go to their own file while everything else goes inline. `pauseAllPreSave()` quiesces every render thread first, and `postSave`/`postLoad` call `resumeAll()`.
+The `textureSaver` handed in here is the same one that writes `textures.bin` (9.9). Therefore texture payloads still go to their own file, while everything else goes inline. `pauseAllPreSave()` quiesces every render thread first, and `postSave`/`postLoad` call `resumeAll()`.
 
-`RendererImpl::save` forwards to `FrameBuffer::onSave`, which writes its own version and, at the end, a trailing magic number; the Vulkan hand-off sits in the middle of it, behind the feature check:
+`RendererImpl::save` forwards to `FrameBuffer::onSave`. This function writes its own version and, at the end, a trailing magic number. The Vulkan hand-off sits in the middle of it, behind the feature check:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/frame_buffer.cpp:3393-3400
@@ -738,7 +760,7 @@ sequenceDiagram
 
 ### 9.10.5 Record and replay: VkReconstruction
 
-gfxstream does not serialize Vulkan objects field by field. It records the API calls that created them and replays those calls on load — the same trick the RAM index uses in spirit, applied to a command stream. The design is written up in `hardware/google/gfxstream/docs/snapshot.md`.
+gfxstream does not serialize Vulkan objects field by field. It records the API calls that created them and replays those calls on load. This is the same trick the RAM index uses in spirit, applied to a command stream. The design is written up in `hardware/google/gfxstream/docs/snapshot.md`.
 
 Recording happens in the decoder. For every decoded packet, `VkDecoder` keeps the raw bytes and, when snapshots are enabled, hands them to a per-entrypoint recorder alongside the decoded arguments:
 
@@ -750,9 +772,11 @@ if (m_snapshotsEnabled) {
 }
 ```
 
-The recorder is `VkDecoderSnapshot`, a generated file with one method per Vulkan entrypoint, and it is a thin wrapper over `VkReconstruction` (`hardware/google/gfxstream/host/vulkan/vk_reconstruction.cpp`). `VkReconstruction` stores each call as a `VkSnapshotApiCallInfo` holding the raw packet, the handles the call created, and the handles it depends on, and maintains a `DependencyGraph` linking objects to their parents. Destroying an object removes its node and all descendants — with two deliberate exceptions, shader modules and render passes, which are kept alive because replay needs them even after the guest has dropped them (`hardware/google/gfxstream/host/vulkan/dependency_graph.cpp:53-65`).
+The recorder is `VkDecoderSnapshot`, a generated file with one method per Vulkan entrypoint, and it is a thin wrapper over `VkReconstruction` (`hardware/google/gfxstream/host/vulkan/vk_reconstruction.cpp`).
 
-Because boxed handle ids encode a tag, generation, and index rather than a creation order, the graph carries an explicit timestamp per node, and the save walks nodes in timestamp order to derive a call order that satisfies dependencies:
+`VkReconstruction` stores each call as a `VkSnapshotApiCallInfo`. This holds the raw packet, the handles the call created, and the handles it depends on. It also maintains a `DependencyGraph` that links objects to their parents. Destroying an object removes its node and all descendants. There are two deliberate exceptions, shader modules and render passes. They are kept alive because replay needs them even after the guest has dropped them (`hardware/google/gfxstream/host/vulkan/dependency_graph.cpp:53-65`).
+
+Boxed handle ids encode a tag, generation, and index rather than a creation order. For this reason the graph carries an explicit timestamp per node. The save walks nodes in timestamp order to derive a call order that satisfies dependencies:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/vulkan/vk_reconstruction.cpp:59-108
@@ -763,7 +787,7 @@ gfxstream::host::saveBuffer(stream, createdHandleBuffer);
 gfxstream::host::saveBuffer(stream, apiTraceBuffer);
 ```
 
-So the Vulkan portion of a snapshot is two flat buffers: the list of handles the replay is expected to produce, and the concatenated packet bytes. Replay reads both, primes the boxed handle manager so that every newly created handle is forced to the exact id it had at save time, and pushes the packets back through a decoder placed in snapshot-load mode:
+So the Vulkan portion of a snapshot is two flat buffers. One is the list of handles the replay is expected to produce. The other is the concatenated packet bytes. Replay reads both and primes the boxed handle manager. Every newly created handle is then forced to the exact id it had at save time. Replay pushes the packets back through a decoder placed in snapshot-load mode:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:804-820
@@ -778,13 +802,13 @@ size_t consumed = decoderForLoading.decode(decoderReplayBuffer.data(),
                                            decoderReplayBuffer.size(), ...);
 ```
 
-Forcing the handle ids is what makes replay possible at all: the packets contain embedded handles, and the guest still holds the old ones, so re-executing `vkCreateImage` must yield the same boxed handle it yielded originally (`hardware/google/gfxstream/host/vulkan/vulkan_boxed_handles.cpp:72-81`).
+Forcing the handle ids is what makes replay possible at all. The packets contain embedded handles, and the guest still holds the old ones. Re-executing `vkCreateImage` must therefore yield the same boxed handle it yielded originally (`hardware/google/gfxstream/host/vulkan/vulkan_boxed_handles.cpp:72-81`).
 
-Replay only rebuilds the object graph. Contents come after it, in a fixed order inside `VkDecoderGlobalState::Impl::save`/`load` (`vk_decoder_global_state.cpp:449-757` and `:759-1096`): device-to-context-id maps, then the replay buffers, then mapped memory contents, image contents, buffer contents, descriptor pools and sets, unsignaled fences, events, and semaphores.
+Replay only rebuilds the object graph. Contents come after it, in a fixed order inside `VkDecoderGlobalState::Impl::save`/`load` (`vk_decoder_global_state.cpp:449-757` and `:759-1096`). The order is: device-to-context-id maps, then the replay buffers, then mapped memory contents. Image contents, buffer contents, descriptor pools and sets, unsignaled fences, events, and semaphores follow.
 
 ### 9.10.6 Validation and stability controls
 
-There is no checksum over any of this. What guards the stream instead is a layered set of version numbers, magic values, size limits, and per-object liveness checks — plus a small number of trip wires that give up on the save entirely.
+There is no checksum over any of this. Instead, a layered set of version numbers, magic values, size limits, and per-object liveness checks guards the stream. There is also a small number of trip wires that give up on the save entirely.
 
 The outermost guard couples gfxstream's format to the emulator's snapshot version, and says so:
 
@@ -797,9 +821,11 @@ static constexpr uint32_t kFramebufferSnapshotVersionNumber = 1;
 static constexpr uint32_t kFramebufferSnapshotMagicNumber = 0xC0FFEEEE;
 ```
 
-That is the link back to 9.3.1: bumping `kVersionBase` to 87 is how a gfxstream format change gets rejected cleanly by the metadata check rather than discovered halfway through a load. The magic number is verified at the end of `FrameBuffer::onLoad` (`frame_buffer.cpp:3729-3735`) and functions as a "did the stream stay in sync" assertion; individual color buffers carry their own `0xCAFEFACE` (`hardware/google/gfxstream/host/color_buffer.cpp:230-234`), and each saved image is prefixed with either `kGoodImageSnapshot` (`0x900df00d`) or `kBadImageSnapshot` (`0xbaadbeef`) so the loader knows whether pixel data follows (`hardware/google/gfxstream/host/vulkan/vk_decoder_snapshot_utils.cpp:62-63`).
+That is the link back to 9.3.1. Bumping `kVersionBase` to 87 is how a gfxstream format change gets rejected cleanly by the metadata check. Without it, the problem is discovered halfway through a load.
 
-Save-time sanity limits reject implausible resource counts before writing anything, on the theory that a renderer holding sixteen thousand color buffers is a leak rather than a workload:
+`FrameBuffer::onLoad` verifies the magic number at its end (`frame_buffer.cpp:3729-3735`). The number functions as a "did the stream stay in sync" assertion. Individual color buffers carry their own `0xCAFEFACE` (`hardware/google/gfxstream/host/color_buffer.cpp:230-234`). Each saved image has a prefix, either `kGoodImageSnapshot` (`0x900df00d`) or `kBadImageSnapshot` (`0xbaadbeef`). The prefix tells the loader whether pixel data follows (`hardware/google/gfxstream/host/vulkan/vk_decoder_snapshot_utils.cpp:62-63`).
+
+Save-time sanity limits reject implausible resource counts before anything is written. The theory is that a renderer with sixteen thousand color buffers has a leak, not a workload:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/frame_buffer.cpp:134-135
@@ -807,11 +833,13 @@ static constexpr uint32_t kNumMaxProcessResources = 5000;
 static constexpr uint32_t kNumMaxColorBuffers = 16000;
 ```
 
-Load-time validation is per object and fails the whole load. Mapped memory must match both handle and size (`vk_decoder_global_state.cpp:834-847`), every saved fence must resolve to a live `VkFence` (`:1067-1073`), and a per-mip payload whose byte count differs from the expected staging size is fatal (`vk_decoder_snapshot_utils.cpp:364-368`). Descriptor sets get a more interesting treatment: their writes hold weak pointers to the underlying image, image view, or buffer, and on save any write whose targets have expired is dropped rather than serialized, because replaying a descriptor write against a destroyed resource would either fault or silently bind whatever now occupies that handle (`vk_decoder_global_state.cpp:618-676`).
+Load-time validation is per object and fails the whole load. Mapped memory must match both handle and size (`vk_decoder_global_state.cpp:834-847`). Every saved fence must resolve to a live `VkFence` (`:1067-1073`). A per-mip payload whose byte count differs from the expected staging size is fatal (`vk_decoder_snapshot_utils.cpp:364-368`).
 
-The stability controls proper come in three shapes. First, `snapshotsEnabled()` changes runtime behavior so that state remains recoverable: buffers gain `TRANSFER_SRC` usage so their contents can be read back, device memory is force-mapped so it can be serialized, and shader modules are never released eagerly because a later replay still needs them (`vk_decoder_global_state.cpp:7990-7994`). These costs are paid only when the feature is on.
+Descriptor sets get a more interesting treatment. Their writes hold weak pointers to the underlying image, image view, or buffer. On save, any write whose targets have expired is dropped rather than serialized, because replaying a descriptor write against a destroyed resource would either fault or silently bind whatever now occupies that handle (`vk_decoder_global_state.cpp:618-676`).
 
-Second, a save can be abandoned from either side. gfxstream can tell the emulator to skip the save through the `set_skip_snapshot_save` vm operation, feeding the same `is_snapshot_save_skipped()` predicate from 9.10.2 with the reason `UNSUPPORTED_VK_API`. There is exactly one Vulkan trip wire wired up today:
+The stability controls proper come in three shapes. First, `snapshotsEnabled()` changes runtime behavior so that state remains recoverable. Buffers gain `TRANSFER_SRC` usage so their contents can be read back. Device memory is force-mapped so it can be serialized. Shader modules are never released eagerly, because a later replay still needs them (`vk_decoder_global_state.cpp:7990-7994`). These costs are paid only when the feature is on.
+
+Second, a save can be abandoned from either side. gfxstream can tell the emulator to skip the save through the `set_skip_snapshot_save` vm operation. This feeds the same `is_snapshot_save_skipped()` predicate from 9.10.2 with the reason `UNSUPPORTED_VK_API`. There is exactly one Vulkan trip wire wired up today:
 
 ```cpp
 // Source: hardware/google/gfxstream/host/vulkan/vk_decoder_global_state.cpp:3347-3355
@@ -823,9 +851,11 @@ if (bindInfoCount > 1 && snapshotsEnabled()) {
 }
 ```
 
-plus a GL counterpart for native EGLImage import (`hardware/google/gfxstream/host/gl/glestranslator/egl/egl_imp.cpp:1418`). Separately, a pending acceleration-structure descriptor write fails the save outright with "abort (NYI)" rather than producing a snapshot that cannot be restored, and gfxstream also reports back that a snapshot involved Vulkan at all, which is what sets `does_snapshot_use_vulkan` in the skip predicate.
+plus a GL counterpart for native EGLImage import (`hardware/google/gfxstream/host/gl/glestranslator/egl/egl_imp.cpp:1418`). Separately, a pending acceleration-structure descriptor write fails the save outright with "abort (NYI)". This is better than producing a snapshot that cannot be restored. gfxstream also reports back that a snapshot involved Vulkan at all. That report sets `does_snapshot_use_vulkan` in the skip predicate.
 
-Third — and this is the honest characterization of the current state — some unsupported cases are silently degraded rather than detected. Multisample images and images in `VK_IMAGE_LAYOUT_UNDEFINED` are written as `kBadImageSnapshot` with no contents and restore uninitialized (`vk_decoder_snapshot_utils.cpp:66-86`); stale boxed image and buffer handles are skipped on save under a `TODO` that says it should return an error instead. Combined with the "for now, it is not really stable" comment guarding the skip bypass, that is why the feature still ships off by default, and why the interesting question about a Vulkan snapshot is usually not whether it saved but whether the restored app draws the same frame.
+Third, and this is the honest characterization of the current state, some unsupported cases are silently degraded rather than detected. Multisample images and images in `VK_IMAGE_LAYOUT_UNDEFINED` are written as `kBadImageSnapshot` with no contents and restore uninitialized (`vk_decoder_snapshot_utils.cpp:66-86`).
+
+Stale boxed image and buffer handles are skipped on save under a `TODO` that says it should return an error instead. The "for now, it is not really stable" comment also guards the skip bypass. Together these are why the feature still ships off by default. They are also why the interesting question about a Vulkan snapshot is usually not whether it saved. The question is whether the restored app draws the same frame.
 
 ## 9.11 Try It
 
@@ -855,7 +885,7 @@ emulator -avd <avd_name> -no-snapshot-load
 ls -la $HOME/.android/avd/<avd_name>.avd/snapshots/default_boot/
 ```
 
-You should see `ram.bin`, `textures.bin`, and `snapshot.pb`; if file-backed RAM is in use you will see `ram.img` instead of (or alongside) `ram.bin`.
+You should see `ram.bin`, `textures.bin`, and `snapshot.pb`. If file-backed RAM is in use, you will see `ram.img` instead of (or alongside) `ram.bin`.
 
 - From a running emulator, use the console to take and load a named snapshot. Connect with `telnet localhost 5554`, authenticate with the token, then:
 
@@ -871,26 +901,26 @@ avd snapshot load mysnap
 ANDROID_SNAPSHOT_COMPRESS=1 emulator -avd <avd_name> -verbose
 ```
 
-- Turn on Vulkan snapshots for one session, then start a Vulkan app and take a snapshot. Without the flag the save is refused with `SNAPSHOT_SKIP_UNSUPPORTED_VK_APP` or the app is force-stopped first; with it, the app keeps running:
+- Turn on Vulkan snapshots for one session, then start a Vulkan app and take a snapshot. Without the flag, the save is refused with `SNAPSHOT_SKIP_UNSUPPORTED_VK_APP`, or the app is force-stopped first. With the flag, the app keeps running:
 
 ```bash
 emulator -avd <avd_name> -feature VulkanSnapshots -verbose
 ```
 
-Note that the flag is snapshot-sensitive, so a `default_boot` saved with it enabled will be rejected on the next launch without it (`IncompatibleVersion` / feature-flag mismatch). Cold-boot once when switching the flag.
+Note that the flag is snapshot-sensitive. A `default_boot` saved with the flag enabled is rejected on the next launch without it (`IncompatibleVersion` / feature-flag mismatch). Cold-boot once when switching the flag.
 
 ## Summary
 
-- A snapshot is a directory under `<avd>/snapshots/<name>/` containing `ram.bin` (guest RAM), `textures.bin` (GPU state), `snapshot.pb` (metadata), and optionally `ram.img` (file-backed RAM); device and CPU state plus disk snapshots live inside the qcow2 images.
+- A snapshot is a directory under `<avd>/snapshots/<name>/` containing `ram.bin` (guest RAM), `textures.bin` (GPU state), `snapshot.pb` (metadata), and optionally `ram.img` (file-backed RAM). Device and CPU state plus disk snapshots live inside the qcow2 images.
 - `Snapshotter` is the process-wide coordinator. It owns a `Saver`/`Loader`, registers callbacks with QEMU through `setSnapshotCallbacks`, and drives saves/loads via `snapshotSave`/`snapshotLoad`, but delegates the actual serialization.
-- The `snapshot.pb` protobuf records version, host (hypervisor and GPU driver), config (features, cores, RAM, renderers), and image list; the loader rejects incompatible snapshots using tiered `FailureReason` thresholds. The version number is derived from a base value plus the feature-flag count.
+- The `snapshot.pb` protobuf records version, host (hypervisor and GPU driver), config (features, cores, RAM, renderers), and image list. The loader rejects incompatible snapshots using tiered `FailureReason` thresholds. The version number is derived from a base value plus the feature-flag count.
 - `RamSaver` writes a compact `ram.bin`: an 8-byte trailing-index offset, then non-zero pages, then a `FileIndex` with per-page hashes. Zero pages are elided, matching pages can be reused incrementally, and compression is chosen by a CPU, free-RAM, and disk heuristic.
-- `RamLoader` reads the index first, then either eagerly loads all pages or, with a `MemoryAccessWatch`, lazily faults pages in on first touch while a background thread fills the rest — the mechanism that makes quickboot feel instant.
-- File-backed RAM maps guest memory from `ram.img`; a shared mapping makes save nearly free, a private one still needs a copy, and a `ram.img.dirty` marker forces a cold boot after a crash. `snapshotRemap` switches between shared and private at runtime for `default_boot`.
-- Quickboot saves `default_boot` on exit and loads it on boot, gated by feature flags, boot completion, uptime, and command-line options; a liveness monitor deletes the snapshot and cold-boots if the restored guest never comes online.
-- QEMU's `savevm.c` serializes device/CPU state and creates the qcow2 snapshot, while file hooks redirect RAM pages out of the vmstate stream into the custom `RamSaver`/`RamLoader` by returning `RAM_SAVE_CONTROL_DELAYED`.
-- The `VulkanSnapshots` feature (off by default, host feature id 26) makes host Vulkan state snapshottable, so the emulator no longer skips the save or force-stops running Vulkan apps: `Snapshotter::stopVulkanAppsIfApplicable` returns immediately when it is on, and `is_snapshot_save_skipped` stops consulting the live `VkInstance` registry.
-- gfxstream state rides in through the `opengles` pipe's `preSave`/`preLoad` hooks, not the RAM path. Vulkan objects are saved as a topologically ordered trace of the API calls that created them and rebuilt by replaying that trace with the original boxed handle ids, then refilled with memory, image, and buffer contents; version and magic numbers guard the stream, and `kVersionBase` was raised to 87 for these gfxstream save/load changes.
+- `RamLoader` reads the index first. Then it either eagerly loads all pages or, with a `MemoryAccessWatch`, lazily faults pages in on first touch while a background thread fills the rest. This mechanism makes quickboot feel instant.
+- File-backed RAM maps guest memory from `ram.img`. A shared mapping makes save nearly free, and a private one still needs a copy. A `ram.img.dirty` marker forces a cold boot after a crash. `snapshotRemap` switches between shared and private at runtime for `default_boot`.
+- Quickboot saves `default_boot` on exit and loads it on boot, gated by feature flags, boot completion, uptime, and command-line options. A liveness monitor deletes the snapshot and cold-boots if the restored guest never comes online.
+- QEMU's `savevm.c` serializes device/CPU state and creates the qcow2 snapshot. File hooks redirect RAM pages out of the vmstate stream into the custom `RamSaver`/`RamLoader` by returning `RAM_SAVE_CONTROL_DELAYED`.
+- The `VulkanSnapshots` feature (off by default, host feature id 26) makes host Vulkan state snapshottable. The emulator then no longer skips the save or force-stops running Vulkan apps. `Snapshotter::stopVulkanAppsIfApplicable` returns immediately when the feature is on, and `is_snapshot_save_skipped` stops consulting the live `VkInstance` registry.
+- gfxstream state rides in through the `opengles` pipe's `preSave`/`preLoad` hooks, not the RAM path. Vulkan objects are saved as a topologically ordered trace of the API calls that created them. They are rebuilt by replaying that trace with the original boxed handle ids. Then they are refilled with memory, image, and buffer contents. Version and magic numbers guard the stream, and `kVersionBase` was raised to 87 for these gfxstream save/load changes.
 
 ### Key Source Files
 

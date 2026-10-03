@@ -1,14 +1,16 @@
 # Chapter 2: Source Code and Build System
 
-The Android Emulator is not a single Git repository. It is a *superproject*: a tree of around sixty independent repositories stitched together by Google's `repo` tool, with a forked copy of upstream QEMU at its center and a constellation of third-party libraries (gRPC, protobuf, Qt, ANGLE, Mesa, libusb, glib) checked out alongside it. On top of that source tree sit two build systems that coexist by design — a large CMake project that compiles the emulator and all of QEMU, and a Bazel module graph that resolves and builds the external C/C++/Rust dependencies. A thin layer of Python orchestrates both.
+The Android Emulator is not a single Git repository. It is a *superproject*: a tree of around sixty independent repositories that Google's `repo` tool stitches together. A forked copy of upstream QEMU is at its center. Third-party libraries (gRPC, protobuf, Qt, ANGLE, Mesa, libusb, glib) are checked out alongside it.
 
-This chapter walks the layout from the outside in: how `repo` materializes the tree, what the manifest pins, how `MODULE.bazel` and `CMakeLists.txt` divide the work, how the `android/build` Python tooling drives a configure-compile-test-package pipeline, which prebuilt toolchains do the compiling, and finally what binaries and shared libraries land in the distribution directory. Every claim here is anchored to a file you can open in the checkout.
+On top of that source tree sit two build systems that coexist by design. A large CMake project compiles the emulator and all of QEMU. A Bazel module graph resolves and builds the external C/C++/Rust dependencies. A thin layer of Python orchestrates both.
+
+This chapter walks the layout from the outside in. First, it shows how `repo` materializes the tree and what the manifest pins. Then it shows how `MODULE.bazel` and `CMakeLists.txt` divide the work. Next, it shows how the `android/build` Python tooling drives a configure-compile-test-package pipeline and which prebuilt toolchains do the compiling. Finally, it shows which binaries and shared libraries land in the distribution directory. Every claim here is anchored to a file you can open in the checkout.
 
 ---
 
 ## 2.1 The repo Superproject
 
-The emulator source is assembled by `repo`, the same multi-repository tool used by AOSP. After `repo init` and `repo sync`, the top of the tree contains a hidden `.repo/` directory and a set of top-level project directories: `external/`, `hardware/`, `device/`, `tools/`, `prebuilts/`, `build/`, and `third_party/`.
+The emulator source is assembled by `repo`, the same multi-repository tool used by AOSP. After `repo init` and `repo sync`, the top of the tree contains a hidden `.repo/` directory. It also contains these top-level project directories: `external/`, `hardware/`, `device/`, `tools/`, `prebuilts/`, `build/`, and `third_party/`.
 
 The active manifest is a thin wrapper that pulls in the real one:
 
@@ -41,7 +43,7 @@ The default `revision` points at the emulator's main development branch — dist
 
 ### 2.1.1 copyfile and linkfile: how the root gets its build files
 
-Notice the `<linkfile>` and `<copyfile>` directives inside the `external/qemu` project. `repo` runs these *after* sync. They are the reason the superproject root has a `MODULE.bazel` at all: the file does not exist there as a checked-in file, it is a symlink that `repo` creates pointing into the QEMU project:
+Notice the `<linkfile>` and `<copyfile>` directives inside the `external/qemu` project. `repo` runs these *after* sync. They are the reason the superproject root has a `MODULE.bazel` at all. The file does not exist there as a checked-in file. It is a symlink that `repo` creates, and it points into the QEMU project:
 
 ```
 MODULE.bazel       -> external/qemu/toplevel.MODULE.bazel
@@ -49,7 +51,7 @@ MODULE.bazel.lock  -> external/qemu/toplevel.MODULE.bazel.lock
 emu.code-workspace -> (copied from external/qemu/android/vscode/emu.code-workspace)
 ```
 
-The `build/bazel` project does the same trick for the Bazel runtime configuration, linking `toplevel.bazelrc` to `.bazelrc` and `toplevel.bazelversion` to `.bazelversion` at the root. The effect is that the build entry points live *inside* their owning sub-repository (so they version together with the code that uses them) while still being visible at the workspace root where Bazel and the IDE expect them.
+The `build/bazel` project does the same trick for the Bazel runtime configuration, linking `toplevel.bazelrc` to `.bazelrc` and `toplevel.bazelversion` to `.bazelversion` at the root. The build entry points live *inside* their owning sub-repository, so they version together with the code that uses them. They are also visible at the workspace root, where Bazel and the IDE expect them.
 
 ### 2.1.2 Groups, clone-depth, and platform projects
 
@@ -102,7 +104,7 @@ Pkg.Path=emulator
 Pkg.Desc=Android Emulator
 ```
 
-The `Pkg.Revision` value is read at configure time and passed to CMake as `OPTION_SDK_TOOLS_REVISION` (see Section 2.5), so the version a user sees from `emulator -version` traces directly back to this file.
+The `Pkg.Revision` value is read at configure time and passed to CMake as `OPTION_SDK_TOOLS_REVISION` (see Section 2.5). So the version a user sees from `emulator -version` traces directly back to this file.
 
 ### 2.2.1 Two entry scripts: configure.sh and rebuild.sh
 
@@ -133,13 +135,13 @@ A surprising property of this codebase is that it carries two complete build sys
 
 The split is roughly:
 
-1. **CMake** compiles the emulator launcher, all of forked QEMU, the `android-emu` core libraries, the UI, and the graphics stack — the code the emulator team owns and modifies.
-2. **Bazel** resolves the external module graph declared in `MODULE.bazel` (gRPC, protobuf, abseil, glib, boringssl, and so on) from a local registry, and builds a few libraries that CMake then imports as static archives.
-3. A **legacy GNU Make** system still exists under `external/qemu/android/build/` (the `Makefile.top.mk` and `Makefile.common.mk` files), inherited from the NDK-style build, but the modern path is CMake plus Ninja.
+1. **CMake** compiles the emulator launcher, all of forked QEMU, the `android-emu` core libraries, the UI, and the graphics stack. This is the code the emulator team owns and modifies.
+2. **Bazel** resolves the external module graph declared in `MODULE.bazel` (gRPC, protobuf, abseil, glib, boringssl, and so on) from a local registry. It also builds a few libraries that CMake then imports as static archives.
+3. A **legacy GNU Make** system still exists under `external/qemu/android/build/` (the `Makefile.top.mk` and `Makefile.common.mk` files). It is inherited from the NDK-style build, but the modern path is CMake plus Ninja.
 
 ### 2.3.1 How Bazel libraries flow into the CMake build
 
-The bridge between the two systems is `android/build/cmake/bazel.cmake`. The CMake function `android_add_bazel_lib` shells out to the prebuilt `bazel` binary, queries the path of the static archive a Bazel target produces, registers a custom command to build it, and wraps the result as an `IMPORTED` CMake library:
+The bridge between the two systems is `android/build/cmake/bazel.cmake`. The CMake function `android_add_bazel_lib` shells out to the prebuilt `bazel` binary and queries the path of the static archive that a Bazel target produces. Then it registers a custom command to build the archive. Last, it wraps the result as an `IMPORTED` CMake library:
 
 ```cmake
 # Source: external/qemu/android/build/cmake/bazel.cmake
@@ -156,7 +158,7 @@ add_custom_command(
 add_library(${bazel_TARGET} STATIC IMPORTED GLOBAL)
 ```
 
-This is invoked from `android_add_library` in `android/build/cmake/android.cmake`: when a library declaration carries a `BAZEL` argument and the host is Linux x86_64 or any macOS (x86_64 or aarch64), CMake routes the build to Bazel instead of compiling the sources itself. The Bazel path is explicitly disabled for Windows MSVC and Linux aarch64 — those targets compile everything through CMake.
+This is invoked from `android_add_library` in `android/build/cmake/android.cmake`. Two conditions apply: a library declaration carries a `BAZEL` argument, and the host is Linux x86_64 or any macOS (x86_64 or aarch64). In that case, CMake routes the build to Bazel. It does not compile the sources itself. The Bazel path is explicitly disabled for Windows MSVC and Linux aarch64 — those targets compile everything through CMake.
 
 ```mermaid
 graph LR
@@ -196,7 +198,7 @@ bazel_dep(name = "glib", version = "2.82.2.bcr.5")
 
 Three mechanisms are worth understanding in this file.
 
-First, **`bazel_dep`** pins an external module to an exact version. These versions are not fetched from the public Bazel Central Registry — they are resolved against a *local* registry checked into `build/bazel/registry/modules/`, which contains pinned definitions for `qemu`, `gfxstream`, `crosvm`, `ffmpeg`, `pixman`, `glib`, and dozens more. That registry is how the build stays hermetic and reproducible without network access to upstream registries.
+First, **`bazel_dep`** pins an external module to an exact version. These versions are not fetched from the public Bazel Central Registry. They are resolved against a *local* registry checked into `build/bazel/registry/modules/`. That local registry contains pinned definitions for `qemu`, `gfxstream`, `crosvm`, `ffmpeg`, `pixman`, `glib`, and dozens more. That registry is how the build stays hermetic and reproducible without network access to upstream registries.
 
 Second, **`single_version_override`** applies in-tree patches to a dependency. gRPC and glib are both patched this way:
 
@@ -265,7 +267,7 @@ The real logic is in `android/build/python/aemu/cmake.py`. It parses command-lin
 
 ### 2.5.1 The task model
 
-The build is modelled as a flat list of `BuildTask` objects, each of which can be individually enabled or disabled. The base class is deliberately minimal:
+The build is modeled as a flat list of `BuildTask` objects, each of which can be individually enabled or disabled. The base class is deliberately minimal:
 
 ```python
 # Source: external/qemu/android/build/python/aemu/tasks/build_task.py
@@ -316,7 +318,7 @@ flowchart TD
 
 ### 2.5.2 ConfigureTask: assembling the CMake command line
 
-`ConfigureTask` is where the build's options become CMake `-D` flags. It locates the prebuilt `cmake` and `ninja` binaries, selects a toolchain file based on the target, maps the crash and configuration choices to definitions, and stamps in the SDK build number supplied via `--sdk_build_number`:
+`ConfigureTask` is where the build's options become CMake `-D` flags. It locates the prebuilt `cmake` and `ninja` binaries and selects a toolchain file based on the target. It maps the crash and configuration choices to definitions. It also stamps in the SDK build number supplied via `--sdk_build_number`:
 
 ```python
 # Source: external/qemu/android/build/python/aemu/tasks/configure.py
@@ -406,7 +408,7 @@ internal_set_env_cache(
   "LINK_FLAGS>=-Wl,-rpath,'$ORIGIN/lib64:$ORIGIN' -Wl,--disable-new-dtags")
 ```
 
-Two things happen here that shape the final package. The `libc++.so` from the Clang prebuilt is copied (not symlinked — symlinks cannot be redistributed) into `lib64/`, and an `$ORIGIN`-relative RPATH is baked into every binary so it finds its bundled shared libraries regardless of where the user installs the emulator. The toolchain file ends by wiring in the Rust compiler from the prebuilt directory.
+Two things happen here that shape the final package. The `libc++.so` from the Clang prebuilt is copied (not symlinked — symlinks cannot be redistributed) into `lib64/`. An `$ORIGIN`-relative RPATH is baked into every binary. This lets every binary find its bundled shared libraries, wherever the user installs the emulator. At its end, the toolchain file wires in the Rust compiler from the prebuilt directory.
 
 ```mermaid
 flowchart TD
@@ -449,7 +451,7 @@ ninja = shutil.which("ninja", path=str(
 
 ### 2.7.1 The android-emulator-build prebuilts
 
-Beyond toolchains, a family of repositories under `prebuilts/android-emulator-build/` ships vendored runtime dependencies that are awkward or slow to build: `qt` (the Qt UI libraries, also wired into Bazel via `local_path_override`), `mesa` and `mesa-deps` (software GL), `qemu-android-deps` (host glibc and `patchelf` for the aarch64 cross-build), and `system-images`. The compiler cache `sccache` is also shipped here, which `ConfigureTask._find_ccache` discovers when `--ccache auto` is passed:
+Beyond toolchains, a family of repositories under `prebuilts/android-emulator-build/` ships vendored runtime dependencies that are awkward or slow to build. These are `qt` (the Qt UI libraries, also wired into Bazel via `local_path_override`) and `mesa` and `mesa-deps` (software GL). They also include `qemu-android-deps` (host glibc and `patchelf` for the aarch64 cross-build), and `system-images`. The compiler cache `sccache` is also shipped here, which `ConfigureTask._find_ccache` discovers when `--ccache auto` is passed:
 
 ```python
 # Source: external/qemu/android/build/python/aemu/tasks/configure.py
@@ -487,7 +489,7 @@ These are built before configure because the rest of the CMake project consumes 
 
 ## 2.8 The CMake Project Structure
 
-When `ConfigureTask` runs CMake, the top-level `external/qemu/CMakeLists.txt` is the project root. It opens with policy settings, a `project(Android-Emulator)` declaration, and a long block of cache options — the `OPTION_*` and feature variables that the Python driver flips on and off:
+When `ConfigureTask` runs CMake, the top-level `external/qemu/CMakeLists.txt` is the project root. It opens with policy settings and a `project(Android-Emulator)` declaration. Then it has a long block of cache options: the `OPTION_*` and feature variables that the Python driver flips on and off:
 
 ```cmake
 # Source: external/qemu/CMakeLists.txt
@@ -498,7 +500,7 @@ set(OPTION_TRACE "nop" CACHE STRING "The qemu tracing backend to use. ...")
 set(GFXSTREAM TRUE)
 ```
 
-It includes three of its own CMake modules — `android`, `prebuilts`, and `qemu2-src-gen` — which define the helper functions every sub-project uses, then sets the output layout so all binaries land in the build root and shared libraries under `lib64/`:
+It includes three of its own CMake modules: `android`, `prebuilts`, and `qemu2-src-gen`. These define the helper functions that every sub-project uses. Then it sets the output layout, so all binaries land in the build root and shared libraries land under `lib64/`:
 
 ```cmake
 # Source: external/qemu/CMakeLists.txt
@@ -517,7 +519,7 @@ add_subdirectory(android-qemu2-glue)
 
 ### 2.8.1 Generating QEMU's auto-sources
 
-QEMU upstream uses an autoconf-style `configure` script plus generators for its QAPI and trace machinery. The emulator does not run that classic flow during the normal build; instead `external/qemu/CMakeLists.txt` calls a CMake function that produces the generated C from checked-in inputs:
+QEMU upstream uses an autoconf-style `configure` script plus generators for its QAPI and trace machinery. The emulator does not run that classic flow during the normal build. Instead, `external/qemu/CMakeLists.txt` calls a CMake function that produces the generated C from checked-in inputs:
 
 ```cmake
 # Source: external/qemu/CMakeLists.txt
@@ -525,7 +527,7 @@ generate_qemu2_sources(TRACE_BACKEND ${OPTION_TRACE} DEST
                        ${CMAKE_CURRENT_BINARY_DIR}/generated-sources)
 ```
 
-The function copies a checked-in `qemu2-auto-generated/` directory (which holds prebuilt files like `hmp-commands.h` and the gdbstub XML blobs) into the build tree, then runs the trace and QAPI generators on top of it:
+The function copies a checked-in `qemu2-auto-generated/` directory into the build tree. This directory holds prebuilt files like `hmp-commands.h` and the gdbstub XML blobs. Then the function runs the trace and QAPI generators on top of it:
 
 ```cmake
 # Source: external/qemu/android/build/cmake/qemu2-src-gen.cmake
@@ -535,11 +537,11 @@ generate_traces(BACKEND ${gen_TRACE_BACKEND} GENERATED trace_src DEST ${AUTOGEN}
 generate_qapi_lib(DEST ${AUTOGEN})
 ```
 
-The original upstream `external/qemu/configure` shell script still exists in the tree (it is over seven thousand lines and produces a `config-host.mak`), but it is a vestige of upstream QEMU and is not the path the emulator build takes.
+The original upstream `external/qemu/configure` shell script still exists in the tree. It is over seven thousand lines and produces a `config-host.mak`. But it is a vestige of upstream QEMU, and the emulator build does not take this path.
 
 ### 2.8.2 The android helper functions
 
-Every library and executable in the project is declared through wrapper functions defined in `android/build/cmake/android.cmake`, not raw `add_library`/`add_executable`. `android_add_executable` and `android_add_library` accept license metadata (`LICENSE`, `URL`, `NOTICE`) alongside the usual sources and dependencies, which is how the build can emit a complete `NOTICE.txt` for the distribution. As shown in Section 2.3, `android_add_library` also transparently reroutes to Bazel when a `BAZEL` target is supplied.
+Every library and executable in the project is declared through wrapper functions defined in `android/build/cmake/android.cmake`, not raw `add_library`/`add_executable`. `android_add_executable` and `android_add_library` accept license metadata (`LICENSE`, `URL`, `NOTICE`) alongside the usual sources and dependencies. This is how the build can emit a complete `NOTICE.txt` for the distribution. As shown in Section 2.3, `android_add_library` also transparently reroutes to Bazel when a `BAZEL` target is supplied.
 
 ---
 
@@ -555,7 +557,7 @@ The install step lays out a self-contained distribution under `distribution/emul
 
 ### 2.9.1 The launcher and the engines
 
-The `emulator` binary is deliberately small. It is built from a single source file, `main-emulator.cpp`, and its job is to detect the AVD's architecture, pick the right QEMU engine, set up the environment, and exec it:
+The `emulator` binary is deliberately small. It is built from a single source file, `main-emulator.cpp`. Its job is to detect the AVD's architecture, pick the right QEMU engine, set up the environment, and exec it:
 
 ```cmake
 # Source: external/qemu/android/emulator/CMakeLists.txt
@@ -598,7 +600,7 @@ On a built tree, `distribution/emulator/qemu/linux-x86_64/` holds the full matri
 
 The `lib64/` directory holds the shared objects the engines load at runtime, including `libandroid-emu-shared.so`, `libgfxstream_backend.so` (the host graphics renderer), `libglib2_linux-x86_64.so`, `libprotobuf.so`, and the redistributed `libc++.so`. The `$ORIGIN/lib64` RPATH from the toolchain file is what lets the binaries find them.
 
-Alongside the code, the install step copies a large set of data dependencies — the QEMU BIOS blobs, keymaps, the CA certificate bundle, and hardware property definitions. These are declared as `*_DEPENDENCIES` lists in `android/emulator/CMakeLists.txt` using a `source>destination` syntax:
+Alongside the code, the install step copies a large set of data dependencies. These are the QEMU BIOS blobs, keymaps, the CA certificate bundle, and hardware property definitions. These are declared as `*_DEPENDENCIES` lists in `android/emulator/CMakeLists.txt` using a `source>destination` syntax:
 
 ```cmake
 # Source: external/qemu/android/emulator/CMakeLists.txt
@@ -648,7 +650,7 @@ The final task, `DistributionTask`, only runs when a `--dist` directory is suppl
 },
 ```
 
-A release build therefore emits at least three zips: the user-facing emulator package (everything under `distribution/`), a separate debug-info package, and a Breakpad symbols package (`.sym` files for crash symbolication). On Linux it adds an `UNSTRIPPED-*` zip from the unstripped distribution that `CompileTask` produced; it adds a `FISHTANK-*` zip for every target except `linux_aarch64`. The `{target}` and `{sdk_build_number}` placeholders are filled from the toolchain's distribution name and the `--sdk_build_number` argument, so the zips are self-describing.
+A release build therefore emits at least three zips. They are the user-facing emulator package (everything under `distribution/`), a separate debug-info package, and a Breakpad symbols package (`.sym` files for crash symbolication). On Linux it adds an `UNSTRIPPED-*` zip from the unstripped distribution that `CompileTask` produced; it adds a `FISHTANK-*` zip for every target except `linux_aarch64`. The `{target}` and `{sdk_build_number}` placeholders are filled from the toolchain's distribution name and the `--sdk_build_number` argument, so the zips are self-describing.
 
 The valid distribution targets mirror the toolchain map exactly:
 
@@ -720,13 +722,13 @@ readelf -d external/qemu/objs/distribution/emulator/emulator | grep -i path
 
 ## Summary
 
-- The emulator source is a `repo` superproject of around sixty repositories; `.repo/manifests/default.xml` pins each one to the emulator's main development branch, with shallow clones and platform groups for prebuilts.
+- The emulator source is a `repo` superproject of around sixty repositories. The `.repo/manifests/default.xml` file pins each one to the emulator's main development branch, with shallow clones and platform groups for prebuilts.
 - `external/qemu` is the build hub: it owns the top-level `CMakeLists.txt`, the `toplevel.MODULE.bazel` that the root `MODULE.bazel` symlinks to, and the `android/build` Python tooling. `repo`'s `linkfile`/`copyfile` directives create those root-level entry points after sync.
-- Two build systems collaborate: CMake (214 `CMakeLists.txt` files) compiles the emulator and QEMU; Bazel resolves the external dependency graph from a local registry and builds a few libraries that CMake imports through `android_add_bazel_lib`.
+- Two build systems collaborate. CMake (214 `CMakeLists.txt` files) compiles the emulator and QEMU. Bazel resolves the external dependency graph from a local registry. It also builds a few libraries that CMake imports through `android_add_bazel_lib`.
 - `MODULE.bazel` pins dependencies with `bazel_dep`, patches them with `single_version_override`, and points first-party modules (`aemu`, `gfxstream`, Qt) at in-tree paths with `local_path_override`.
 - `rebuild.sh` runs `cmake.py`, which executes an ordered, dependency-free list of `BuildTask`s: clean, prebuilts, configure (CMake + Ninja), compile, test, and distribution packaging.
-- Toolchains are pinned, not borrowed from `PATH`: Clang, CMake, Ninja, and Python all come from `prebuilts/`, and the CMake and Bazel sides pin their compiler versions independently in `toolchains.json` and `tool_versions.json`.
-- The build cross-compiles for five targets and emits a self-contained `distribution/emulator/` tree: the small `emulator` launcher, the `qemu-system-*` engines (graphical and headless, per guest arch), bundled `lib64/*.so` shared libraries with an `$ORIGIN` RPATH, BIOS and data files, and finally versioned SDK zips.
+- Toolchains are pinned, not borrowed from `PATH`. Clang, CMake, Ninja, and Python all come from `prebuilts/`. The CMake and Bazel sides pin their compiler versions independently in `toolchains.json` and `tool_versions.json`.
+- The build cross-compiles for five targets and emits a self-contained `distribution/emulator/` tree. The tree holds the small `emulator` launcher and the `qemu-system-*` engines (graphical and headless, per guest arch). It also holds bundled `lib64/*.so` shared libraries with an `$ORIGIN` RPATH, BIOS and data files, and versioned SDK zips.
 
 ### Key Source Files
 

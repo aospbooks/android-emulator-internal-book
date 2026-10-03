@@ -1,8 +1,12 @@
 # Chapter 28: Debugging, Tracing, and Crash Reporting
 
-When an emulator session misbehaves, the engineer needs to know what the host process was doing the instant it went wrong: which subsystem was logging, what the graphics stack was feeding the GPU, where the wall-clock time went, and — if the process died — what the call stacks looked like. The emulator ships an entire diagnostics layer for exactly this. It is a layered stack: a verbose-logging facility gated by a 64-bit tag mask, a Crashpad out-of-process crash handler that writes minidumps with attached annotations, a Breakpad-based minidump processor that symbolizes those dumps offline, a Perfetto in-process tracing backend the graphics pipeline writes into, and a set of environment switches that turn on Vulkan validation and gfxstream verbosity.
+When an emulator session misbehaves, the engineer needs to know what the host process was doing the instant it went wrong. The engineer needs to know which subsystem was logging and what the graphics stack was feeding the GPU. The engineer also needs to know where the wall-clock time went. If the process died, the engineer needs to see what the call stacks looked like.
 
-This chapter walks the diagnostic surfaces from the cheapest (a log line you flip on with a flag) to the most invasive (a fatal crash that snapshots the whole process). Each surface is grounded in the source that implements it, so that when you read "set `GFXSTREAM_LOG_LEVEL=verbose`" you can also see the `getenv` call that consumes it.
+The emulator ships an entire diagnostics layer for exactly this. It is a layered stack. The first layer is a verbose-logging facility gated by a 64-bit tag mask. The second is a Crashpad out-of-process crash handler that writes minidumps with attached annotations. The third is a Breakpad-based minidump processor that symbolizes those dumps offline.
+
+The fourth is a Perfetto in-process tracing backend that the graphics pipeline writes into. The last is a set of environment switches that turn on Vulkan validation and gfxstream verbosity.
+
+This chapter walks the diagnostic surfaces from the cheapest to the most invasive. The cheapest is a log line you flip on with a flag. The most invasive is a fatal crash that snapshots the whole process. Each surface is grounded in the source that implements it, so that when you read "set `GFXSTREAM_LOG_LEVEL=verbose`", you can also see the `getenv` call that consumes it.
 
 ---
 
@@ -141,7 +145,7 @@ debug_tags[] = {
 };
 ```
 
-When you pass `-debug snapshot,gles`, the parser splits on commas, looks each token up in `debug_tags`, and ORs the corresponding bit into the mask. The special token `all` is handled before the table lookup and flips every bit at once; a leading `-` or `no-` prefix clears bits instead of setting them:
+When you pass `-debug snapshot,gles`, the parser splits on commas, looks each token up in `debug_tags`, and ORs the corresponding bit into the mask. The special token `all` is handled before the table lookup and flips every bit at once. A leading `-` or `no-` prefix clears bits and does not set them:
 
 ```cpp
 // Source: external/qemu/android/emu/cmdline/src/android/cmdline-option.cpp
@@ -171,7 +175,7 @@ void parse_env_debug_tags( void ) {
 
 ### 28.2.2 Launcher flags versus emulator flags
 
-There is a subtlety worth knowing: the `emulator` binary you invoke is a launcher that re-execs the real `qemu-system-*` engine. The launcher parses a handful of options itself before handing the rest over. In `main-emulator.cpp` the launcher treats `-verbose`, `-debug-all`, and `-debug-init` as synonyms that enable verbose logs, recognizes `-debug all`/`-debug init`, and maps `-log-detailed`, `-debug-time`, and `-log-nofilter` onto logging flags:
+There is a subtlety worth knowing: the `emulator` binary you invoke is a launcher that re-execs the real `qemu-system-*` engine. The launcher parses a handful of options itself before handing the rest over. In `main-emulator.cpp` the launcher treats `-verbose`, `-debug-all`, and `-debug-init` as synonyms that enable verbose logs. It also recognizes `-debug all`/`-debug init`. It maps `-log-detailed`, `-debug-time`, and `-log-nofilter` onto logging flags:
 
 ```cpp
 // Source: external/qemu/android/emulator/main-emulator.cpp
@@ -184,7 +188,7 @@ if (!strcmp(opt, "-debug-time")) {
 }
 ```
 
-After the loop, the launcher calls `base_configure_logs(logFlags)` once. That function reads `kLogEnableVerbose` — set by `-log-detailed` or `-debug-log` — to enable the verbose formatter on `ColorLogSink`, which adds a timestamp, thread id, and file:line prefix to every line. `kLogEnableTime` (set by `-debug-time`) is defined in the `LoggingFlags` enum but `base_configure_logs` does not currently handle it, so `-debug-time` has no effect on the output format.
+After the loop, the launcher calls `base_configure_logs(logFlags)` once. That function reads `kLogEnableVerbose`, which `-log-detailed` or `-debug-log` sets. It uses the flag to enable the verbose formatter on `ColorLogSink`. This formatter adds a timestamp, thread id, and file:line prefix to every line. `kLogEnableTime` (set by `-debug-time`) is defined in the `LoggingFlags` enum. However, `base_configure_logs` does not currently handle it, so `-debug-time` has no effect on the output format.
 
 ### 28.2.3 From tag string to enabled bit
 
@@ -206,7 +210,7 @@ flowchart TD
 
 ## 28.3 The Crash Reporting Architecture
 
-When the emulator dies unexpectedly, the goal is to capture a minidump of the failing process plus a bundle of context (command line, environment, recent errors) and, with the user's consent, ship it to a collection server. The implementation lives under `external/qemu/android/emu/crashreport/` and is built on Crashpad, with Breakpad retained only for offline minidump processing.
+When the emulator dies unexpectedly, the goal is to capture a minidump of the failing process. The goal also includes a bundle of context (command line, environment, recent errors). The goal is also to ship it to a collection server, with the user's consent. The implementation lives under `external/qemu/android/emu/crashreport/` and is built on Crashpad, with Breakpad retained only for offline minidump processing.
 
 The design is deliberately out-of-process. A separate `crashpad_handler` executable is launched at startup and monitors the emulator. If the emulator faults, the handler — which is itself healthy — writes the minidump. This survives situations where the crashing process's own address space is too corrupted to run dump code.
 
@@ -266,7 +270,7 @@ flowchart TD
 
 ### 28.3.3 What gets attached
 
-`crashhandler_init` runs early in startup and bundles context into the report. It deliberately skips the first command-line argument (the path to the qemu binary, which would leak a local path) and only attaches environment variables whose names start with an allow-listed prefix:
+`crashhandler_init` runs early in startup and bundles context into the report. It deliberately skips the first command-line argument. This argument is the path to the qemu binary, which would leak a local path. It only attaches environment variables whose names start with an allow-listed prefix:
 
 ```cpp
 // Source: external/qemu/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
@@ -296,7 +300,7 @@ The three crash-annotation primitives are these:
 - `crashhandler_append_message(message)`, which appends to a rolling internal message buffer without crashing
 - `crashhandler_copy_attachment(destination, source)`, which reads a file and attaches its contents under a name
 
-The interesting part is how the storage is bucketed. Crashpad annotations are fixed-size at compile time, so `attachData` rounds the data length up to the next power of two and picks a `SimpleStringAnnotation<N>` template instantiation accordingly, capping at 16 KiB:
+The interesting part is how the storage is bucketed. Crashpad annotations are fixed-size at compile time, so `attachData` rounds the data length up to the next power of two. Then it picks a `SimpleStringAnnotation<N>` template instantiation accordingly. The cap is 16 KiB:
 
 ```cpp
 // Source: external/qemu/android/emu/crashreport/src/android/crashreport/CrashReporter.cpp
@@ -344,7 +348,7 @@ switch (entry.log_severity()) {
 }
 ```
 
-The effect is that the last error messages the emulator logged before dying are automatically present in the minidump, with no extra wiring at each `derror` call site. The sink is registered exactly once, guarded by an atomic exchange.
+The last error messages the emulator logged before it died are automatically present in the minidump. Each `derror` call site needs no extra wiring. The sink is registered exactly once, guarded by an atomic exchange.
 
 ### 28.4.2 Provoking a crash on purpose
 
@@ -365,7 +369,7 @@ void CrashReporter::GenerateDumpAndDie(const char* message) {
 }
 ```
 
-The comment in the source explains the reasoning: `abort()` is not caught by Breakpad on Windows (the comment predates the migration to Crashpad), an explicit store can be optimized out, and requesting a dump then exiting later leaves a window where a real crash could land in the middle. The double-`volatile` store defeats the optimizer. `enableSignalTermination()` itself unblocks `SIGSEGV`, `SIGABRT`, `SIGFPE`, and the rest so the handler can observe the fault.
+The comment in the source explains the reasoning. Breakpad does not catch `abort()` on Windows (the comment predates the migration to Crashpad). An explicit store can be optimized out. A request for a dump followed by a later exit leaves a window where a real crash could land in the middle. The double-`volatile` store defeats the optimizer. `enableSignalTermination()` itself unblocks `SIGSEGV`, `SIGABRT`, `SIGFPE`, and the rest so the handler can observe the fault.
 
 ---
 
@@ -382,7 +386,7 @@ void addWatchedLooper(
         std::chrono::milliseconds taskTimeout = std::chrono::seconds(15));
 ```
 
-The mechanism: for each watched looper, the detector posts a trivial task. A dedicated worker thread — separate so it cannot itself hang on whatever froze the loopers — wakes every few seconds and checks whether the posted task has completed. The default timing wakes the loop every 5 seconds and treats a task as hung after 15:
+The mechanism: for each watched looper, the detector posts a trivial task. A dedicated worker thread wakes every few seconds and checks whether the posted task has completed. The thread is separate so it cannot itself hang on whatever froze the loopers. The default timing wakes the loop every 5 seconds and treats a task as hung after 15:
 
 ```cpp
 // Source: external/qemu/android/emu/crashreport/include/android/crashreport/HangDetector.h
@@ -507,7 +511,7 @@ The tool's options are deliberately minimal:
 "  -s (implies -d)                         Output stack contents\n"
 ```
 
-For the `-d` path the tool builds a Breakpad `MinidumpProcessor` over a `SimpleSymbolSupplier` rooted at the given symbol directories, reads the dump, and processes it into a `ProcessState` of symbolized call stacks:
+For the `-d` path the tool builds a Breakpad `MinidumpProcessor` over a `SimpleSymbolSupplier` rooted at the given symbol directories. It reads the dump and processes it into a `ProcessState` of symbolized call stacks:
 
 ```cpp
 // Source: external/qemu/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
@@ -521,7 +525,7 @@ if (minidump_processor.Process(&dump, &process_state) !=
     google_breakpad::PROCESS_OK) { ... }
 ```
 
-If no symbol path is given, the tool falls back to the developer default `objs/build/symbols`. After printing stacks it re-opens the file as a Crashpad `ProcessSnapshotMinidump` and dumps every module's annotations (the `command_line`, `environment_vars`, `ERRLOG`, and the rest from sections 28.3 and 28.4) as JSON. So one tool gives you both the symbolized stack and the context bundle.
+If no symbol path is given, the tool falls back to the developer default `objs/build/symbols`. It prints the stacks. Then it re-opens the file as a Crashpad `ProcessSnapshotMinidump` and dumps every module's annotations as JSON. These annotations are the `command_line`, `environment_vars`, `ERRLOG`, and the rest from sections 28.3 and 28.4. So one tool gives you both the symbolized stack and the context bundle.
 
 ### 28.7.1 The two crash libraries, divided by job
 
@@ -551,7 +555,7 @@ flowchart LR
 
 ## 28.8 Perfetto Tracing
 
-For performance debugging the emulator integrates Perfetto, Google's tracing framework. The host side does not link the entire Perfetto SDK everywhere; instead it goes through a thin "tracing-only" shim, `external/qemu/android/third_party/perfetto-tracing-only/`, that exposes a tiny C++ surface. The base library's `Tracing.cpp` forwards to it only when `USE_PERFETTO_TRACING` is defined.
+For performance debugging the emulator integrates Perfetto, Google's tracing framework. The host side does not link the entire Perfetto SDK everywhere. Instead it goes through a thin "tracing-only" shim, `external/qemu/android/third_party/perfetto-tracing-only/`, that exposes a tiny C++ surface. The base library's `Tracing.cpp` forwards to it only when `USE_PERFETTO_TRACING` is defined.
 
 The public API is four calls plus a scoped helper:
 
@@ -566,7 +570,7 @@ TRACING_API void endTrace();
 #define AEMU_SCOPED_TRACE_CALL() AEMU_SCOPED_TRACE(__func__)
 ```
 
-The hot path is optimized for the common case where Perfetto has not been compiled in or initialized. `beginTrace` and `ScopedTrace` first test a cached `tracingDisabledPtr` and return immediately when that pointer is null (i.e., `initializeTracing()` was never called), so an uninitialized trace point is a single branch. Once `initializeTracing()` is called, `tracingDisabledPtr` is set to a non-null address and the null check no longer fires; the fast path for "initialized but no active session" is then Perfetto's own internal category-enable check inside `TRACE_EVENT_BEGIN`:
+The hot path is optimized for the common case where Perfetto has not been compiled in or initialized. `beginTrace` and `ScopedTrace` first test a cached `tracingDisabledPtr` and return immediately when that pointer is null (i.e., `initializeTracing()` was never called). An uninitialized trace point is therefore a single branch. Once `initializeTracing()` is called, `tracingDisabledPtr` is set to a non-null address and the null check no longer fires. The fast path for "initialized but no active session" is then Perfetto's own internal category-enable check inside `TRACE_EVENT_BEGIN`:
 
 ```cpp
 // Source: hardware/google/aemu/base/Tracing.cpp
@@ -611,18 +615,20 @@ const char* guestFilenameByEnv = std::getenv("VPERFETTO_GUEST_FILE");
 const char* combinedFilenameByEnv = std::getenv("VPERFETTO_COMBINED_FILE");
 ```
 
-The host trace is given a process track named `VirtualMachineMonitorProcess` and a 100 MiB buffer. The clever part is the merge: because the guest also produces a Perfetto trace, the shim can concatenate the guest and host trace files into one combined trace, after waiting for the guest file size to stabilize so it does not merge a half-written file:
+The host trace is given a process track named `VirtualMachineMonitorProcess` and a 100 MiB buffer. The clever part is the merge. The guest also produces a Perfetto trace, so the shim can concatenate the guest and host trace files into one combined trace. The shim first waits for the guest file size to stabilize, so it does not merge a half-written file:
 
 ```cpp
 // Source: external/qemu/android/third_party/perfetto-tracing-only/perfetto-sdk-tracing-only.cpp
 combinedFile << guestFile.rdbuf() << hostFile.rdbuf();
 ```
 
-`setGuestTime` exists precisely so the two timelines can be aligned: the host applies the guest's time offset so events from both sides line up when opened in the Perfetto UI.
+`setGuestTime` exists precisely so the two timelines can be aligned. The host applies the guest's time offset, so events from both sides line up when opened in the Perfetto UI.
 
 ### 28.8.3 Where trace points live
 
-The graphics stack (gfxstream) is the heaviest user of these trace points. It has its own parallel `gfxstream::base` tracing surface with the same `beginTrace`/`endTrace`/`ScopedTrace` shape, and higher-level `GFXSTREAM_TRACE_EVENT` macros sprinkled through the renderer. For example, `virtio_gpu_frontend.cpp` wraps virtio-gpu command handling in trace events under a stream-renderer category, and `sync_thread.cpp` and `frame_buffer.cpp` add their own. When tracing is enabled, these emit events under gfxstream's own Perfetto categories (`gfxstream.stream_renderer`, `gfxstream.default`, etc.) into the host trace that show exactly how long each renderer operation took. (The single `gfx` category from 28.8.1 belongs to the gfxstream::base/`AEMU_SCOPED_TRACE` shim path, not to these `GFXSTREAM_TRACE_EVENT` macros.)
+The graphics stack (gfxstream) is the heaviest user of these trace points. It has its own parallel `gfxstream::base` tracing surface with the same `beginTrace`/`endTrace`/`ScopedTrace` shape, and higher-level `GFXSTREAM_TRACE_EVENT` macros sprinkled through the renderer. For example, `virtio_gpu_frontend.cpp` wraps virtio-gpu command handling in trace events under a stream-renderer category, and `sync_thread.cpp` and `frame_buffer.cpp` add their own. 
+
+When tracing is enabled, these emit events into the host trace. The events use gfxstream's own Perfetto categories (`gfxstream.stream_renderer`, `gfxstream.default`, etc.). They show exactly how long each renderer operation took. (The single `gfx` category from 28.8.1 belongs to the gfxstream::base/`AEMU_SCOPED_TRACE` shim path, not to these `GFXSTREAM_TRACE_EVENT` macros.)
 
 ### 28.8.4 The trace data path
 
@@ -666,7 +672,7 @@ void GfxstreamLog(LogLevel level, const char* file, int line, const char* functi
 }
 ```
 
-Two behaviors are worth noting. First, a `GFXSTREAM_FATAL` log line calls `abort()` after logging, which is then caught by the Crashpad handler — so a fatal graphics error becomes a minidump just like any other crash. Second, the default formatted line is `[file(line)] message`, giving you the source location of every graphics log.
+Two behaviors are worth noting. First, a `GFXSTREAM_FATAL` log line calls `abort()` after it logs. The Crashpad handler then catches the abort, so a fatal graphics error becomes a minidump just like any other crash. Second, the default formatted line is `[file(line)] message`, giving you the source location of every graphics log.
 
 The level is set from the environment by the render library at startup. `GFXSTREAM_LOG_VERBOSE=1` forces the verbose level; otherwise `GFXSTREAM_LOG_LEVEL` accepts a named level:
 
@@ -702,7 +708,7 @@ VK_LAYER_KHRONOS_validation:\
 VK_LAYER_LUNARG_api_dump
 ```
 
-Two layers are enabled. `VK_LAYER_KHRONOS_validation` checks every Vulkan call against the spec and prints diagnostics when the renderer misuses the API; `VK_LAYER_LUNARG_api_dump` logs every Vulkan call with its arguments, which is the closest thing to a Vulkan-level strace. The bundled layer directory (`testlib64/layers`) also contains a monitor and a screenshot layer. Sourcing this script before launching the emulator turns on full Vulkan validation for the host renderer.
+Two layers are enabled. `VK_LAYER_KHRONOS_validation` checks every Vulkan call against the spec and prints diagnostics when the renderer misuses the API. `VK_LAYER_LUNARG_api_dump` logs every Vulkan call with its arguments. This is the closest thing to a Vulkan-level strace. The bundled layer directory (`testlib64/layers`) also contains a monitor and a screenshot layer. Sourcing this script before launching the emulator turns on full Vulkan validation for the host renderer.
 
 ### 28.9.3 Three graphics diagnostic layers
 
@@ -737,7 +743,7 @@ The available live-inspection switches include these:
 - `-wait-for-debugger`, which pauses the emulator at launch until a native debugger attaches to the host process
 - `-shell`, which opens a root shell on the current terminal into the guest
 
-The `-wait-for-debugger` flag is the entry point for debugging the host process itself. The launcher also checks the `ANDROID_EMULATOR_DEBUG` environment variable early — before option parsing — and enables verbose launcher logs if it is set, which is how you debug the launcher's own re-exec logic:
+The `-wait-for-debugger` flag is the entry point for debugging the host process itself. The launcher also checks the `ANDROID_EMULATOR_DEBUG` environment variable early, before option parsing. If the variable is set, the launcher enables verbose launcher logs. This is how you debug the launcher's own re-exec logic:
 
 ```cpp
 // Source: external/qemu/android/emulator/main-emulator.cpp
@@ -747,27 +753,35 @@ if (debug != NULL && *debug && *debug != '0') {
 }
 ```
 
-For inspecting state interactively, the emulator exposes a telnet control console (the `console` verbose tag) and a gRPC control plane (the `grpc` tag). Both are covered in their own chapters; here it is enough to know that turning on `-debug console` or `-debug grpc` logs every command the running machine receives, which is the fastest way to see what an automation client is doing to a live VM.
+To inspect state interactively, the emulator exposes a telnet control console (the `console` verbose tag) and a gRPC control plane (the `grpc` tag). Both are covered in their own chapters. Here it is enough to know one thing. If you turn on `-debug console` or `-debug grpc`, the emulator logs every command the running machine receives. This is the fastest way to see what an automation client is doing to a live VM.
 
-The append-only message store ties this back to crash reporting: `crashhandler_append_message` lets any subsystem leave a breadcrumb in the crash buffer during normal operation, so even a live inspection session is recording context that would be attached if the process later dies. The `Breadcrumb` enum reuses the very same `VERBOSE_TAG_LIST`, so each subsystem has a dedicated breadcrumb stream named after its log tag.
+The append-only message store ties this back to crash reporting. `crashhandler_append_message` lets any subsystem leave a breadcrumb in the crash buffer during normal operation. So even a live inspection session records context that would be attached if the process later dies. The `Breadcrumb` enum reuses the very same `VERBOSE_TAG_LIST`, so each subsystem has a dedicated breadcrumb stream named after its log tag.
 
 ---
 
 ## 28.11 Crash Triage with emu-dev-cli
 
-Everything so far produces artifacts: a minidump in the local database, a report on the collection server, an `ERRLOG` annotation buried inside it. Acting on one of those means the same manual sequence every time — symbolize the dump, check whether the crash is already filed, then rebuild the session that produced it. `emu-dev-cli crash`, a subcommand group of the developer CLI covered in section 27.10, automates that sequence. Five subcommands are registered in `hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/parser.py` (lines 46 to 58): `find-bug`, `file-bug`, `autofix`, `reproduce`, and `analyze`. Every one of them takes a *crash ID* rather than a Buganizer bug number; `parse_crash_id` in `src/commands/crash/utils.py` accepts either the bare id or a crash-server URL and keeps only the last path component.
+Everything so far produces artifacts: a minidump in the local database, a report on the collection server, an `ERRLOG` annotation buried inside it. Acting on one of those means the same manual sequence every time. You symbolize the dump, check whether the crash is already filed, then rebuild the session that produced it.
+
+`emu-dev-cli crash`, a subcommand group of the developer CLI covered in section 27.10, automates that sequence. Five subcommands are registered in `hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/parser.py` (lines 46 to 58): `find-bug`, `file-bug`, `autofix`, `reproduce`, and `analyze`. Every one of them takes a *crash ID* rather than a Buganizer bug number. `parse_crash_id` in `src/commands/crash/utils.py` accepts either the bare id or a crash-server URL. It keeps only the last path component.
 
 ### 28.11.1 Symbolizing and deduplicating
 
-`find-bug` does the symbolication first and the search second. It downloads the crash metadata, and if `crashreport.txt` is not already present in the per-crash sandbox it runs CrashAdvisor to process the minidump — the same offline symbolization job section 28.7 describes for `crashreport -d`, driven by a tool instead of by hand. CrashAdvisor itself lives outside the `aemu` tree, at `hardware/generic/goldfish/emulator/crashreport/tool/advisor`, and `run_crashadvisor_bazel` (`src/commands/crash/advisor.py:155`) prefers an already-built binary, falling back to `bazel run` on the `@goldfish//emulator/crashreport/tool/advisor` target when there is none.
+`find-bug` does the symbolication first and the search second. It downloads the crash metadata. If `crashreport.txt` is not already present in the per-crash sandbox, it runs CrashAdvisor to process the minidump. This is the same offline symbolization job that section 28.7 describes for `crashreport -d`. Here a tool does the job instead of a person.
 
-The search that follows is two-tiered, and the tiers carry different confidence. A match on the dump's primary signature is reported as `HIGH (Signature Match)`; a match on just the faulting function name, extracted from the symbolized text by `extract_top_fault_frame`, is reported as `MEDIUM (Top Stack Frame Function)` and is only added when it names an issue the first tier did not already find (`src/commands/crash/find_bug.py:99` to `:140`). That distinction matters because the second tier is a substring query against open issues in the emulator component — useful for spotting a related bug, not trustworthy enough to auto-file against.
+CrashAdvisor itself lives outside the `aemu` tree, at `hardware/generic/goldfish/emulator/crashreport/tool/advisor`, and `run_crashadvisor_bazel` (`src/commands/crash/advisor.py:155`) prefers an already-built binary. If there is none, it falls back to `bazel run` on the `@goldfish//emulator/crashreport/tool/advisor` target.
+
+The search that follows is two-tiered, and the tiers carry different confidence. A match on the dump's primary signature is reported as `HIGH (Signature Match)`. For a match on just the faulting function name, `extract_top_fault_frame` extracts the name from the symbolized text. The second tier reports this match as `MEDIUM (Top Stack Frame Function)`. It adds the match only when it names an issue the first tier did not already find (`src/commands/crash/find_bug.py:99` to `:140`). 
+
+That distinction matters because the second tier is a substring query against open issues in the emulator component. It is useful to find a related bug, but not trustworthy enough to auto-file against.
 
 ### 28.11.2 Reproducing a crash locally under LLDB
 
-The most interesting subcommand is `reproduce`, because it reconstructs a crashing session out of the annotations sections 28.3 and 28.4 attached to the dump. `extract_reproduce_plan` reads `metadata.json` and pulls out the build id from the product version string, the build target from the reported OS and CPU architecture, and — the part that makes the reproduction faithful — the original command line out of the `commandline` breadcrumb in `productdata`, which is the same `command_line` annotation `crashhandler_init` attached at startup. The GPU mode, feature flags, and AVD switches the crashing session ran with therefore come back automatically.
+The most interesting subcommand is `reproduce`. It reconstructs a crashing session from the annotations that sections 28.3 and 28.4 attached to the dump.
 
-It also has to work out *which process* to debug when `--lldb` is passed. The `emulator` binary you launch is a launcher that re-execs the real engine (section 28.2.2), so attaching to it is useless; the crash happened inside `qemu-system-<arch>`. The plan resolves that name from the crash's architecture and OS and builds the debugger command around it:
+`extract_reproduce_plan` reads `metadata.json` and pulls out the build id from the product version string. It also pulls out the build target from the reported OS and CPU architecture. The part that makes the reproduction faithful is the original command line, from the `commandline` breadcrumb in `productdata`. This is the same `command_line` annotation that `crashhandler_init` attached at startup. The GPU mode, feature flags, and AVD switches the crashing session ran with therefore come back automatically.
+
+It also has to work out *which process* to debug when `--lldb` is passed. The `emulator` binary you launch is a launcher that re-execs the real engine (section 28.2.2), so it is useless to attach to it. The crash happened inside `qemu-system-<arch>`. The plan resolves that name from the crash's architecture and OS and builds the debugger command around it:
 
 ```python
 # Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/reproduce.py
@@ -777,7 +791,7 @@ if "arm64" in arch or "aarch64" in arch:
 lldb_cmd = ["lldb", "-n", qemu_engine, "--wait-for"] if debugger == "lldb" else None
 ```
 
-`--wait-for` is what makes this work without a race: LLDB waits for a *future* process with that name, so the tool can start the launcher first and let the debugger catch the engine at the moment the launcher spawns it. The launch side puts the emulator in its own process group so that tearing the session down after the debugger exits kills the whole tree rather than orphaning the engine:
+`--wait-for` is what makes this work without a race. LLDB waits for a *future* process with that name. So the tool can start the launcher first and let the debugger catch the engine at the moment the launcher spawns it. The launch side puts the emulator in its own process group, so that teardown after the debugger exits kills the whole tree and does not orphan the engine:
 
 ```python
 # Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/reproduce.py
@@ -791,11 +805,11 @@ finally:
         os.killpg(pgid, signal.SIGTERM)
 ```
 
-With `--dry-run` or `--json` the command stops after building the plan and prints it, which is the fast way to see the exact build id, engine binary, and flag list a given crash implies without launching anything.
+With `--dry-run` or `--json` the command stops after it builds the plan and prints it. This is the fast way to see the exact build id, engine binary, and flag list that a given crash implies, without a launch.
 
 ### 28.11.3 From root cause to a patch
 
-`autofix` runs CrashAdvisor in `--auto-run` mode to produce an `rca_summary.md`, then parses a structured `actionability:` YAML block out of that markdown and refuses to proceed unless the analysis marked the crash fixable:
+`autofix` runs CrashAdvisor in `--auto-run` mode to produce an `rca_summary.md`. Then it parses a structured `actionability:` YAML block out of that markdown. It refuses to proceed unless the analysis marked the crash fixable:
 
 ```python
 # Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/autofix.py
@@ -805,13 +819,15 @@ target_func = action_data.get("target_function", "unknown")
 remediation = action_data.get("remediation_summary", "Refer to rca_summary.md")
 ```
 
-The reported `target_file` is a tree-relative path, so it is resolved against the workspace registered through `emu-dev-cli source-directory` before anything is dispatched. `analyze` is the umbrella command: with no flags it runs `find-bug` for quick deduplication feedback and then starts an interactive root-cause session, and it forwards to `file-bug` or `autofix` when those flags are given. One detail there is worth borrowing regardless of the tool: before executing the generated `investigation_cmd.sh`, it checks `is_path_secure_user_owned` on both the sandbox directory and the script and refuses to run anything that is group- or world-writable (`src/commands/crash/analyze.py:74` to `:90`) — a script assembled from crash-server data is untrusted input.
+The reported `target_file` is a tree-relative path, so it is resolved against the workspace registered through `emu-dev-cli source-directory` before anything is dispatched. `analyze` is the umbrella command. With no flags it runs `find-bug` for quick deduplication feedback and then starts an interactive root-cause session. It forwards to `file-bug` or `autofix` when those flags are given. 
+
+One detail there is worth borrowing regardless of the tool. Before it executes the generated `investigation_cmd.sh`, it checks `is_path_secure_user_owned` on both the sandbox directory and the script. It refuses to run anything that is group- or world-writable (`src/commands/crash/analyze.py:74` to `:90`). A script assembled from crash-server data is untrusted input.
 
 ---
 
 ## 28.12 Try It
 
-These commands assume you have an emulator build with the `emulator` launcher on your `PATH` and at least one AVD configured.
+These commands assume an emulator build with the `emulator` launcher on your `PATH`. They also assume at least one configured AVD.
 
 Enable verbose logging for two specific subsystems and watch the boot:
 
@@ -837,7 +853,7 @@ Turn on the most verbose gfxstream graphics logging:
 GFXSTREAM_LOG_LEVEL=verbose emulator -avd <your_avd> -gpu host
 ```
 
-Run with full Vulkan validation by sourcing the bundled helper first (run from the emulator build output directory so the relative `objs/testlib64/layers` path resolves):
+First source the bundled helper to run with full Vulkan validation. Run from the emulator build output directory, so the relative `objs/testlib64/layers` path resolves:
 
 ```bash
 source external/qemu/android/vkdebugenv.sh
@@ -853,7 +869,7 @@ VPERFETTO_COMBINED_FILE=combined.trace \
 emulator -avd <your_avd>
 ```
 
-List and inspect local crash reports with the bundled crash tool (the binary is shipped next to the emulator; pass `-l` to list, `-d` to symbolize):
+List and inspect local crash reports with the bundled crash tool. The binary is shipped next to the emulator. Pass `-l` to list and `-d` to symbolize:
 
 ```bash
 # List minidumps in the local crash database
@@ -873,17 +889,17 @@ emulator -avd <your_avd> -crash-report-mode disabled
 
 ## Summary
 
-- Logging has two orthogonal axes: a severity floor (`getMinLogLevel`, default `INFO`) and a 64-bit subsystem tag mask (`android_verbose`); a line prints only when both gates open.
-- The `VERBOSE_TAG_LIST` macro in `android/utils/debug.h` is the single source of truth for log categories — it is re-expanded into an enum, a parse table, and a breadcrumb enum, so adding a tag updates all three.
+- Logging has two orthogonal axes: a severity floor (`getMinLogLevel`, default `INFO`) and a 64-bit subsystem tag mask (`android_verbose`). A line prints only when both gates open.
+- The `VERBOSE_TAG_LIST` macro in `android/utils/debug.h` is the single source of truth for log categories. It is re-expanded into an enum, a parse table, and a breadcrumb enum, so a new tag updates all three.
 - The `-debug`, `-verbose`, `-debug-time`, and `-log-detailed` flags (and the `ANDROID_DEBUG` env var) are parsed in `cmdline-option.cpp` and `main-emulator.cpp` into the mask and a formatter selection.
-- Crash reporting is out-of-process: a `crashpad_handler` binary started at launch writes minidumps even when the emulator's own address space is corrupt; uploads stay disabled until consent is granted.
+- Crash reporting is out-of-process. A `crashpad_handler` binary started at launch writes minidumps even when the emulator's own address space is corrupt. Uploads stay disabled until consent is granted.
 - Context travels with the dump as Crashpad string annotations — `command_line`, allow-listed `environment_vars`, and an `ERRLOG` stream that captures error/fatal log lines automatically via `CrashpadLogSink`.
-- `crashhandler_die` and `GenerateDumpAndDie` force a minidump at the fault point with a deliberate null dereference; the `HangDetector` and `CrashOnTimeout` convert freezes and slow operations into the same fatal path.
+- `crashhandler_die` and `GenerateDumpAndDie` force a minidump at the fault point with a deliberate null dereference. The `HangDetector` and `CrashOnTimeout` convert freezes and slow operations into the same fatal path.
 - Breakpad is retained for offline work: `crashreport -d` uses Breakpad's `MinidumpProcessor` and `dump_syms`-produced symbols to print symbolized stacks plus the annotation bundle as JSON.
-- Perfetto tracing runs through a thin in-process shim with a single-branch fast path when disabled; `VPERFETTO_*` env vars name the host, guest, and combined trace files, and the shim concatenates host and guest traces into one timeline.
+- Perfetto tracing runs through a thin in-process shim with a single-branch fast path when disabled. `VPERFETTO_*` env vars name the host, guest, and combined trace files. The shim concatenates host and guest traces into one timeline.
 - Graphics debugging stacks three layers: gfxstream log levels (`GFXSTREAM_LOG_LEVEL`), Perfetto `gfx` track events, and Vulkan validation layers wired up by `vkdebugenv.sh`.
-- `emu-dev-cli crash` automates triage from a crash ID: `find-bug` symbolizes through CrashAdvisor and searches Buganizer in a high-confidence signature tier plus a lower-confidence faulting-function tier, while `autofix` acts only on an `actionability:` block that marked the crash fixable.
-- `emu-dev-cli crash reproduce` rebuilds the crashing session from the dump's own annotations — build id, target platform, and the `command_line` breadcrumb — and attaches LLDB with `-n qemu-system-<arch> --wait-for`, which targets the re-exec'd engine rather than the launcher.
+- `emu-dev-cli crash` automates triage from a crash ID. `find-bug` symbolizes through CrashAdvisor and searches Buganizer in a high-confidence signature tier plus a lower-confidence faulting-function tier. In contrast, `autofix` acts only on an `actionability:` block that marked the crash fixable.
+- `emu-dev-cli crash reproduce` rebuilds the crashing session from the dump's own annotations: build id, target platform, and the `command_line` breadcrumb. It attaches LLDB with `-n qemu-system-<arch> --wait-for`, which targets the re-exec'd engine rather than the launcher.
 
 ### Key Source Files
 
