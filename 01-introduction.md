@@ -1,16 +1,20 @@
 # Chapter 1: Introduction
 
-The Android Emulator is one of the most-used pieces of software in the Android ecosystem, and one of the least understood. Most developers know it as the green-bordered phone window that pops up out of Android Studio, the thing they `adb install` an APK onto when they do not have a physical device handy. Underneath that window is a full virtual machine running an unmodified Android system image on a host CPU, plus a large host-side program that emulates every piece of hardware the guest expects to find, streams the guest's GPU commands back to the host's real GPU, and exposes a control plane so that tools like Android Studio can rotate the screen, set a fake GPS fix, or push an SMS into the modem.
+The Android Emulator is one of the most-used pieces of software in the Android ecosystem, and one of the least understood. Most developers know it as the green-bordered phone window that pops up out of Android Studio. They `adb install` an APK onto it when they do not have a physical device handy.
 
-This book takes the emulator apart layer by layer, always pointing back at the real source code. This first chapter draws the map: what the emulator is and is not, why it is built on a fork of QEMU rather than a stock VM, how the host process is split into layers (the QEMU machine and its Android glue, the `android-emu` core, the gfxstream graphics path, the gRPC and telnet control plane, and the Qt and WebRTC front ends), and how all of this differs from a plain virtual machine and from the crosvm-based Cuttlefish device. By the end you should be able to look at any chapter heading in the table of contents and know roughly which box in the architecture it lives in.
+Underneath that window is a full virtual machine that runs an unmodified Android system image on a host CPU. Beside it runs a large host-side program. The program emulates every piece of hardware the guest expects to find. It streams the guest's GPU commands back to the host's real GPU. It also exposes a control plane. Tools like Android Studio use the control plane to rotate the screen, set a fake GPS fix, or push an SMS into the modem.
+
+This book takes the emulator apart layer by layer, always pointing back at the real source code. This first chapter draws the map. It covers what the emulator is and is not. It explains why the emulator is built on a fork of QEMU rather than a stock VM.
+
+It shows how the host process is split into layers. Some layers are the QEMU machine and its Android glue, and the `android-emu` core. The others are the gfxstream graphics path, the gRPC and telnet control plane, and the Qt and WebRTC front ends. It also shows how all of this differs from a plain virtual machine and from the crosvm-based Cuttlefish device. By the end you should be able to look at any chapter heading in the table of contents. You should then know roughly which box in the architecture it lives in.
 
 ---
 
 ## 1.1 What the Emulator Is
 
-The Android Emulator is a host application that boots a real Android system image inside a virtual machine and presents it to you as if it were a device. It is not a simulator in the iOS sense: there is no reimplementation of the Android framework in host code. The guest runs the same `system.img`, `vendor.img`, kernel, and ramdisk that ship to physical devices of the matching ABI. The framework, the runtime, `system_server`, the HALs, and the apps all execute inside the guest exactly as they would on hardware.
+The Android Emulator is a host application that boots a real Android system image inside a virtual machine. It presents the image to you as if it were a device. It is not a simulator in the iOS sense: there is no reimplementation of the Android framework in host code. The guest runs the same `system.img`, `vendor.img`, kernel, and ramdisk that ship to physical devices of the matching ABI. The framework, the runtime, `system_server`, the HALs, and the apps all execute inside the guest exactly as they would on hardware.
 
-What makes it the *Android* Emulator rather than "QEMU running an OS" is the host-side machinery wrapped around the virtual CPU. The emulator ships its own fork of QEMU and links it against a large static library named `android-emu` (historically "AndroidEmu") that supplies everything Android-specific: virtual sensors, a battery model, a fake modem, a camera bridge, a snapshot engine, a control console, and the plumbing that connects a host GPU to the guest's graphics stack.
+What makes it the *Android* Emulator rather than "QEMU running an OS" is the host-side machinery wrapped around the virtual CPU. The emulator ships its own fork of QEMU. It links the fork against a large static library named `android-emu` (historically "AndroidEmu"). This library supplies everything Android-specific. That includes virtual sensors, a battery model, a fake modem, a camera bridge, a snapshot engine, and a control console. It also includes the plumbing that connects a host GPU to the guest's graphics stack.
 
 The original design document in the fork describes this split directly. The codebase is built from a QEMU engine plus a standalone library plus a thin "glue" between them.
 
@@ -22,7 +26,7 @@ The original design document in the fork describes this split directly. The code
 |____________|   |____________|   |_________|      |____________________|
 ```
 
-The stated goal of that library is to be "a standalone component that comes with its own set of unit-tests" and to provide "a UI layer decoupled from the underlying emulation engine." That decoupling is the single most important architectural idea in the whole tree, and the rest of this chapter is largely an elaboration of it.
+The stated goal of that library is to be "a standalone component that comes with its own set of unit-tests". The stated goal is also to provide "a UI layer decoupled from the underlying emulation engine." That decoupling is the single most important architectural idea in the whole tree, and the rest of this chapter is largely an elaboration of it.
 
 ### 1.1.1 What It Is Not
 
@@ -34,7 +38,7 @@ Three clarifications keep readers from chasing the wrong mental model.
 
 ### 1.1.2 Host Process Versus Guest System Image
 
-The cleanest line to draw in the whole system is between the host process and the guest. The host process is the native binary that runs on your laptop or build machine — Linux, macOS, or Windows — compiled from the C++ in `external/qemu` and the libraries in `hardware/google/aemu` and `hardware/google/gfxstream`. The guest is the Android image: a Linux kernel plus Android userspace, compiled for an emulator-specific board and running inside the virtual CPU that the host process provides.
+The cleanest line to draw in the whole system is between the host process and the guest. The host process is the native binary that runs on your laptop or build machine (Linux, macOS, or Windows). It is compiled from the C++ in `external/qemu` and the libraries in `hardware/google/aemu` and `hardware/google/gfxstream`. The guest is the Android image: a Linux kernel plus Android userspace. It is compiled for an emulator-specific board. It runs inside the virtual CPU that the host process provides.
 
 Host process and guest system
 
@@ -60,13 +64,17 @@ flowchart TB
   UI -->|"control"| AEMU
 ```
 
-The guest talks to the host across a small number of well-defined transports: virtio devices, a fast shared-memory pipe (`/dev/goldfish_pipe`, described in `external/qemu/android/docs/ANDROID-QEMU-PIPE.TXT`), and an ADB connection. Everything you do from the host — rotating the device, dropping a GPS fix, hanging up a call — is the host side of one of those transports being poked by a control agent.
+The guest talks to the host across a few well-defined transports: virtio devices, a fast shared-memory pipe (`/dev/goldfish_pipe`, described in `external/qemu/android/docs/ANDROID-QEMU-PIPE.TXT`), and an ADB connection. Everything you do from the host is the host side of one of those transports. For example, you rotate the device, drop a GPS fix, or hang up a call. In each case a control agent pokes the transport.
 
 ## 1.2 Why It Forks QEMU
 
-QEMU is a mature, portable machine emulator with binary translation (TCG) for cross-architecture guests and hypervisor backends (KVM on Linux, Hypervisor.framework on macOS, WHPX on Windows) for same-architecture guests. The emulator wants all of that. What QEMU does not provide out of the box is an Android device: a board with the right set of virtual peripherals, a transport for the Android-specific control surface, and the hooks needed to stream a GPU.
+QEMU is a mature, portable machine emulator. It has binary translation (TCG) for cross-architecture guests, and hypervisor backends (KVM on Linux, Hypervisor.framework on macOS, WHPX on Windows) for same-architecture guests. The emulator wants all of that. QEMU does not provide an Android device out of the box. It does not provide a board with the right set of virtual peripherals. It also does not provide a transport for the Android-specific control surface and the hooks needed to stream a GPU.
 
-The fork lives at `external/qemu` and is described in the design doc as a QEMU 2.x base, "very lightly patched" at the engine level but extended heavily with new code that does not touch QEMU internals. For ARM and MIPS guests, the Android-specific virtual board is the "ranchu" machine — for ARM it is defined in `external/qemu/hw/arm/ranchu.c`, which advertises itself to the guest with `compatible = "ranchu"` in the device tree and inherits its peripherals from the older 32-bit "goldfish" board. For x86/x86_64 guests — the most common development target — the fork instead extends the standard QEMU PC boards (`hw/i386/pc_piix.c` and `hw/i386/pc_q35.c`) by adding goldfish devices (goldfish_battery, goldfish_pipe, and others) directly inside the standard PC machine init, with no separate "ranchu" machine type.
+The fork lives at `external/qemu`. The design doc describes it as a QEMU 2.x base that is "very lightly patched" at the engine level. The fork is also extended heavily with new code that does not touch QEMU internals.
+
+For ARM and MIPS guests, the Android-specific virtual board is the "ranchu" machine. For ARM it is defined in `external/qemu/hw/arm/ranchu.c`. The machine advertises itself to the guest with `compatible = "ranchu"` in the device tree. It inherits its peripherals from the older 32-bit "goldfish" board.
+
+x86/x86_64 guests are the most common development target. For these guests the fork instead extends the standard QEMU PC boards (`hw/i386/pc_piix.c` and `hw/i386/pc_q35.c`). It adds goldfish devices (goldfish_battery, goldfish_pipe, and others) directly inside the standard PC machine init. There is no separate "ranchu" machine type.
 
 The ranchu board and the goldfish device family
 
@@ -85,11 +93,13 @@ flowchart LR
   TCG -->|"executes guest code"| GUEST
 ```
 
-Forking, rather than carrying patches against upstream as an out-of-tree set, lets the team add whole new device files (`hw/misc/goldfish_pipe.c`) and a custom machine board without fighting the upstream review process, and lets them link the QEMU sysemu directly against the `android-emu` static library — something upstream QEMU has no reason to support. The cost is the eternal one of any fork: rebasing onto newer QEMU is expensive, which is exactly why the engine is kept "lightly patched" and the Android logic is pushed out into `android-emu` and the glue. Chapter 4 walks through what the fork changes and what it leaves alone.
+The team forks QEMU. It does not keep its changes as an out-of-tree patch set against upstream. This lets the team add whole new device files (`hw/misc/goldfish_pipe.c`) and a custom machine board. The team does not need to fight the upstream review process for this.
+
+The fork also lets the team link the QEMU sysemu directly against the `android-emu` static library. Upstream QEMU has no reason to support this. The cost is the eternal one of any fork: rebasing onto newer QEMU is expensive. This is exactly why the team keeps the engine "lightly patched". The team pushes the Android logic out into `android-emu` and the glue. Chapter 4 walks through what the fork changes and what it leaves alone.
 
 ## 1.3 The Two-Binary Model: Launcher and Engine
 
-When you type `emulator` you are not running QEMU directly. You are running a tiny launcher whose only job is to figure out which AVD you mean, work out the guest ABI, and then `exec` the correct architecture-specific QEMU binary. The launcher source is `external/qemu/android/emulator/main-emulator.cpp`; its own comment calls it "the tiny 'emulator' launcher program that is in charge of starting the target-specific emulator binary for a given AVD."
+When you type `emulator` you are not running QEMU directly. You are running a tiny launcher. Its only job is to figure out which AVD you mean, work out the guest ABI, and then `exec` the correct architecture-specific QEMU binary. The launcher source is `external/qemu/android/emulator/main-emulator.cpp`. Its own comment calls it "the tiny 'emulator' launcher program that is in charge of starting the target-specific emulator binary for a given AVD."
 
 The launcher builds the path to the engine binary from the host OS, the host CPU, and the guest QEMU architecture.
 
@@ -116,7 +126,7 @@ sequenceDiagram
   Engine-->>User: device window appears
 ```
 
-Inside the engine binary the entry path runs through the glue's `main.cpp`, which eventually calls `run_qemu_main` to start the QEMU machine and main loop (`external/qemu/android-qemu2-glue/main.cpp`, around the `enter_qemu_main_loop` helper). Chapter 3 follows a launch end to end; Chapter 2 explains how all of these binaries get built in the first place.
+Inside the engine binary the entry path runs through the glue's `main.cpp`. This file eventually calls `run_qemu_main` to start the QEMU machine and main loop (`external/qemu/android-qemu2-glue/main.cpp`, around the `enter_qemu_main_loop` helper). Chapter 3 follows a launch end to end; Chapter 2 explains how all of these binaries get built in the first place.
 
 ## 1.4 The Host-Side Layers
 
@@ -158,13 +168,13 @@ The glue is the seam between two codebases that know almost nothing about each o
 
 ### 1.4.2 The android-emu Core
 
-`android-emu` is the heart of the Android-specific behavior. The original design doc lists its goals as decoupling Android features from any QEMU internals and making them independently unit-testable. In the current tree the code is split between `external/qemu/android/android-emu/android` (the large legacy surface — `console.cpp`, `hw-sensors.cpp`, `snapshot`, `automation`, `physics`, the camera and recording subsystems) and a newer modular `external/qemu/android/emu` tree organized by feature.
+`android-emu` is the heart of the Android-specific behavior. The original design doc lists its goals as decoupling Android features from any QEMU internals and making them independently unit-testable. In the current tree the code is split in two places. One is `external/qemu/android/android-emu/android` (the large legacy surface — `console.cpp`, `hw-sensors.cpp`, `snapshot`, `automation`, `physics`, the camera and recording subsystems). The other is a newer modular `external/qemu/android/emu` tree organized by feature.
 
 Below it sits `aemu`, the utility library in `hardware/google/aemu`. Its own README is blunt about its scope: "an utility library for common functions used in the Android Emulator. External projects (gfxstream, QEMU) may use to perform C++ functions." It supplies the base primitives — threads, loopers, path utilities, the `AndroidPipe` machinery in `hardware/google/aemu/host-common/AndroidPipe.cpp` — that both `android-emu` and gfxstream build on.
 
 ## 1.5 The Agent Vtable: How Layers Talk Without Coupling
 
-If you read only one interface in the whole emulator, read this one. The decoupling that the design doc promises is made concrete by a single struct of function-pointer tables called `AndroidConsoleAgents`, defined in `external/qemu/android/emu/agents/include/android/console.h`. Each field is a pointer to an agent interface — battery, sensors, telephony, display, vm operations, and so on — and the list is generated from one X-macro.
+If you read only one interface in the whole emulator, read this one. The decoupling that the design doc promises is made concrete by a single struct of function-pointer tables called `AndroidConsoleAgents`, defined in `external/qemu/android/emu/agents/include/android/console.h`. Each field is a pointer to an agent interface — battery, sensors, telephony, display, vm operations, and so on. The list is generated from one X-macro.
 
 ```cpp
 // Source: external/qemu/android/emu/agents/include/android/console.h
@@ -206,11 +216,13 @@ flowchart LR
   USER --> GET
 ```
 
-This is why the same `android-emu` library can be linked into the full QEMU emulator, into a logging-only debug build (`AndroidLoggingConsoleFactory`, also injected in that file), and into unit tests with fake agents. The core asks for a battery agent; whoever started the process decides what a battery means. Chapter 7 dissects this pattern in detail, and Chapter 8 shows how the gRPC and console control planes sit on top of it.
+This is why the same `android-emu` library can be linked into the full QEMU emulator. It can also be linked into a logging-only debug build (`AndroidLoggingConsoleFactory`, also injected in that file), and into unit tests with fake agents. The core asks for a battery agent; whoever started the process decides what a battery means. Chapter 7 dissects this pattern in detail, and Chapter 8 shows how the gRPC and console control planes sit on top of it.
 
 ## 1.6 The Graphics Path
 
-Graphics is the most performance-sensitive subsystem and gets its own part of the book. The guest does not have a real GPU. Instead, the guest's OpenGL ES and Vulkan calls are captured, serialized into a command stream, and shipped across a pipe to the host, where a renderer replays them against the host's real GPU and ships frames back. This streaming renderer is gfxstream, in `hardware/google/gfxstream`, and its README describes it as "a collection of code generators and libraries for streaming rendering APIs from one place to another," explicitly including "from a virtual machine guest to host for virtualized graphics."
+Graphics is the most performance-sensitive subsystem and gets its own part of the book. The guest does not have a real GPU. Instead, the guest's OpenGL ES and Vulkan calls are captured and serialized into a command stream. The stream is shipped across a pipe to the host. There a renderer replays the calls against the host's real GPU and ships frames back.
+
+This streaming renderer is gfxstream, in `hardware/google/gfxstream`. Its README describes it as "a collection of code generators and libraries for streaming rendering APIs from one place to another." The README explicitly includes the case "from a virtual machine guest to host for virtualized graphics."
 
 The split is clean. The guest-side encoders live under `hardware/google/gfxstream/guest` (the `GLESv2_enc`, `renderControl_enc`, and `OpenglSystemCommon` directories). The host-side renderer lives under `hardware/google/gfxstream/host` (`frame_buffer.cpp`, `color_buffer.cpp`, the GL and Vulkan backends). The emulator core reaches the host renderer through `external/qemu/android/android-emu/android/opengles.cpp`, which loads gfxstream's `RenderLib` and configures it with the chosen renderer:
 
@@ -239,17 +251,17 @@ sequenceDiagram
   Host-->>App: present / readback
 ```
 
-Chapters 11 through 14 cover this end to end: the overall architecture, the guest drivers, the host renderer (`FrameBuffer`, color buffers, the compositor), and the wire protocol itself.
+Chapters 11 through 14 cover this end to end. The topics are the overall architecture, the guest drivers, the host renderer (`FrameBuffer`, color buffers, the compositor), and the wire protocol itself.
 
 ## 1.7 The Control Plane and Front Ends
 
 A device you cannot interact with is not useful. The emulator exposes two complementary control surfaces and two display front ends.
 
-The telnet console is the oldest. As `console.cpp` notes, "this console is enabled automatically at emulator startup, on port 5554 by default." Connecting with `telnet localhost 5554` gives you a command shell that can rotate the screen, set the battery level, send an SMS, or trigger a snapshot — each command ultimately calling through the agent vtable from Section 1.5.
+The telnet console is the oldest. As `console.cpp` notes, "this console is enabled automatically at emulator startup, on port 5554 by default." If you connect with `telnet localhost 5554`, you get a command shell. The shell can rotate the screen, set the battery level, send an SMS, or trigger a snapshot. Each command ultimately calls through the agent vtable from Section 1.5.
 
-The modern surface is gRPC. The services under `external/qemu/android/android-grpc` define a typed API (`EmulatorController` and friends, implemented in `external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp`) that Android Studio and the embedded emulator use for everything from input injection to screen streaming.
+The modern surface is gRPC. The services under `external/qemu/android/android-grpc` define a typed API. The API includes `EmulatorController` and friends, implemented in `external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp`. Android Studio and the embedded emulator use it for everything from input injection to screen streaming.
 
-On the display side there are two front ends. The Qt desktop UI lives under `external/qemu/android/android-ui` (the `aemu-ui-qt` module and the `fishtank` app), and it is the classic green-bordered window with the side toolbar. The WebRTC path lets the emulator stream into a browser or into Android Studio's tool window; because the WebRTC libraries from Chrome are incompatible with the emulator build, the video bridge is a *separate* executable that talks to the emulator over a socket and shared memory, as the README in `external/qemu/android/android-webrtc` spells out.
+On the display side there are two front ends. The Qt desktop UI lives under `external/qemu/android/android-ui` (the `aemu-ui-qt` module and the `fishtank` app), and it is the classic green-bordered window with the side toolbar. The WebRTC path lets the emulator stream into a browser or into Android Studio's tool window. The WebRTC libraries from Chrome are incompatible with the emulator build. For this reason the video bridge is a *separate* executable. It talks to the emulator over a socket and shared memory, as the README in `external/qemu/android/android-webrtc` spells out.
 
 Control plane and front ends over the agent vtable
 
@@ -285,9 +297,9 @@ The Qt UI is Chapter 22; WebRTC and the embedded emulator are Chapter 23; the co
 
 It helps to place the emulator between two reference points: a generic virtual machine, and Cuttlefish.
 
-A plain VM (think a Linux guest under stock QEMU/KVM or VirtualBox) gives you a virtual CPU, some virtio devices, and a framebuffer. It has no concept of a battery, a cellular modem, accelerometer data, or a fake GPS fix, and it has no GPU-streaming layer that hands guest GL calls to your host GPU. The Android Emulator adds exactly those things: the `android-emu` feature library, the agent vtable, the gfxstream graphics path, and the Android control plane. That is the difference between "a Linux box in a window" and "a phone in a window."
+A plain VM (think a Linux guest under stock QEMU/KVM or VirtualBox) gives you a virtual CPU, some virtio devices, and a framebuffer. It has no concept of a battery, a cellular modem, accelerometer data, or a fake GPS fix. It also has no GPU-streaming layer that hands guest GL calls to your host GPU. The Android Emulator adds exactly those things: the `android-emu` feature library, the agent vtable, the gfxstream graphics path, and the Android control plane. That is the difference between "a Linux box in a window" and "a phone in a window."
 
-Cuttlefish is the other reference point. It is also a real Android image in a VM, but it is engineered for a different audience — Google's own Android platform and CI testing on Linux servers — and it is built on a different virtual machine monitor. Cuttlefish runs on crosvm (referenced throughout `device/google/cuttlefish/host`), is orchestrated by host commands like `assemble_cvd` and `run_cvd` under `device/google/cuttlefish/host/commands`, and targets `vsoc_*` device configs. It shares the *idea* of gfxstream graphics and virtio devices with the emulator, but its host code is almost entirely separate from `external/qemu`.
+Cuttlefish is the other reference point. It is also a real Android image in a VM. It is engineered for a different audience: Google's own Android platform and CI testing on Linux servers. It is also built on a different virtual machine monitor. Cuttlefish runs on crosvm (referenced throughout `device/google/cuttlefish/host`), is orchestrated by host commands like `assemble_cvd` and `run_cvd` under `device/google/cuttlefish/host/commands`, and targets `vsoc_*` device configs. It shares the *idea* of gfxstream graphics and virtio devices with the emulator, but its host code is almost entirely separate from `external/qemu`.
 
 Emulator versus plain VM versus Cuttlefish
 
@@ -316,12 +328,12 @@ The contrast matters because the two products are often confused. If you are an 
 
 The book is organized bottom to top: each part builds on the layer below it, mirroring the layer cake from Section 1.4. Here is how the parts map onto the architecture you have just met.
 
-1. Part I — Getting Started: what the emulator is (this chapter), how the source is laid out and built (Chapter 2), and how to run it (Chapter 3).
-2. Part II — QEMU and Virtualization: the QEMU fork (Chapter 4), hypervisor backends (KVM, Hypervisor.framework, WHPX) and the TCG binary-translation fallback (Chapter 5), and the virtio and goldfish virtual hardware (Chapter 6).
-3. Part III — Core Emulation: the `android-emu` architecture and the agent vtable (Chapter 7), the console and gRPC control plane (Chapter 8), snapshots and Quickboot (Chapter 9), and sensors, battery, and location (Chapter 10).
+1. Part I — Getting Started. It covers what the emulator is (this chapter), how the source is laid out and built (Chapter 2), and how to run it (Chapter 3).
+2. Part II — QEMU and Virtualization. It covers the QEMU fork (Chapter 4). It also covers hypervisor backends (KVM, Hypervisor.framework, WHPX) and the TCG binary-translation fallback (Chapter 5). The last topic is the virtio and goldfish virtual hardware (Chapter 6).
+3. Part III — Core Emulation. It covers the `android-emu` architecture and the agent vtable (Chapter 7), and the console and gRPC control plane (Chapter 8). It also covers snapshots and Quickboot (Chapter 9), and sensors, battery, and location (Chapter 10).
 4. Part IV — Graphics: the graphics architecture (Chapter 11), guest GPU drivers (Chapter 12), host rendering (Chapter 13), and the gfxstream protocol (Chapter 14).
 5. Parts V through VII — Media and Display, Connectivity, and UI and Streaming: audio, camera, multi-display, networking, Bluetooth, ADB, telephony, the Qt UI, and WebRTC.
-6. Parts VIII through X — Guest Integration, Cuttlefish, and Infrastructure: system images and the goldfish HAL, guest boot, Cuttlefish and crosvm, and finally testing, debugging, and tracing.
+6. Parts VIII through X — Guest Integration, Cuttlefish, and Infrastructure. They cover system images and the goldfish HAL, guest boot, Cuttlefish and crosvm, and finally testing, debugging, and tracing.
 
 If at any point you lose the thread of *which layer am I in*, come back to the layer-cake diagram in Section 1.4. Every chapter is one box in it.
 
@@ -329,25 +341,25 @@ If at any point you lose the thread of *which layer am I in*, come back to the l
 
 You can confirm the architecture described in this chapter on your own machine.
 
-- Find the engine binaries the launcher execs. From an SDK install, list the QEMU directory: `ls emulator/qemu/` will show per-host directories like `linux-x86_64`, each containing `qemu-system-x86_64` and friends — the engine binaries from Section 1.3.
+- Find the engine binaries the launcher execs. From an SDK install, list the QEMU directory with `ls emulator/qemu/`. It shows per-host directories like `linux-x86_64`. Each directory contains `qemu-system-x86_64` and friends, the engine binaries from Section 1.3.
 
-- Watch the launcher hand off to the engine. Run `emulator -avd <name> -verbose 2>&1 | head -40` and look for the resolved AVD, the chosen ABI, and the full command line the launcher builds before it execs the engine.
+- Watch the launcher hand off to the engine. Run `emulator -avd <name> -verbose 2>&1 | head -40`. Look for the resolved AVD and the chosen ABI. Also look for the full command line that the launcher builds before it execs the engine.
 
 - Talk to the control plane. With an emulator running, connect to the telnet console: `telnet localhost 5554`, then type `help`. Each command you see (`rotate`, `power`, `sms send`, `gps fix`) calls through the agent vtable from Section 1.5.
 
-- See the gRPC surface. Run `adb devices` to confirm the guest is reachable, then inspect the running emulator's advertised ports — the gRPC `EmulatorController` is what Android Studio's device streaming uses, defined under `external/qemu/android/android-grpc/services/emulator-controller`.
+- See the gRPC surface. Run `adb devices` to confirm the guest is reachable. Then inspect the running emulator's advertised ports. The gRPC `EmulatorController` is what Android Studio's device streaming uses. It is defined under `external/qemu/android/android-grpc/services/emulator-controller`.
 
 - Browse the source split. In a checkout, compare `ls external/qemu/android/android-emu/android` (the core feature surface), `ls external/qemu/android-qemu2-glue` (the QEMU-backed agent implementations), and `ls hardware/google/gfxstream/host` (the graphics renderer). The directory names line up with the layers in Section 1.4.
 
 ## Summary
 
-- The Android Emulator boots a real, unmodified Android system image inside a forked QEMU virtual machine; it is not a framework reimplementation, not stock QEMU, and not Cuttlefish.
-- The host process is split into layers: the QEMU engine plus `android-qemu2-glue`, the `android-emu` core on top of the `aemu` base library, the gfxstream graphics path, the gRPC and telnet control plane, and the Qt and WebRTC front ends.
+- The Android Emulator boots a real, unmodified Android system image inside a forked QEMU virtual machine. It is not a framework reimplementation, not stock QEMU, and not Cuttlefish.
+- The host process is split into layers. These layers are the QEMU engine plus `android-qemu2-glue`, and the `android-emu` core on top of the `aemu` base library. They also include the gfxstream graphics path, the gRPC and telnet control plane, and the Qt and WebRTC front ends.
 - The decoupling between layers is made concrete by the `AndroidConsoleAgents` vtable in `external/qemu/android/emu/agents/include/android/console.h`: the core calls `getConsoleAgents()`, and the glue injects QEMU-backed implementations at startup.
-- The emulator forks QEMU to add Android-specific boards (the "ranchu" machine for ARM/MIPS guests; standard QEMU PC boards extended with goldfish devices for x86/x86_64 guests), a fast guest-host pipe (`goldfish_pipe`), and the linkage against `android-emu`, while keeping the QEMU engine itself lightly patched.
-- A tiny launcher (`main-emulator.cpp`) resolves the AVD and `exec`s the architecture-specific `qemu-system-*` engine binary, which then runs the QEMU main loop and the injected agents in one address space.
+- The emulator forks QEMU to add Android-specific boards. These are the "ranchu" machine for ARM/MIPS guests, and standard QEMU PC boards extended with goldfish devices for x86/x86_64 guests. It also adds a fast guest-host pipe (`goldfish_pipe`) and the linkage against `android-emu`. The QEMU engine itself stays lightly patched.
+- A tiny launcher (`main-emulator.cpp`) resolves the AVD and `exec`s the architecture-specific `qemu-system-*` engine binary. This binary then runs the QEMU main loop and the injected agents in one address space.
 - Graphics are virtualized by gfxstream: the guest serializes GL/Vulkan calls into a command stream that the host renderer replays on the real GPU.
-- Compared to a plain VM, the emulator adds Android-specific hardware emulation, GPU streaming, and a control plane; compared to Cuttlefish, it uses a different VMM (forked QEMU versus crosvm) and an almost entirely separate host codebase.
+- Compared to a plain VM, the emulator adds Android-specific hardware emulation, GPU streaming, and a control plane. Compared to Cuttlefish, it uses a different VMM (forked QEMU versus crosvm) and an almost entirely separate host codebase.
 
 ### Key Source Files
 

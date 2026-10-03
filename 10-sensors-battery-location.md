@@ -1,14 +1,18 @@
 # Chapter 10: Sensors, Battery, and Location
 
-A physical Android phone has accelerometers, gyroscopes, a magnetometer, a battery gauge, and a GPS receiver. A virtual device has none of these. The emulator's job is to manufacture believable values for all of them: when you tilt the emulator window, the guest's accelerometer must report gravity rotating; when you drag a marker on the map, the guest's location provider must produce a fix; when you tell the device the charger is unplugged, the framework's battery service must see the AC line drop. This chapter follows three independent simulation pipelines from the host control plane down to the guest, and shows that each one uses a different transport: sensors ride a `qemud` pipe, the battery is a memory-mapped device register block, and GPS is a serial character stream carrying NMEA text.
+A physical Android phone has accelerometers, gyroscopes, a magnetometer, a battery gauge, and a GPS receiver. A virtual device has none of these. The emulator's job is to manufacture believable values for all of them. When you tilt the emulator window, the guest's accelerometer must report that gravity rotates. When you drag a marker on the map, the guest's location provider must produce a fix. When you tell the device the charger is unplugged, the framework's battery service must see the AC line drop.
 
-The most interesting piece is the sensor side. Rather than letting callers poke raw accelerometer numbers directly into the guest, the emulator runs a small rigid-body physics engine. You set a *target* device rotation or position, and the model interpolates a smooth trajectory, then differentiates that trajectory to derive the acceleration and angular velocity an accelerometer and gyroscope would actually measure. Gravity, the magnetic field, ambient light, and temperature live in a parallel "ambient environment" model. The guest sensor HAL never knows any of this exists; it just reads `acceleration:<x>:<y>:<z>` lines off a pipe.
+This chapter follows three independent simulation pipelines from the host control plane down to the guest. Each pipeline uses a different transport. Sensors ride a `qemud` pipe. The battery is a memory-mapped device register block. GPS is a serial character stream that carries NMEA text.
+
+The most interesting piece is the sensor side. The emulator does not let callers poke raw accelerometer numbers directly into the guest. Instead, it runs a small rigid-body physics engine. You set a *target* device rotation or position. The model interpolates a smooth trajectory. Then it differentiates that trajectory to derive the acceleration and angular velocity that an accelerometer and gyroscope would actually measure.
+
+Gravity, the magnetic field, ambient light, and temperature live in a parallel "ambient environment" model. The guest sensor HAL never knows any of this exists; it just reads `acceleration:<x>:<y>:<z>` lines off a pipe.
 
 ---
 
 ## 10.1 Three Sensors, Three Transports
 
-Before diving into any one subsystem it helps to see that "sensors, battery, and location" are three unrelated mechanisms that happen to share a chapter because they are all environmental inputs. They do not share code, transport, or even a host thread model.
+Before you study any one subsystem, it helps to see that "sensors, battery, and location" are three unrelated mechanisms. They share a chapter because they are all environmental inputs. They do not share code, transport, or even a host thread model.
 
 The sensor list itself is defined once, as an X-macro, in `external/qemu/android/android-emu/android/hw-sensors.h`. Each entry binds an enum name, a guest-facing wire name, a physical-model getter suffix, a value type, and a wire format string:
 
@@ -25,7 +29,7 @@ The sensor list itself is defined once, as an X-macro, in `external/qemu/android
     ...
 ```
 
-The same header carries the warning "DO NOT CHANGE THE ORDER IN THIS LIST, UNLESS YOU INTEND TO BREAK SNAPSHOTS" because the bit index of each sensor is serialized into the per-client `enabledMask` saved in snapshots. The X-macro is expanded several times in `hw-sensors.cpp` and `PhysicalModel.cpp` to generate the enum, the serializer, the getters, and the override setters, so a single list keeps all of them in lockstep.
+The same header carries the warning "DO NOT CHANGE THE ORDER IN THIS LIST, UNLESS YOU INTEND TO BREAK SNAPSHOTS". The reason is that the bit index of each sensor is serialized into the per-client `enabledMask` saved in snapshots. The X-macro is expanded several times in `hw-sensors.cpp` and `PhysicalModel.cpp` to generate the enum, the serializer, the getters, and the override setters. Because of this, a single list keeps all of them in lockstep.
 
 ### 10.1.1 Mapping each input to its transport
 
@@ -72,7 +76,7 @@ h->service = qemud_service_register("sensors", 0, h, _hwSensors_connect,
                                     _hwSensors_save, _hwSensors_load);
 ```
 
-When the guest sensor HAL opens `qemud:sensors`, `_hwSensors_connect` allocates a `HwSensorClient` and wires up receive, close, save, and load callbacks, then enables length framing so each message is a discrete record:
+When the guest sensor HAL opens `qemud:sensors`, `_hwSensors_connect` allocates a `HwSensorClient`. It wires up receive, close, save, and load callbacks. Then it enables length framing, so each message is a discrete record:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/hw-sensors.cpp
@@ -103,7 +107,7 @@ for (nn = 0; nn < MAX_SENSORS; nn++) {
 }
 ```
 
-Note the asymmetry: the *AVD configuration* decides which sensors physically exist (the `enabled` flag), while the *guest HAL* decides which of those existing sensors it currently wants reports for (the `enabledMask`). A `set:` for a sensor whose `enabled` flag is false is silently dropped.
+Note the asymmetry. The *AVD configuration* decides which sensors physically exist (the `enabled` flag). The *guest HAL* decides which of those existing sensors it currently wants reports for (the `enabledMask`). A `set:` for a sensor whose `enabled` flag is false is silently dropped.
 
 ### 10.2.2 The reporting tick
 
@@ -123,7 +127,9 @@ for (size_t sensor_id = 0; sensor_id < MAX_SENSORS; ++sensor_id) {
 }
 ```
 
-Two timing rules in this function are worth calling out. First, the guest clock is sampled *before* any data is sent, because the Android sensor CTS requires the `sync:` timestamp to be no later than the moment the event arrives. Second, the re-arm delay is clamped: anything under 10 ms becomes 10 ms so the timer cannot starve the main QEMU loop, and CTS hardware tests also cap the maximum update rate. Each value carries a `measurement_id`, and `serializeSensorValue` only re-serializes a sensor when its measurement id changed, so a sensor sitting at rest does not waste cycles re-formatting an identical line.
+Two timing rules in this function are worth noting. First, the guest clock is sampled *before* any data is sent. This is because the Android sensor CTS requires the `sync:` timestamp to be no later than the moment the event arrives. Second, the re-arm delay is clamped. Anything under 10 ms becomes 10 ms. This way the timer cannot starve the main QEMU loop, and CTS hardware tests also cap the maximum update rate.
+
+Each value carries a `measurement_id`. `serializeSensorValue` only re-serializes a sensor when its measurement id changed. Because of this, a sensor at rest does not waste cycles to re-format an identical line.
 
 The serializer also has a quietly important locale fix. Sensor values are formatted with `%g`, which on some host locales emits a comma decimal separator. `_hwSensorClient_sanitizeSensorString` rewrites every comma to a period before the line goes on the wire, because the guest parser only understands `.`:
 
@@ -191,11 +197,11 @@ extern int android_physical_model_set(int physical_parameter,
 }
 ```
 
-The interpolation mode is one of two values defined in `external/qemu/android/android-emu/android/physics/Physics.h`: `PHYSICAL_INTERPOLATION_STEP` jumps instantly to the target with no derived motion, while `PHYSICAL_INTERPOLATION_SMOOTH` animates a trajectory toward it. A getter can ask for one of four value types — `PARAMETER_VALUE_TYPE_TARGET`, `..._CURRENT`, `..._CURRENT_NO_AMBIENT_MOTION`, or `..._DEFAULT` — which is how the model distinguishes "where you asked the device to be" from "where it is right now mid-animation".
+The interpolation mode is one of two values defined in `external/qemu/android/android-emu/android/physics/Physics.h`. `PHYSICAL_INTERPOLATION_STEP` jumps instantly to the target with no derived motion. `PHYSICAL_INTERPOLATION_SMOOTH` animates a trajectory toward it. A getter can ask for one of four value types: `PARAMETER_VALUE_TYPE_TARGET`, `..._CURRENT`, `..._CURRENT_NO_AMBIENT_MOTION`, or `..._DEFAULT`. This is how the model distinguishes "where you asked the device to be" from "where it is right now mid-animation".
 
 ### 10.3.2 Deriving acceleration from a smooth trajectory
 
-When you set a smooth rotation or position target, `InertialModel` solves for a polynomial that moves from the current state to the target while keeping position, velocity, acceleration, and jerk continuous. The transition time scales with distance, bounded by two constants in `InertialModel.h`:
+When you set a smooth rotation or position target, `InertialModel` solves for a polynomial. The polynomial moves from the current state to the target and keeps position, velocity, acceleration, and jerk continuous. The transition time scales with distance. Two constants in `InertialModel.h` bound it:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/physics/InertialModel.h
@@ -203,9 +209,11 @@ constexpr float kMaxStateChangeTimeSeconds = 0.5f;
 constexpr float kMinStateChangeTimeSeconds = 0.05f;
 ```
 
-`setTargetPosition` reads the current position, velocity, acceleration, and jerk, then fits a heptic (seventh-order) curve from that initial state to the target with zero velocity, acceleration, and jerk at the end. A `STEP` change skips all of that and snaps the transform directly, deliberately producing no acceleration or velocity. Crucially, the acceleration a sensor reports is the *second derivative* of this fitted curve, not a number anyone typed in — that is what makes an emulated "shake" or "rotate" produce physically plausible accelerometer traces.
+`setTargetPosition` reads the current position, velocity, acceleration, and jerk. Then it fits a heptic (seventh-order) curve from that initial state to the target. The curve has zero velocity, acceleration, and jerk at the end. A `STEP` change skips all of that and snaps the transform directly. It deliberately produces no acceleration or velocity.
 
-The payoff is in the sensor getters. The accelerometer does not return the rigid body's acceleration in world space; it returns body-frame acceleration minus gravity, exactly as a real device's accelerometer measures specific force:
+Crucially, the acceleration a sensor reports is the *second derivative* of this fitted curve. It is not a number anyone typed in. This is what makes an emulated "shake" or "rotate" produce physically plausible accelerometer traces.
+
+The payoff is in the sensor getters. The accelerometer does not return the rigid body's acceleration in world space. It returns body-frame acceleration minus gravity, exactly as a real device's accelerometer measures specific force:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/physics/PhysicalModel.cpp
@@ -230,7 +238,7 @@ vec3 PhysicalModelImpl::getPhysicalMagnetometer() const {
 }
 ```
 
-This is why merely rotating a device that is sitting still still produces a gyroscope reading (non-zero angular velocity during the animation) and changes both the accelerometer and magnetometer readings (the constant gravity and field vectors rotate into a new body frame).
+This is why merely rotating a device at rest still produces a gyroscope reading (non-zero angular velocity during the animation). It also changes both the accelerometer and magnetometer readings (the constant gravity and field vectors rotate into a new body frame).
 
 Diagram: the physical model converting a target pose into device-frame sensor readings
 
@@ -267,7 +275,7 @@ static constexpr glm::vec3 kDefaultMagneticField =
 static constexpr glm::vec3 kDefaultGravity = glm::vec3(0.f, -9.81f, 0.f);
 ```
 
-Gravity points along negative Y at 9.81 m/s² and the magnetic field roughly matches the Earth's field at a mid-latitude. Two more defaults are written explicitly at the end of `_hwSensors_init`: pressure is set to one standard atmosphere (1013.25 hPa) and proximity is set to 1 cm, so a freshly booted device reports believable barometer and proximity values even before anyone touches them.
+Gravity points along negative Y at 9.81 m/s² and the magnetic field roughly matches the Earth's field at a mid-latitude. Two more defaults are written explicitly at the end of `_hwSensors_init`. Pressure is set to one standard atmosphere (1013.25 hPa). Proximity is set to 1 cm. As a result, a freshly booted device reports believable barometer and proximity values even before anyone touches them.
 
 ## 10.4 Setting Sensors and Physics from the Control Plane
 
@@ -288,11 +296,11 @@ if (hw->service != NULL) {
 }
 ```
 
-The console exposes this as `sensor set <name> <a>[:<b>:<c>]`, handled by `do_sensors_set` in `external/qemu/android/android-emu/android/console.cpp`, which parses the colon-separated values, queries the sensor's expected element count with `android_sensors_get_size`, and calls `android_sensors_override_set`. The matching `sensor get <name>` reads them back.
+The console exposes this as `sensor set <name> <a>[:<b>:<c>]`, which `do_sensors_set` in `external/qemu/android/android-emu/android/console.cpp` handles. It parses the colon-separated values, queries the sensor's expected element count with `android_sensors_get_size`, and calls `android_sensors_override_set`. The matching `sensor get <name>` reads them back.
 
 ### 10.4.2 The gRPC sensor and physics RPCs
 
-The gRPC surface is defined in `external/qemu/android/android-grpc/python/aemu-grpc/src/aemu/proto/emulator_controller.proto`, with `getSensor`/`setSensor`/`streamSensor` on `SensorValue` and `getPhysicalModel`/`setPhysicalModel`/`streamPhysicalModel` on `PhysicalModelValue`. The proto deliberately documents that `PhysicalType` "must follow the order defined in external/qemu/android/hw-sensors.h" — the enum is a mirror of the X-macro list. `setPhysicalModel` in `EmulatorService.cpp` maps the proto interpolation enum to the C enum and forwards to the agent:
+The gRPC surface is defined in `external/qemu/android/android-grpc/python/aemu-grpc/src/aemu/proto/emulator_controller.proto`, with `getSensor`/`setSensor`/`streamSensor` on `SensorValue` and `getPhysicalModel`/`setPhysicalModel`/`streamPhysicalModel` on `PhysicalModelValue`. The proto deliberately documents that `PhysicalType` "must follow the order defined in external/qemu/android/hw-sensors.h". The enum is a mirror of the X-macro list. `setPhysicalModel` in `EmulatorService.cpp` maps the proto interpolation enum to the C enum and forwards to the agent:
 
 ```cpp
 // Source: external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
@@ -303,7 +311,7 @@ mAgents->sensors->setPhysicalParameterTarget(
 return Status::OK;
 ```
 
-The `stream*` variants exist so a client can subscribe and receive a new message every time the value changes, which is how a remote UI keeps a live readout without polling.
+The `stream*` variants let a client subscribe and receive a new message every time the value changes. A remote UI uses this to keep a live readout without polling.
 
 ### 10.4.3 Coarse orientation: rotating the window
 
@@ -320,7 +328,7 @@ _hwSensors_setPhysicalParameterValue(h, PHYSICAL_PARAMETER_ROTATION,
                                      PHYSICAL_INTERPOLATION_STEP);
 ```
 
-The comment in that function records a subtlety worth knowing: Android computes screen orientation from the accelerometer, not the orientation sensor, and the framework treats a 30-degree tilt along the device X axis as the ideal "upright" pose. A `skin_rotation_to_coarse_orientation` helper maps the four `SkinRotation` window states onto these orientations.
+The comment in that function records a subtlety worth knowing. Android computes screen orientation from the accelerometer, not the orientation sensor. The framework treats a 30-degree tilt along the device X axis as the ideal "upright" pose. A `skin_rotation_to_coarse_orientation` helper maps the four `SkinRotation` window states onto these orientations.
 
 ## 10.5 The Battery: A Memory-Mapped Goldfish Device
 
@@ -361,7 +369,7 @@ if (new_status != battery_state->int_status) {
 
 `int new_status = (ac ? AC_STATUS_CHANGED : BATTERY_STATUS_CHANGED);` distinguishes a charger-line change from a battery-property change, so the guest can tell which subsystem moved.
 
-The defaults are set in `goldfish_battery_realize`: 5 V, 25 °C (encoded as `temp = 250` in tenths of a degree), a 3 Ah full charge, and AC online. A device that declares it has a battery starts at 100 percent, `POWER_SUPPLY_STATUS_CHARGING`, and `POWER_SUPPLY_HEALTH_GOOD`; a device without one reports everything as unknown and absent.
+The defaults are set in `goldfish_battery_realize`. They are 5 V, 25 °C (encoded as `temp = 250` in tenths of a degree), a 3 Ah full charge, and AC online. A device that declares it has a battery starts at 100 percent, `POWER_SUPPLY_STATUS_CHARGING`, and `POWER_SUPPLY_HEALTH_GOOD`; a device without one reports everything as unknown and absent.
 
 ### 10.5.2 The battery agent and console commands
 
@@ -375,7 +383,7 @@ static void battery_setChargeLevel(int percentFull) {
 }
 ```
 
-There is a deliberate guard in `goldfish_battery_set_prop`: before the device is realized, the only property you can set is whether the device has a battery at all. The agent also translates the emulator's own `BatteryHealth`/`BatteryStatus` enums into the kernel `POWER_SUPPLY_*` constants the register block expects.
+`goldfish_battery_set_prop` has a deliberate guard. Before the device is realized, the only property you can set is whether the device has a battery at all. The agent also translates the emulator's own `BatteryHealth`/`BatteryStatus` enums into the kernel `POWER_SUPPLY_*` constants the register block expects.
 
 The console `power` command group in `console.cpp` is a thin shell over this agent. `power capacity <0-100>` calls `setChargeLevel`, `power ac on|off` calls `setIsCharging`, and `power status charging|discharging|...` calls `setStatus`:
 
@@ -416,7 +424,7 @@ flowchart LR
 
 ## 10.6 Location: NMEA Over a Serial Line
 
-Location is the third transport. The guest GPS HAL reads a serial character device, and the host writes it the same NMEA-0183 sentences a hardware receiver would emit. The host code lives in `external/qemu/android/emu/gps/src/android/gps.cpp`, which keeps the last fix in a handful of file-scope variables initialized to a fixed point in Mendocino County, California:
+Location is the third transport. The guest GPS HAL reads a serial character device, and the host writes it the same NMEA-0183 sentences a hardware receiver would emit. The host code lives in `external/qemu/android/emu/gps/src/android/gps.cpp`. It keeps the last fix in a handful of file-scope variables. They are initialized to a fixed point in Mendocino County, California:
 
 ```cpp
 // Source: external/qemu/android/emu/gps/src/android/gps.cpp
@@ -451,7 +459,7 @@ android_serialline_write(android_gps_serial_line, (const uint8_t*)sentence,
 android_serialline_write(android_gps_serial_line, (const uint8_t*)"\n", 1);
 ```
 
-Like the sensor serializer, the altitude formatter rewrites a locale comma into a period so the guest parses the decimal correctly. There is also a newer `GnssRpcV1` path, gated by `s_enable_gnssgrpcv1`, that sends a single structured `$GnssRpcV1,...` line whose field order must match the platform's `FixLocationParser`; it carries explicit accuracy values for position, speed, and heading that plain NMEA cannot express.
+Like the sensor serializer, the altitude formatter rewrites a locale comma into a period so the guest parses the decimal correctly. There is also a newer `GnssRpcV1` path, gated by `s_enable_gnssgrpcv1`. It sends a single structured `$GnssRpcV1,...` line. The field order of this line must match the platform's `FixLocationParser`. It carries explicit accuracy values for position, speed, and heading that plain NMEA cannot express.
 
 ### 10.6.2 Passive updates and route playback
 
@@ -473,7 +481,9 @@ void PassiveGpsUpdater::start() {
 }
 ```
 
-The function it calls is `android_gps_refresh`, which re-emits the stored coordinates with a fresh timestamp. Route playback in the location UI builds on this: `location-page-route-playback.cpp` precomputes a list of `mPlaybackElements`, each holding a latitude, longitude, elevation, and a *delay from the previous point*. For a route at a chosen speed it computes each segment's delay as `distFromPreviousPoint / stepSpeed`; for an imported GPX/KML track it reads each point's `delay_sec` and subtracts the previous point's so the stored cumulative delays become per-segment intervals. Playback then walks the list, sleeping each delay and calling the location agent's send function so the guest sees a moving fix.
+The function it calls is `android_gps_refresh`. It re-emits the stored coordinates with a fresh timestamp. Route playback in the location UI builds on this. `location-page-route-playback.cpp` precomputes a list of `mPlaybackElements`. Each element holds a latitude, longitude, elevation, and a *delay from the previous point*.
+
+For a route at a chosen speed, it computes each segment's delay as `distFromPreviousPoint / stepSpeed`. For an imported GPX/KML track, it reads each point's `delay_sec` and subtracts the previous point's. This way the stored cumulative delays become per-segment intervals. Playback then walks the list. It sleeps for each delay and calls the location agent's send function, so the guest sees a moving fix.
 
 ### 10.6.3 Setting location from the control plane
 
@@ -526,9 +536,9 @@ flowchart TB
 
 ## 10.7 Foldables, Postures, and Wearable Sensors
 
-The physical-parameter list reaches well beyond an inertial measurement unit. Three hinge angles (`HINGE_ANGLE0..2`), three rollable percentages (`ROLLABLE0..2`), and a `POSTURE` parameter let the model describe folding and rolling form factors, and `HEART_RATE`, `WRIST_TILT`, and `RGBC_LIGHT` cover wearables.
+The physical-parameter list reaches well beyond an inertial measurement unit. Three hinge angles (`HINGE_ANGLE0..2`), three rollable percentages (`ROLLABLE0..2`), and a `POSTURE` parameter let the model describe folding and rolling form factors. `HEART_RATE`, `WRIST_TILT`, and `RGBC_LIGHT` cover wearables.
 
-Folding is mediated by a `FoldableModel` inside the physical model. Setting a hinge angle through `setHingeAngle` recomputes the discrete posture via `calculatePosture`, which compares each hinge against the `AnglesToPosture` ranges configured for the device (the `struct AnglesToPosture` and `FoldablePostures` enum live in `hw-sensors.h`). The posture enum runs `POSTURE_UNKNOWN` (0), `POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, and `POSTURE_TENT`.
+Folding is mediated by a `FoldableModel` inside the physical model. `setHingeAngle` recomputes the discrete posture via `calculatePosture`. This function compares each hinge against the `AnglesToPosture` ranges configured for the device. The `struct AnglesToPosture` and `FoldablePostures` enum live in `hw-sensors.h`. The posture enum runs `POSTURE_UNKNOWN` (0), `POSTURE_CLOSED`, `POSTURE_HALF_OPENED`, `POSTURE_OPENED`, `POSTURE_FLIPPED`, and `POSTURE_TENT`.
 
 Diagram: hinge angle driving the discrete foldable posture state
 
@@ -543,7 +553,7 @@ stateDiagram-v2
     Opened --> Flipped : fully folded back
 ```
 
-The hinge-angle *sensors* (the `HINGE_ANGLE0..2` entries in `SENSORS_LIST`) are reported over the same `qemud` channel as the accelerometer, and `android_sensors_override_set` special-cases them to feed the hinge angle straight into the physical model:
+The hinge-angle *sensors* (the `HINGE_ANGLE0..2` entries in `SENSORS_LIST`) are reported over the same `qemud` channel as the accelerometer. `android_sensors_override_set` special-cases them to feed the hinge angle straight into the physical model:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/hw-sensors.cpp
@@ -553,7 +563,7 @@ case ANDROID_SENSOR_HINGE_ANGLE0:
     break;
 ```
 
-Wearable sensors are gated on AVD flavor. In `_hwSensors_init`, a Wear OS image at API 28 or higher auto-enables the heart-rate and wrist-tilt sensors even if the hardware config did not request them:
+Wearable sensors are gated on AVD flavor. In `_hwSensors_init`, a Wear OS image at API 28 or higher auto-enables the heart-rate and wrist-tilt sensors. This happens even if the hardware config did not request them:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/hw-sensors.cpp
@@ -563,11 +573,11 @@ if (wear28plus || hwCfg.hw_sensors_heart_rate) {
 }
 ```
 
-Similarly an Android Automotive image at API 35+ enables the `HEADING` sensor. The heart-rate value itself comes from `mBodyModel`, the fourth submodel, which simply stores and returns a beats-per-minute value with the same target/default machinery as the ambient quantities.
+Similarly an Android Automotive image at API 35+ enables the `HEADING` sensor. The heart-rate value itself comes from `mBodyModel`, the fourth submodel. It simply stores and returns a beats-per-minute value with the same target/default machinery as the ambient quantities.
 
 ## 10.8 State-Change Callbacks and Ground-Truth Recording
 
-A consumer of the physical model often needs to know not just the current value but *when* the device is moving, so it can wake up only while motion is happening. The model supports this through a `QAndroidPhysicalStateAgent` in `external/qemu/android/emu/agents/include/android/physics/physical_state_agent.h` with three callbacks:
+A consumer of the physical model often needs to know not just the current value but *when* the device is moving. This lets it wake up only while the device is in motion. The model supports this through a `QAndroidPhysicalStateAgent` in `external/qemu/android/emu/agents/include/android/physics/physical_state_agent.h` with three callbacks:
 
 ```c
 // Source: external/qemu/android/emu/agents/include/android/physics/physical_state_agent.h
@@ -590,7 +600,7 @@ static int do_physics_record_ground_truth(ControlClient client, char* args) {
 }
 ```
 
-This is what makes the sensor pipeline testable: a test can drive a sequence of targets, record the ground-truth trajectory, and compare it against what the guest's sensor fusion produced.
+This makes the sensor pipeline testable. A test can drive a sequence of targets, record the ground-truth trajectory, and compare it against what the guest's sensor fusion produced.
 
 ## 10.9 The Cuttlefish Contrast: A Separate Sensor Simulator
 
@@ -607,30 +617,32 @@ class SensorsSimulator {
 };
 ```
 
-The sensor identity is its own small set of constants in `device/google/cuttlefish/common/libs/sensors/sensors.h`, with `kAccelerationId = 0`, `kGyroscopeId = 1`, `kMagneticId = 2`, and `kMaxSensorId = 31`. The `SensorsMask` is an `int` bitmask, conceptually similar to the goldfish `enabledMask` but defined independently. The WebRTC frontend's `sensors_handler.cpp` calls `RefreshSensors` when the browser-based controls rotate the device and queries `GetSensorsData` to push values to the guest. The two implementations agree on the *idea* — a host process computes sensor values from a device rotation and serializes them as colon-separated strings — but share no source, which is worth remembering when a behavior differs between the two device types.
+The sensor identity is its own small set of constants in `device/google/cuttlefish/common/libs/sensors/sensors.h`, with `kAccelerationId = 0`, `kGyroscopeId = 1`, `kMagneticId = 2`, and `kMaxSensorId = 31`. The `SensorsMask` is an `int` bitmask, conceptually similar to the goldfish `enabledMask` but defined independently. The WebRTC frontend's `sensors_handler.cpp` calls `RefreshSensors` when the browser-based controls rotate the device and queries `GetSensorsData` to push values to the guest.
+
+The two implementations agree on the *idea*. A host process computes sensor values from a device rotation and serializes them as colon-separated strings. However, they share no source. This is worth remembering when a behavior differs between the two device types.
 
 ## 10.10 Try It
 
 These commands assume a running AVD whose console port is the usual `5554`. The console authentication token is in `~/.emulator_console_auth_token`; `telnet` and `auth <token>` once, then issue commands.
 
-- Read the live accelerometer: connect to the console and run `sensor get acceleration`. With the device upright you should see roughly `0 9.81 0` — the negation of `kDefaultGravity = (0, -9.81, 0)` in `AmbientEnvironment.h`, because the accelerometer reports specific force: `conj(R) * (accel - gravity)` evaluates to `(0, +9.81, 0)` for a stationary upright device.
+- Read the live accelerometer: connect to the console and run `sensor get acceleration`. With the device upright, you should see about `0 9.81 0`. This is the negation of `kDefaultGravity = (0, -9.81, 0)` in `AmbientEnvironment.h`. The accelerometer reports specific force, so `conj(R) * (accel - gravity)` evaluates to `(0, +9.81, 0)` for a stationary upright device.
 - Override a sensor: `sensor set acceleration 0:0:9.81` then `sensor get acceleration` to confirm. Run `sensor status` first to see which sensors the AVD actually has.
-- Watch the physics model animate: from the extended-controls "Virtual sensors" UI drag the rotation, then in the console repeatedly run `sensor get gyroscope` while it moves — you will see non-zero angular velocity that decays back to zero, the derivative of the interpolated trajectory.
+- Watch the physics model animate. In the extended-controls "Virtual sensors" UI, drag the rotation. Then in the console, run `sensor get gyroscope` repeatedly while the device moves. You will see non-zero angular velocity that decays back to zero. It is the derivative of the interpolated trajectory.
 - Drive the battery: `power display` to dump current state, then `power capacity 15`, `power ac off`, and `power status discharging`. The guest's battery icon updates because `goldfish_battery_set_prop` raised the change IRQ.
 - Move the device: `geo fix -122.084 37.422` sets a fix near the Googleplex (remember longitude comes first). Then open a maps or GPS-test app in the guest to see the marker jump.
 - Inject a raw sentence: `geo nmea $GPGGA,001431.092,4807.038,N,01131.000,E,1,12,1.0,546.0,M,46.9,M,,*47` sends a hand-built fix through the same serial path `android_gps_send_location` uses.
-- Record ground truth: `physics record-gt /tmp/gt.txt`, rotate the device a few times, then `physics stop`, and inspect the file to see the recorded trajectory.
+- Record ground truth: run `physics record-gt /tmp/gt.txt`. Rotate the device a few times. Then run `physics stop`. Inspect the file to see the recorded trajectory.
 
 ## Summary
 
-- "Sensors, battery, and location" are three independent pipelines that share only a chapter: sensors use a `qemud` ASCII pipe, the battery is a memory-mapped `goldfish_battery` device, and GPS is an NMEA character stream on a serial line.
+- "Sensors, battery, and location" are three independent pipelines that share only a chapter. Sensors use a `qemud` ASCII pipe. The battery is a memory-mapped `goldfish_battery` device. GPS is an NMEA character stream on a serial line.
 - The sensor list and the physical-parameter list are X-macros in `hw-sensors.h`; their order is frozen because the bit indices are serialized into snapshots.
-- The host never sets raw sensor numbers. It sets *targets* on a `PhysicalModel` whose `InertialModel` fits a smooth polynomial trajectory and differentiates it, so the accelerometer reports `conj(R) * (acceleration - gravity)` and the gyroscope reports body-frame angular velocity — physically plausible motion, not typed-in values.
+- The host never sets raw sensor numbers. It sets *targets* on a `PhysicalModel`. Its `InertialModel` fits a smooth polynomial trajectory and differentiates it. As a result, the accelerometer reports `conj(R) * (acceleration - gravity)` and the gyroscope reports body-frame angular velocity. The motion is physically plausible, not typed-in values.
 - `PHYSICAL_INTERPOLATION_STEP` snaps instantly with no derived motion; `PHYSICAL_INTERPOLATION_SMOOTH` animates over 0.05 to 0.5 seconds depending on distance.
-- The sensors `qemud` protocol is HAL-driven: `list-sensors`, `set:<name>:<flag>`, `set-delay:<ms>`, `wake`, and `time:<ns>`, with the host ticking out one framed line per enabled sensor plus `sync:` records, clamped to at least a 10 ms period.
-- The battery is just register reads plus a read-to-acknowledge change interrupt; the `QAndroidBatteryAgent` wraps `goldfish_battery_set_prop` under the VM lock, and console `power` / gRPC `setBattery` are thin shells over it.
-- GPS fixes become hand-built `$GPGGA` and `$GPRMC` sentences (or a structured `GnssRpcV1` line); a `PassiveGpsUpdater` re-emits the fix at 1 Hz and route playback walks a list of points with per-segment delays.
-- Foldables, rollables, postures, and wearable sensors (heart rate, wrist tilt) are all extra physical parameters in the same model; Wear and Automotive flavors auto-enable the relevant sensors during init.
+- The sensors `qemud` protocol is HAL-driven. Its messages are `list-sensors`, `set:<name>:<flag>`, `set-delay:<ms>`, `wake`, and `time:<ns>`. The host ticks out one framed line per enabled sensor plus `sync:` records. The period is clamped to at least 10 ms.
+- The battery is just register reads plus a read-to-acknowledge change interrupt. The `QAndroidBatteryAgent` wraps `goldfish_battery_set_prop` under the VM lock. Console `power` / gRPC `setBattery` are thin shells over it.
+- GPS fixes become hand-built `$GPGGA` and `$GPRMC` sentences (or a structured `GnssRpcV1` line). A `PassiveGpsUpdater` re-emits the fix at 1 Hz. Route playback walks a list of points with per-segment delays.
+- Foldables, rollables, postures, and wearable sensors (heart rate, wrist tilt) are all extra physical parameters in the same model. Wear and Automotive flavors auto-enable the relevant sensors during init.
 - Cuttlefish reimplements sensor simulation entirely in its own `sensors_simulator` host process and shares no code with the goldfish path.
 
 ### Key Source Files

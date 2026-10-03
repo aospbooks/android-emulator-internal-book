@@ -1,8 +1,10 @@
 # Chapter 22: The Qt UI
 
-When you launch the Android Emulator with a display, the window you see, the rounded phone bezel, the vertical toolbar with its rotate and screenshot buttons, the "Extended controls" panel where you fake a GPS fix or drain the battery, is all drawn by a Qt 6 application that lives in `external/qemu/android/android-ui/`. That Qt application is not the emulator core. The core (QEMU, the virtual CPU, the virtual input devices) runs on a *separate* thread, and the two halves communicate through a deliberately narrow set of interfaces: a C `skin_winsys_*` API in one direction, a queue of `SkinEvent` structs and a table of agent function pointers in the other.
+When you launch the Android Emulator with a display, a Qt 6 application in `external/qemu/android/android-ui/` draws what you see. This includes the window, the rounded phone bezel, the vertical toolbar with its rotate and screenshot buttons, and the "Extended controls" panel. In that panel you fake a GPS fix or drain the battery.
 
-This chapter follows a single mouse click from the moment Qt delivers a `QMouseEvent` to `EmulatorQtWindow` all the way down to `kbd_mouse_event_absolute()` inside QEMU, and the screen frame back up from the host GPU to the pixels you see. Along the way we look at how the skin file describes the bezel and buttons, how the toolbar and extended-controls panels reuse the very same event queue that real input uses, and how the UI calls into the core through the typed agent interfaces collected in `UiEmuAgent`.
+That Qt application is not the emulator core. The core (QEMU, the virtual CPU, the virtual input devices) runs on a *separate* thread. The two halves communicate through a deliberately narrow set of interfaces. A C `skin_winsys_*` API serves one direction. A queue of `SkinEvent` structs and a table of agent function pointers serve the other.
+
+This chapter follows a single mouse click from the moment Qt delivers a `QMouseEvent` to `EmulatorQtWindow` all the way down to `kbd_mouse_event_absolute()` inside QEMU. It then follows the screen frame back up from the host GPU to the pixels you see. Along the way, the chapter shows how the skin file describes the bezel and buttons. It shows how the toolbar and extended-controls panels reuse the very same event queue that real input uses. It also shows how the UI calls into the core through the typed agent interfaces collected in `UiEmuAgent`.
 
 ---
 
@@ -10,7 +12,7 @@ This chapter follows a single mouse click from the moment Qt delivers a `QMouseE
 
 The single most important fact about the Qt UI is that it does not run on the same thread as the emulator core. Qt owns the process's main thread and runs `QApplication::exec()`; the QEMU machine runs in a worker thread spawned by the UI.
 
-`skin_winsys_spawn_thread()` is the handoff. When the program decides to bring up the windowed UI, it asks the winsys layer to spawn the core's entry function on a new thread, then enters the Qt event loop on the original thread.
+`skin_winsys_spawn_thread()` is the handoff. When the program decides to bring up the windowed UI, it asks the winsys layer to spawn the core's entry function on a new thread. Then it enters the Qt event loop on the original thread.
 
 ```cpp
 // Source: external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/winsys-qt.cpp
@@ -29,11 +31,11 @@ extern void skin_winsys_spawn_thread(bool no_window,
 
 ### 22.1.1 Why the split exists
 
-Qt insists that all widget manipulation happen on the thread that created `QApplication`. QEMU, meanwhile, wants to own its own loop and block in its own select/poll. Putting them on one thread would force one to drive the other's event pump, which neither library tolerates well. Splitting them keeps each loop idiomatic, at the cost of needing a thread-safe channel between them, which is what the rest of this chapter is about.
+Qt insists that all widget manipulation happen on the thread that created `QApplication`. QEMU, meanwhile, wants to own its own loop and block in its own select/poll. Putting them on one thread would force one to drive the other's event pump, which neither library tolerates well. Splitting them keeps each loop idiomatic. The cost is a thread-safe channel between them. The rest of this chapter is about that channel.
 
 ### 22.1.2 Crossing back to the UI thread
 
-The core frequently needs the UI to do something, resize the window, repaint, show an error dialog, and those operations must run on the Qt thread. The bridge is `skin_winsys_run_ui_update()`, which marshals a function pointer onto the Qt thread and optionally blocks until it finishes:
+The core frequently needs the UI to do something: resize the window, repaint, or show an error dialog. Those operations must run on the Qt thread. The bridge is `skin_winsys_run_ui_update()`, which marshals a function pointer onto the Qt thread and optionally blocks until it finishes:
 
 ```cpp
 // Source: external/qemu/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/winsys-qt.cpp
@@ -50,7 +52,9 @@ void skin_winsys_run_ui_update(SkinGenericFunction f, void* data, bool wait) {
 }
 ```
 
-`runOnUiThread` is a Qt signal connected to `slot_runOnUiThread` through an ordinary (non-blocking) connection (`emulator-qt-window.cpp:750`). Because the signal is emitted from the QEMU thread but the slot executes on the Qt thread, Qt queues the call. The optional `QSemaphore` is how the caller blocks: the slot releases the semaphore when the lambda returns (`emulator-qt-window.cpp:3389`), so the QEMU thread can `acquire()` and know the UI work is done. The long comment in `emulator-qt-window.h` (lines 152 to 172) documents this pattern: every cross-thread signal in that header carries an optional `QSemaphore*` for exactly this reason.
+`runOnUiThread` is a Qt signal connected to `slot_runOnUiThread` through an ordinary (non-blocking) connection (`emulator-qt-window.cpp:750`). Because the signal is emitted from the QEMU thread but the slot executes on the Qt thread, Qt queues the call. The optional `QSemaphore` is how the caller blocks. The slot releases the semaphore when the lambda returns (`emulator-qt-window.cpp:3389`). So the QEMU thread can `acquire()` and know the UI work is done.
+
+The long comment in `emulator-qt-window.h` (lines 152 to 172) documents this pattern. Every cross-thread signal in that header carries an optional `QSemaphore*` for exactly this reason.
 
 UI-thread handoff for a core-initiated update
 
@@ -97,11 +101,11 @@ flowchart LR
     Tool --> TP
 ```
 
-`EmulatorQtWindow` holds its `EmulatorContainer` and `EmulatorOverlay` by value as its last members (`emulator-qt-window.h:688`), and it owns the `ToolWindow` pointer (`mToolWindow`). The `ToolWindow` in turn lazily constructs the `ExtendedWindow`, virtual scene window, and touchpad window through `MemberOnDemandT` holders (`tool-window.h:212`), so the heavyweight extended panel is not built until something needs it.
+`EmulatorQtWindow` holds its `EmulatorContainer` and `EmulatorOverlay` by value as its last members (`emulator-qt-window.h:688`), and it owns the `ToolWindow` pointer (`mToolWindow`). The `ToolWindow` in turn lazily constructs the `ExtendedWindow`, virtual scene window, and touchpad window through `MemberOnDemandT` holders (`tool-window.h:212`). So the heavyweight extended panel is not built until something needs it.
 
 ## 22.3 The Skin: Drawing the Device
 
-A "skin" is the artwork and geometry that makes the window look like a particular phone: the bezel image, where the screen sits inside it, and which on-screen hardware buttons exist. The skin engine is older C code that lives in the window module (`external/qemu/android/android-ui/modules/aemu-ui-window/src/android/skin/`), not in the Qt module. It is deliberately toolkit-agnostic.
+A "skin" is the artwork and geometry that makes the window look like a particular phone. It defines the bezel image, where the screen sits inside it, and which on-screen hardware buttons exist. The skin engine is older C code that lives in the window module (`external/qemu/android/android-ui/modules/aemu-ui-window/src/android/skin/`), not in the Qt module. It is deliberately toolkit-agnostic.
 
 ### 22.3.1 The skin file model
 
@@ -119,7 +123,7 @@ typedef struct SkinPart {
 } SkinPart;
 ```
 
-A `SkinButton` couples an image and a rectangle to a `keycode` (`file.h:49`). When you click inside a button's rectangle, the skin engine synthesizes the button's keycode as a key event, which is how an on-bezel "home" button works without any Android involvement. A `SkinLayout` is a named arrangement (portrait, landscape, folded, ...) that positions parts and records the framebuffer rotation (`file.h:85`).
+A `SkinButton` couples an image and a rectangle to a `keycode` (`file.h:49`). When you click inside a button's rectangle, the skin engine synthesizes the button's keycode as a key event. This is how an on-bezel "home" button works without any Android involvement. A `SkinLayout` is a named arrangement (portrait, landscape, folded, ...) that positions parts and records the framebuffer rotation (`file.h:85`).
 
 ### 22.3.2 Layout selection and the SkinUI object
 
@@ -139,7 +143,7 @@ ui->window = skin_window_create(
         ui->ui_funcs->window_funcs);
 ```
 
-The `SkinUI` struct (`ui.c:41`) is the heart of the engine: it owns the layout, the keyboard translation table, the `SkinWindow`, an optional trackball, and the onion-skin overlay used for screen masks.
+The `SkinUI` struct (`ui.c:41`) is the heart of the engine. It owns the layout, the keyboard translation table, the `SkinWindow`, an optional trackball, and the onion-skin overlay used for screen masks.
 
 ### 22.3.3 Painting the bezel versus the guest screen
 
@@ -162,11 +166,11 @@ if (!mGuestScreenPixmap.isNull()) {
 
 A `SkinSurface` is a thin struct over a `SkinSurfaceBitmap` (`emulator-qt-window.h:692` and `:731`) that wraps a `QImage` and supports lazy rotation and alpha blending. The bezel is uploaded once via the cross-thread `showWindow` signal (`slot_showWindow`, `emulator-qt-window.cpp:2488`), which stashes the surface in `mBackingSurface`. After that it only changes when the layout rotates or folds.
 
-The guest screen, on the other hand, normally does *not* go through `mGuestScreenPixmap` at all. When the host GPU is used, the guest frames are composited by an OpenGL sub-window placed directly over the Qt window, which we cover in Section 22.7. The `mGuestScreenPixmap` path is used by the shared-memory/streamed renderer (`SharedMemoryRenderer`, `emulator-qt-window.cpp:1779`), where each frame arrives as a `QImage` over the `frameReady` signal.
+The guest screen, on the other hand, normally does *not* go through `mGuestScreenPixmap` at all. When the host GPU is used, an OpenGL sub-window placed directly over the Qt window composites the guest frames. Section 22.7 covers this. The `mGuestScreenPixmap` path is used by the shared-memory/streamed renderer (`SharedMemoryRenderer`, `emulator-qt-window.cpp:1779`), where each frame arrives as a `QImage` over the `frameReady` signal.
 
 ## 22.4 The SkinEvent Queue: One Channel for All Input
 
-Every piece of input, real or synthetic, becomes a `SkinEvent` and lands in a single FIFO queue on `EmulatorQtWindow`. This is the central design idea of the input path. A `SkinEvent` is a tagged union (`external/qemu/android/android-ui/modules/aemu-ui-common/include/android/skin/event.h:200`) whose `type` field is one of the `SkinEventType` values, `kEventKeyDown`, `kEventMouseMotion`, `kEventTouchBegin`, `kEventRotaryInput`, and so on (`event.h:24`), and whose `u` member holds the matching per-type payload struct.
+Every piece of input, real or synthetic, becomes a `SkinEvent` and lands in a single FIFO queue on `EmulatorQtWindow`. This is the central design idea of the input path. A `SkinEvent` is a tagged union (`external/qemu/android/android-ui/modules/aemu-ui-common/include/android/skin/event.h:200`). Its `type` field is one of the `SkinEventType` values, `kEventKeyDown`, `kEventMouseMotion`, `kEventTouchBegin`, `kEventRotaryInput`, and so on (`event.h:24`). Its `u` member holds the matching per-type payload struct.
 
 ### 22.4.1 Producing events on the Qt thread
 
@@ -214,7 +218,7 @@ extern bool skin_event_poll(SkinEvent* event) {
 }
 ```
 
-`pollEvent` pops the front of the queue under the same mutex (`emulator-qt-window.cpp:2281`). The core loops on `skin_event_poll` inside `skin_ui_process_events`, dispatching each event by type (`external/qemu/android/android-ui/modules/aemu-ui-window/src/android/skin/ui.c:272`). This is the thread boundary: producers run on the Qt thread, the consumer runs on the QEMU thread, and the `std::mutex` plus the `onNewUserEvent` wakeup are the only coordination.
+`pollEvent` pops the front of the queue under the same mutex (`emulator-qt-window.cpp:2281`). The core loops on `skin_event_poll` inside `skin_ui_process_events`, dispatching each event by type (`external/qemu/android/android-ui/modules/aemu-ui-window/src/android/skin/ui.c:272`). This is the thread boundary. Producers run on the Qt thread, and the consumer runs on the QEMU thread. The `std::mutex` plus the `onNewUserEvent` wakeup are the only coordination.
 
 The unified input channel
 
@@ -282,7 +286,9 @@ static const QAndroidUserEventAgent sQAndroidUserEventAgent = {
 };
 ```
 
-`sendKey` (`user_event_key`, lines 64–74) sets the down-flag by OR-ing bit 0x400 into the code and then delegates to `sendKeyCode` (`user_event_keycode`, lines 32–53), which constructs a QEMU `InputEvent` of kind `INPUT_EVENT_KIND_KEY` and enqueues it on the active console. `sendMouseEvent` calls `kbd_mouse_event` for relative motion or `kbd_mouse_event_absolute` for absolute, choosing based on the device driver mode and feature flags (`qemu-user-event-agent-impl.c:112`). Touch and pen events go through `android_virtio_send_touch_as_mt` / `android_virtio_send_pen_as_mt` into the virtio multi-touch device (`qemu-user-event-agent-impl.c:103`, `:157`). From there the events are exactly what the virtual input devices deliver to the guest kernel.
+`sendKey` (`user_event_key`, lines 64–74) sets the down-flag. It ORs bit 0x400 into the code. Then it delegates to `sendKeyCode` (`user_event_keycode`, lines 32–53). That function constructs a QEMU `InputEvent` of kind `INPUT_EVENT_KIND_KEY` and enqueues it on the active console.
+
+`sendMouseEvent` calls `kbd_mouse_event` for relative motion or `kbd_mouse_event_absolute` for absolute, choosing based on the device driver mode and feature flags (`qemu-user-event-agent-impl.c:112`). Touch and pen events go through `android_virtio_send_touch_as_mt` / `android_virtio_send_pen_as_mt` into the virtio multi-touch device (`qemu-user-event-agent-impl.c:103`, `:157`). From there the events are exactly what the virtual input devices deliver to the guest kernel.
 
 End-to-end input pipeline, click to guest
 
@@ -354,7 +360,7 @@ So clicking the toolbar's Home button (`QtUICommand::HOME`) maps to `forwardKeyT
 
 ### 22.6.3 Keyboard shortcuts
 
-The toolbar also owns a `ShortcutKeyStore<QtUICommand>` seeded with defaults in the constructor, for example `Ctrl+S TAKE_SCREENSHOT`, `Ctrl+P POWER`, `Ctrl+Backspace BACK` (`tool-window.cpp:280` to `:313`). `handleQtKeyEvent` (`tool-window.cpp:1487`) consults this store before the key is treated as device input, giving the virtual scene and touchpad windows first refusal, then matching a shortcut to its `QtUICommand`.
+The toolbar also owns a `ShortcutKeyStore<QtUICommand>` seeded with defaults in the constructor, for example `Ctrl+S TAKE_SCREENSHOT`, `Ctrl+P POWER`, `Ctrl+Backspace BACK` (`tool-window.cpp:280` to `:313`). `handleQtKeyEvent` (`tool-window.cpp:1487`) consults this store before the key is treated as device input. It gives the virtual scene and touchpad windows first refusal. Then it matches a shortcut to its `QtUICommand`.
 
 Toolbar command routing
 
@@ -377,7 +383,7 @@ The guest's framebuffer is almost never copied through Qt's painter when a GPU i
 
 ### 22.7.1 The OpenGL sub-window
 
-When the skin window needs to (re)place the GL sub-window, it builds a `gles_show_data` describing the position, size, framebuffer dimensions, rotation, and device-pixel ratio, then calls through the window functions:
+When the skin window needs to (re)place the GL sub-window, it builds a `gles_show_data`. The struct describes the position, size, framebuffer dimensions, rotation, and device-pixel ratio. Then it calls through the window functions:
 
 ```c
 // Source: external/qemu/android/android-ui/modules/aemu-ui-window/src/android/skin/window.c
@@ -395,7 +401,9 @@ The wrapper `emulator_window_opengles_show_window` (`emulator-window.c:196`) for
 
 ### 22.7.2 The streamed/shared-memory path
 
-When there is no host GL sub-window, for example a headless host or the gRPC-driven `fishtank` shell, frames arrive as images. `EmulatorQtWindow::initializeStreamer` constructs a `SharedStreamEmulator`, the gRPC stream manager that listens for new frames; for MMAP transport it pairs it with a `SharedMemoryRenderer`, and otherwise its frame callback decodes the streamed PNG/raw frames. Either way the window emits `frameReady(QImage)`, which is connected to `slot_updateGuestScreen` (`emulator-qt-window.cpp:1789`). That slot updates `mGuestScreenPixmap`, and the next `paintEvent` blits it (Section 22.3.3). Multi-display secondary windows use `MultiDisplayWidget`, a `GLWidget` subclass that paints a guest texture per extra display (`multi-display-widget.h:23`).
+When there is no host GL sub-window, for example a headless host or the gRPC-driven `fishtank` shell, frames arrive as images. `EmulatorQtWindow::initializeStreamer` constructs a `SharedStreamEmulator`, the gRPC stream manager that listens for new frames. For MMAP transport it pairs it with a `SharedMemoryRenderer`. Otherwise its frame callback decodes the streamed PNG/raw frames. Either way the window emits `frameReady(QImage)`, which is connected to `slot_updateGuestScreen` (`emulator-qt-window.cpp:1789`). That slot updates `mGuestScreenPixmap`, and the next `paintEvent` blits it (Section 22.3.3).
+
+Multi-display secondary windows use `MultiDisplayWidget`, a `GLWidget` subclass that paints a guest texture per extra display (`multi-display-widget.h:23`).
 
 Two rendering paths for guest frames
 
@@ -418,7 +426,7 @@ flowchart TD
 
 ## 22.8 The Extended Window and the Agents
 
-"Extended controls" is a tabbed panel, one tab per emulated subsystem. The pane order is fixed by the `ExtendedWindowPane` enum, which must match the tab order baked into `extended.ui` (`external/qemu/android/emu/host-common/include/host-common/qt_ui_defs.h:36`): `PANE_IDX_LOCATION`, `PANE_IDX_MULTIDISPLAY`, `PANE_IDX_CELLULAR`, `PANE_IDX_BATTERY`, and so on.
+"Extended controls" is a tabbed panel, one tab per emulated subsystem. The pane order is fixed by the `ExtendedWindowPane` enum. The enum must match the tab order baked into `extended.ui` (`external/qemu/android/emu/host-common/include/host-common/qt_ui_defs.h:36`). The values are `PANE_IDX_LOCATION`, `PANE_IDX_MULTIDISPLAY`, `PANE_IDX_CELLULAR`, `PANE_IDX_BATTERY`, and so on.
 
 ### 22.8.1 One agent per subsystem
 
@@ -456,9 +464,9 @@ if (mCurrentState.charger != state.charger && mAgent->setCharger) {
 }
 ```
 
-The page picks its controller at init time: a `grpc-battery-controller` when the UI is running detached over gRPC, or the in-process `legacy-battery-controller` otherwise (`battery-page.cpp:202`). Either way the abstract `BatteryController` interface (`battery-controller.h:16`) hides whether the agent call is a local function pointer or a remote RPC, the pane code is identical.
+The page picks its controller at init time: a `grpc-battery-controller` when the UI is running detached over gRPC, or the in-process `legacy-battery-controller` otherwise (`battery-page.cpp:202`). Either way the abstract `BatteryController` interface (`battery-controller.h:16`) hides whether the agent call is a local function pointer or a remote RPC. So the pane code is identical.
 
-The extended pages are split into per-subsystem CMake modules under `external/qemu/android/android-ui/modules/aemu-ext-pages/` (battery, cellular, location, camera, finger, telephony, ...), each owning its `.ui` layout, its page class, and its controller. `ExtendedPageFactory::construct` (`extended-page-factory.h:23`) wires a pane into the tabbed `ExtendedControls` UI on demand.
+The extended pages are split into per-subsystem CMake modules under `external/qemu/android/android-ui/modules/aemu-ext-pages/` (battery, cellular, location, camera, finger, telephony, ...). Each module owns its `.ui` layout, its page class, and its controller. `ExtendedPageFactory::construct` (`extended-page-factory.h:23`) wires a pane into the tabbed `ExtendedControls` UI on demand.
 
 How a control panel reaches the core
 
@@ -471,7 +479,9 @@ flowchart LR
     Pane --> Ctrl --> Agent --> Core
 ```
 
-Which panes appear at all depends on the AVD flavor, and so does what one of them draws. The `ExtendedWindow` constructor drops the virtual-sensors and location buttons from the sidebar for XR and glasses AVDs, restoring them for a glasses AVD only when `ANDROID_EMU_ENABLE_VIRTUAL_SENSORS=1` or `ANDROID_EMU_ENABLE_STREETVIEW=1` is set in the environment, a temporary switch while those pages are brought up for the flavor (`extended-window.cpp:269` to `:292`). When the virtual-sensors pane does appear, the 3D device it renders follows the same flavor: `Device3DWidget::getModelBasePath` returns `:/glasses-model` when `android_is_glasses_mode()` is true and `:/phone-model` otherwise (`external/qemu/android/android-ui/modules/aemu-ext-pages/camera/src/android/skin/qt/device-3d-widget.cpp:888`). Everything the widget loads afterwards is that base path plus a fixed filename — `model.obj` through its Wavefront parser, then the diffuse, specular, and gloss maps — so the two model sets are registered under parallel resource prefixes in `resources.qrc:1051` and `:1057` and no rendering code changes. `android_is_glasses_mode()` is itself a one-line test of `avdInfo_getAvdFlavor(...) == AVD_GLASSES` (`external/qemu/android/android-emu/android/hw-sensors.cpp:1478`), the flavor Chapter 3 introduces.
+Which panes appear at all depends on the AVD flavor, and so does what one of them draws. The `ExtendedWindow` constructor drops the virtual-sensors and location buttons from the sidebar for XR and glasses AVDs. It restores them for a glasses AVD only when `ANDROID_EMU_ENABLE_VIRTUAL_SENSORS=1` or `ANDROID_EMU_ENABLE_STREETVIEW=1` is set in the environment. This is a temporary switch while those pages are brought up for the flavor (`extended-window.cpp:269` to `:292`).
+
+When the virtual-sensors pane does appear, the 3D device it renders follows the same flavor. `Device3DWidget::getModelBasePath` returns `:/glasses-model` when `android_is_glasses_mode()` is true and `:/phone-model` otherwise (`external/qemu/android/android-ui/modules/aemu-ext-pages/camera/src/android/skin/qt/device-3d-widget.cpp:888`). Everything the widget loads afterwards is that base path plus a fixed filename. The widget loads `model.obj` through its Wavefront parser, then the diffuse, specular, and gloss maps. So the two model sets are registered under parallel resource prefixes in `resources.qrc:1051` and `:1057`, and no rendering code changes. `android_is_glasses_mode()` is itself a one-line test of `avdInfo_getAvdFlavor(...) == AVD_GLASSES` (`external/qemu/android/android-emu/android/hw-sensors.cpp:1478`), the flavor Chapter 3 introduces.
 
 ## 22.9 Keyboard Translation and Mouse Grab
 
@@ -496,7 +506,7 @@ keyData.mod = generateModData(event.modifiers());
 queueSkinEvent(std::move(skin_event));
 ```
 
-When the `QtRawKeyboardInput` feature is on, the window prefers the *unmodified* key so that, for example, `Shift+2` reaches the guest as the physical key plus a modifier rather than as a pre-composed `@` (`emulator-qt-window.cpp:3103`). The skin keyboard layer (`skin_keyboard_process_event`) then applies the AVD's charmap before the keycode is sent.
+When the `QtRawKeyboardInput` feature is on, the window prefers the *unmodified* key. This way, for example, `Shift+2` reaches the guest as the physical key plus a modifier rather than as a pre-composed `@` (`emulator-qt-window.cpp:3103`). The skin keyboard layer (`skin_keyboard_process_event`) then applies the AVD's charmap before the keycode is sent.
 
 ### 22.9.2 Mouse grab and the release shortcut
 
@@ -523,7 +533,7 @@ if (button == kMouseButtonRight) {
 }
 ```
 
-This is another example of the queue being the single point through which all input flows, even a remapped right click becomes an ordinary key `SkinEvent`.
+This is another example of the queue as the single point through which all input flows. Even a remapped right click becomes an ordinary key `SkinEvent`.
 
 ## 22.10 The winsys Interface: How the Core Steers the Window
 
@@ -536,7 +546,7 @@ The interface covers four kinds of operation:
 3. UI-thread marshaling: `skin_winsys_run_ui_update` and `skin_winsys_error_dialog` (`winsys.h:147`, `:150`).
 4. Agent and notification plumbing: `skin_winsys_set_ui_agent`, `skin_winsys_update_rotation`, `skin_winsys_show_virtual_scene_controls` (`winsys.h:121` to `:154`).
 
-The Qt implementation of every one of these is in `winsys-qt.cpp`. For instance, `skin_winsys_enter_main_loop` installs the native event filter and calls `g->app->exec()` for the windowed case, or blocks on a wake event / `sigsuspend` for the windowless case (`winsys-qt.cpp:186`). Because the contract is pure C, the same core links unchanged against the headless backend, which is exactly what makes server-side and CI runs possible.
+The Qt implementation of every one of these is in `winsys-qt.cpp`. For instance, `skin_winsys_enter_main_loop` installs the native event filter and calls `g->app->exec()` for the windowed case. For the windowless case, it blocks on a wake event / `sigsuspend` (`winsys-qt.cpp:186`). Because the contract is pure C, the same core links unchanged against the headless backend, which is exactly what makes server-side and CI runs possible.
 
 The winsys contract between core and GUI backend
 
@@ -562,7 +572,7 @@ Inspect what the window does internally by turning on the verbose categories tha
 emulator -avd <your_avd> -verbose -debug keys,surface,init
 ```
 
-Watch the input pipeline end to end. With `-debug keys` on, click and type in the window; the `>> MOUSE` and `>> ... KEY` lines printed by `qemu-user-event-agent-impl.c` are the bottom of the pipeline from Section 22.5.
+Watch the input pipeline end to end. With `-debug keys` on, click and type in the window. The `>> MOUSE` and `>> ... KEY` lines printed by `qemu-user-event-agent-impl.c` are the bottom of the pipeline from Section 22.5.
 
 Open the extended controls and a specific pane directly from the toolbar shortcuts:
 
@@ -576,7 +586,7 @@ Drive the UI without a window to confirm the winsys split:
 emulator -avd <your_avd> -no-window -verbose
 ```
 
-Find the skin file your AVD uses, then open its `layout` file to see the parts, buttons, and display rectangle that Section 22.3 parses:
+Find the skin file your AVD uses. Open its `layout` file to see the parts, buttons, and display rectangle that Section 22.3 parses:
 
 ```bash
 # The skin directory is recorded in the AVD's config; layouts live alongside the bezel PNGs.
@@ -585,13 +595,13 @@ find "$ANDROID_SDK_ROOT/skins" -name layout | head
 
 ## Summary
 
-- The Qt UI and the QEMU core run on two threads in one process: Qt owns the main thread (`QApplication::exec`), the core runs on a `MainLoopThread` spawned through `skin_winsys_spawn_thread`.
+- The Qt UI and the QEMU core run on two threads in one process. Qt owns the main thread (`QApplication::exec`). The core runs on a `MainLoopThread` spawned through `skin_winsys_spawn_thread`.
 - Core-to-UI calls cross threads via `skin_winsys_run_ui_update`, which marshals a function onto the Qt thread through the `runOnUiThread` signal and an optional `QSemaphore` for blocking.
-- All input, real mouse/key/touch/pen, toolbar buttons, and keyboard shortcuts, converges on a single `SkinEvent` FIFO (`mSkinEventQueue`) guarded by a mutex; `onNewUserEvent` wakes the core, which drains the queue with `skin_event_poll`.
-- The skin engine (`SkinFile`, `SkinLayout`, `SkinPart`, `SkinButton`) is toolkit-neutral C in the window module; it dispatches events through a `SkinWindowFuncs` table whose entries forward to the `QAndroidUserEventAgent`, which finally calls QEMU input functions like `kbd_mouse_event_absolute`.
-- `EmulatorQtWindow::paintEvent` draws only the bezel from a `SkinSurface`; the guest screen is normally composited by a host-GPU OpenGL sub-window stacked over the Qt window, with a `SharedMemoryRenderer` / streamed `QImage` fallback.
-- The toolbar (`ToolWindow`) resolves each button to a `QtUICommand`; hardware-button commands re-inject `SkinEvent`s into the same queue, while `SHOW_PANE_*` commands open panes of the lazily built `ExtendedWindow`.
-- Extended-control panes reach the core only through the typed agents collected in `UiEmuAgent`, set once via `skin_winsys_set_ui_agent`; a controller abstraction lets the same pane call either an in-process agent or a gRPC remote.
+- All input, real mouse/key/touch/pen, toolbar buttons, and keyboard shortcuts, converges on a single `SkinEvent` FIFO (`mSkinEventQueue`) guarded by a mutex. `onNewUserEvent` wakes the core, which drains the queue with `skin_event_poll`.
+- The skin engine (`SkinFile`, `SkinLayout`, `SkinPart`, `SkinButton`) is toolkit-neutral C in the window module. It dispatches events through a `SkinWindowFuncs` table whose entries forward to the `QAndroidUserEventAgent`, which finally calls QEMU input functions like `kbd_mouse_event_absolute`.
+- `EmulatorQtWindow::paintEvent` draws only the bezel from a `SkinSurface`. The guest screen is normally composited by a host-GPU OpenGL sub-window stacked over the Qt window, with a `SharedMemoryRenderer` / streamed `QImage` fallback.
+- The toolbar (`ToolWindow`) resolves each button to a `QtUICommand`. Hardware-button commands re-inject `SkinEvent`s into the same queue, while `SHOW_PANE_*` commands open panes of the lazily built `ExtendedWindow`.
+- Extended-control panes reach the core only through the typed agents collected in `UiEmuAgent`, set once via `skin_winsys_set_ui_agent`. A controller abstraction lets the same pane call either an in-process agent or a gRPC remote.
 
 ### Key Source Files
 

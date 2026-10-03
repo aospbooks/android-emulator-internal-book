@@ -1,8 +1,10 @@
 # Chapter 4: The QEMU Fork
 
-The Android Emulator does not run stock QEMU. It runs a fork of QEMU 2.12 that has been bent in two directions at once: downward, into the virtual hardware, where Android-specific "goldfish" devices are soldered onto otherwise-ordinary QEMU machine boards; and upward, into a large body of host-side C++ code called `android-emu` that knows nothing about QEMU and everything about batteries, sensors, snapshots, and gRPC. Between those two worlds sits a third body of code, `android-qemu2-glue`, whose entire job is to make the QEMU half and the `android-emu` half believe they were written for each other.
+The Android Emulator does not run stock QEMU. It runs a fork of QEMU 2.12 that has been bent in two directions at once. Downward, into the virtual hardware, Android-specific "goldfish" devices are soldered onto otherwise-ordinary QEMU machine boards. Upward, into a large body of host-side C++ code called `android-emu`, which knows nothing about QEMU and everything about batteries, sensors, snapshots, and gRPC. Between those two worlds sits a third body of code, `android-qemu2-glue`. Its entire job is to make the QEMU half and the `android-emu` half believe they were written for each other.
 
-This chapter is about that seam. We look at how the emulator's QEMU differs from upstream, how the `ranchu` machine and the legacy `goldfish` platform are assembled, how the device tree is built and handed to the guest kernel, and how the glue layer installs Android virtual devices and wires up the "agents" that the rest of the emulator uses to poke at them. The recurring pattern is two vtables pointed at each other: the device exposes service ops to the host, the host exposes hardware ops to the device, and a single setup function snaps them together.
+This chapter is about that seam. We look at how the emulator's QEMU differs from upstream. We look at how the `ranchu` machine and the legacy `goldfish` platform are assembled. We look at how the device tree is built and handed to the guest kernel. We look at how the glue layer installs Android virtual devices. We also look at the "agents" that the rest of the emulator uses to poke at them.
+
+The recurring pattern is two vtables pointed at each other. The device exposes service ops to the host, the host exposes hardware ops to the device, and a single setup function snaps them together.
 
 ---
 
@@ -16,11 +18,19 @@ The fork is not a thin patch set. Three categories of change distinguish it from
 2. New machine boards, `ranchu` for ARM and MIPS, that assemble those devices, plus `CONFIG_ANDROID`-guarded additions to the standard x86 PC board.
 3. Two entirely new top-level source trees, `external/qemu/android/` (the host-side `android-emu` code) and `external/qemu/android-qemu2-glue/` (the bridge), neither of which appears in upstream QEMU at all.
 
-The legal posture follows from the base. QEMU is GPLv2, and the goldfish device files carry GPLv2 headers ("licensed under the terms of the GNU General Public License version 2"), while the newer glue and `android-emu` files are mostly Apache 2.0. You can see both licenses side by side: `external/qemu/android-qemu2-glue/dtb.cpp` is GPLv2, `external/qemu/android-qemu2-glue/qemu-console-factory.cpp` is Apache 2.0.
+The legal posture follows from the base. QEMU is GPLv2. The goldfish device files carry GPLv2 headers ("licensed under the terms of the GNU General Public License version 2"). The newer glue and `android-emu` files are mostly Apache 2.0. You can see both licenses side by side: `external/qemu/android-qemu2-glue/dtb.cpp` is GPLv2, `external/qemu/android-qemu2-glue/qemu-console-factory.cpp` is Apache 2.0.
 
 ### 4.1.1 Why a Fork at All
 
-A stock QEMU machine boots a generic Linux distribution. Android is not a generic Linux distribution: it expects a framebuffer it can mmap, a fast zero-copy channel to a host GPU and host services, a battery whose charge level the host can change at runtime, an input device that speaks the Linux evdev protocol, and a clean way for the host UI to inject sensor readings and telephony events. None of that is expressible as QEMU command-line options. It requires custom devices in the VM and custom code on the host, and the two have to share data structures. A fork is the path of least resistance, and it is the path the emulator took.
+A stock QEMU machine boots a generic Linux distribution. Android is not a generic Linux distribution. It expects:
+
+- a framebuffer it can mmap;
+- a fast zero-copy channel to a host GPU and host services;
+- a battery whose charge level the host can change at runtime;
+- an input device that speaks the Linux evdev protocol;
+- a clean way for the host UI to inject sensor readings and telephony events.
+
+None of that is expressible as QEMU command-line options. It requires custom devices in the VM and custom code on the host. The two have to share data structures. A fork is the path of least resistance, and the emulator took that path.
 
 ### 4.1.2 The Three Layers
 
@@ -47,13 +57,13 @@ graph TD
     BD --> GF
 ```
 
-The arrows point in the direction of dependency at setup time: the glue reaches down into QEMU devices and up into `android-emu` services, and binds them. At runtime, data flows both ways.
+The arrows point in the direction of dependency at setup time. The glue reaches down into QEMU devices and up into `android-emu` services, and binds them. At runtime, data flows both ways.
 
 ---
 
 ## 4.2 The Goldfish Platform
 
-"Goldfish" is the name of the original ARM virtual board used by the very first Android emulator, and the name stuck to the family of Android-specific MMIO devices that board introduced. Those devices outlived the board. Today they are mixed into modern machines, but they still carry the goldfish name and the goldfish register conventions.
+"Goldfish" is the name of the original ARM virtual board used by the very first Android emulator. The name stuck to the family of Android-specific MMIO devices that board introduced. Those devices outlived the board. Today they are mixed into modern machines, but they still carry the goldfish name and the goldfish register conventions.
 
 The device sources live under `external/qemu/hw/`, scattered across the subsystem directories where a device of that kind would normally go.
 
@@ -68,7 +78,7 @@ The device sources live under `external/qemu/hw/`, scattered across the subsyste
 | `goldfish_rtc` | `hw/timer/goldfish_timer.c` | Real-time clock |
 | `goldfish_rotary` | `hw/input/goldfish_rotary.c` | Rotary encoder (wearables) |
 
-Each is a standard QEMU `SysBusDevice` registered with a `TypeInfo` and a string type name. `goldfish_pipe`, for instance, declares `#define TYPE_GOLDFISH_PIPE "goldfish_pipe"` and registers itself with `type_init(goldfish_pipe_register)` (see `hw/misc/goldfish_pipe.c:144` and the `goldfish_pipe_info` TypeInfo near line 1910). Because they are ordinary QEMU device types, a machine board can instantiate them with the usual `sysbus_create_simple(name, base, irq)` call, exactly as it would create an upstream device.
+Each is a standard QEMU `SysBusDevice` registered with a `TypeInfo` and a string type name. `goldfish_pipe`, for instance, declares `#define TYPE_GOLDFISH_PIPE "goldfish_pipe"` and registers itself with `type_init(goldfish_pipe_register)` (see `hw/misc/goldfish_pipe.c:144` and the `goldfish_pipe_info` TypeInfo near line 1910). They are ordinary QEMU device types. A machine board can therefore instantiate them with the usual `sysbus_create_simple(name, base, irq)` call, exactly as it would create an upstream device.
 
 ### 4.2.1 Goldfish on x86: the PC Board
 
@@ -106,9 +116,9 @@ The PC board reads those constants and creates each device:
 #endif  // CONFIG_ANDROID
 ```
 
-The guest still has to find these devices. On x86 that is done with ACPI: `hw/i386/acpi-build.c` emits AML for each goldfish device (`build_goldfish_device_aml`, around line 1038) and an `android,firmware` / `android,fstab` description (`build_android_dt_aml`, around line 1072) using the same `goldfish_defs.h` constants, so the addresses in the device, the ACPI tables, and the kernel all agree.
+The guest still has to find these devices. On x86 that is done with ACPI. `hw/i386/acpi-build.c` emits AML for each goldfish device (`build_goldfish_device_aml`, around line 1038). It also emits an `android,firmware` / `android,fstab` description (`build_android_dt_aml`, around line 1072). Both use the same `goldfish_defs.h` constants, so the addresses in the device, the ACPI tables, and the kernel all agree.
 
-One quirk worth noting: the x86 board swaps the sync and events IRQ lines when it is *not* running in `android_qemu_mode()` (the Fuchsia path), because goldfish_sync's IRQ 21 collides with legacy-IRQ PCI devices there. The conditional is right there at `hw/i386/pc_piix.c:269`.
+One quirk is worth noting. The x86 board swaps the sync and events IRQ lines when it does *not* run in `android_qemu_mode()` (the Fuchsia path). The reason is that goldfish_sync's IRQ 21 collides with legacy-IRQ PCI devices there. The conditional is right there at `hw/i386/pc_piix.c:269`.
 
 ### 4.2.2 ACPI vs. Device Tree
 
@@ -130,13 +140,13 @@ graph TD
     end
 ```
 
-Both paths end with the guest kernel discovering the same goldfish device types at known addresses; they just disagree about the discovery mechanism. The rest of this chapter follows the ARM/`ranchu` path because the device tree is more legible than ACPI AML, then returns to where the two paths converge in the glue.
+Both paths end the same way. The guest kernel discovers the same goldfish device types at known addresses. The paths only disagree about the discovery mechanism. The rest of this chapter follows the ARM/`ranchu` path, because the device tree is more legible than ACPI AML. Then it returns to where the two paths converge in the glue.
 
 ---
 
 ## 4.3 The Ranchu Machine
 
-`ranchu` is the Android-specific 64-bit ARM board, defined in `external/qemu/hw/arm/ranchu.c`. Its top comment states the design directly: it is "a virtual board for use as part of the Android emulator" with "a mixture of virtio devices and some Android-specific devices inherited from the 32 bit 'goldfish' board," and it "only support[s] 64-bit ARM CPUs." A second `ranchu` variant for MIPS lives in `hw/mips/mips_ranchu.c`.
+`ranchu` is the Android-specific 64-bit ARM board, defined in `external/qemu/hw/arm/ranchu.c`. Its top comment states the design directly. The comment calls it "a virtual board for use as part of the Android emulator." The board has "a mixture of virtio devices and some Android-specific devices inherited from the 32 bit 'goldfish' board." It "only support[s] 64-bit ARM CPUs." A second `ranchu` variant for MIPS lives in `hw/mips/mips_ranchu.c`.
 
 The board is registered with QEMU's machine framework using the `DEFINE_MACHINE` macro, and it sets itself as the default machine so that `-machine type=ranchu` is implied:
 
@@ -155,7 +165,7 @@ DEFINE_MACHINE("ranchu", ranchu_machine_init)
 
 ### 4.3.1 The Memory Map
 
-`ranchu` lays out guest physical address space with a static `MemMapEntry` table indexed by an enum. The layout reserves the first 128 MB for a boot ROM, puts device I/O in the 128 MB to 256 MB window, reserves 256 MB to 1 GB for possible future PCI, and starts RAM at 1 GB.
+`ranchu` lays out guest physical address space with a static `MemMapEntry` table indexed by an enum. The layout reserves the first 128 MB for a boot ROM. It puts device I/O in the 128 MB to 256 MB window. It reserves 256 MB to 1 GB for possible future PCI. RAM starts at 1 GB.
 
 ```c
 // Source: hw/arm/ranchu.c
@@ -176,7 +186,7 @@ static const MemMapEntry memmap[] = {
 };
 ```
 
-A parallel `irqmap[]` table assigns SPI interrupt numbers: UART is IRQ 1, the framebuffer 2, battery 3, audio 4, evdev 5, pipe 6, sync 7, and the 32 virtio-mmio transports start at IRQ 16. The board models at most 30 GB of RAM; `ranchu_init` aborts with "cannot model more than 30GB RAM" if asked for more (`hw/arm/ranchu.c:511`).
+A parallel `irqmap[]` table assigns SPI interrupt numbers. UART is IRQ 1, the framebuffer 2, battery 3, audio 4, evdev 5, pipe 6, and sync 7. The 32 virtio-mmio transports start at IRQ 16. The board models at most 30 GB of RAM. `ranchu_init` aborts with "cannot model more than 30GB RAM" if asked for more (`hw/arm/ranchu.c:511`).
 
 ### 4.3.2 Board Assembly
 
@@ -190,7 +200,7 @@ A parallel `irqmap[]` table assigns SPI interrupt numbers: UART is IRQ 1, the fr
 6. Create the PL011 UART, then the six goldfish devices, then 32 virtio-mmio transports.
 7. Fill in `arm_boot_info` (kernel, initrd, cmdline) and call `arm_load_kernel`.
 
-The goldfish devices are created by a single helper that both instantiates the QEMU device and adds its device-tree node, so the two never drift apart:
+A single helper creates the goldfish devices. The helper both instantiates the QEMU device and adds its device-tree node, so the two never drift apart:
 
 ```c
 // Source: hw/arm/ranchu.c
@@ -205,7 +215,7 @@ create_simple_device(vbi, pic, RANCHU_GOLDFISH_SYNC, "goldfish_sync",
                      "generic,goldfish-sync", 2, 0, 0);
 ```
 
-The fourth argument (`sysbus_name`, here `"goldfish_fb"`) is the QEMU device type name (it must match a registered `TypeInfo`); the NUL-separated strings are the device tree `compatible` values the guest kernel matches its drivers against. The pipe device, notably, presents itself to the kernel as `google,android-pipe`.
+The fourth argument (`sysbus_name`, here `"goldfish_fb"`) is the QEMU device type name. It must match a registered `TypeInfo`. The NUL-separated strings are the device tree `compatible` values. The guest kernel matches its drivers against them. The pipe device, notably, presents itself to the kernel as `google,android-pipe`.
 
 ### 4.3.3 Board Initialization Sequence
 
@@ -254,11 +264,11 @@ qemu_fdt_setprop_string(fdt, "/firmware/android", "compatible",
 qemu_fdt_setprop_string(fdt, "/firmware/android", "hardware", "ranchu");
 ```
 
-Each call to `create_simple_device` later appends a device node with a `reg` tuple (base and size from `memmap`), an `interrupts` tuple (from `irqmap`), and the `compatible` strings. The virtio-mmio transports are added in reverse address order so that the finished tree lists them lowest-address-first, a subtlety the code calls out explicitly in `create_virtio_devices`.
+Each call to `create_simple_device` later appends a device node. The node has a `reg` tuple (base and size from `memmap`), an `interrupts` tuple (from `irqmap`), and the `compatible` strings. The virtio-mmio transports are added in reverse address order. This makes the finished tree list them lowest-address-first. The code calls out this subtlety explicitly in `create_virtio_devices`.
 
 ### 4.4.2 The Glue's Device Tree Hook
 
-The board cannot know everything. The host side knows which guest partitions exist and where they live, and that information has to reach the kernel through the device tree's `android,fstab` node. The board therefore exposes a callback hook, `qemu_device_tree_setup_callback`, and invokes it from inside `create_fdt`:
+The board cannot know everything. The host side knows which guest partitions exist and where they live. That information has to reach the kernel through the device tree's `android,fstab` node. The board therefore exposes a callback hook, `qemu_device_tree_setup_callback`, and invokes it from inside `create_fdt`:
 
 ```c
 // Source: hw/arm/ranchu.c
@@ -267,7 +277,7 @@ if (device_tree_setup_func) {
 }
 ```
 
-The glue *defines* `ranchu_device_tree_setup` (`android-qemu2-glue/qemu-setup.cpp:164`), while QEMU core installs it as that callback from `vl.c` via `qemu_device_tree_setup_callback(ranchu_device_tree_setup)` (`external/qemu/vl.c:4665`). It adds the `fstab` subtree and, for each of the system and vendor partitions, looks up the in-guest device path from the AVD and emits an `ext4` mount entry:
+The glue *defines* `ranchu_device_tree_setup` (`android-qemu2-glue/qemu-setup.cpp:164`), while QEMU core installs it as that callback from `vl.c` via `qemu_device_tree_setup_callback(ranchu_device_tree_setup)` (`external/qemu/vl.c:4665`). It adds the `fstab` subtree. For each of the system and vendor partitions, it looks up the in-guest device path from the AVD and emits an `ext4` mount entry:
 
 ```cpp
 // Source: android-qemu2-glue/qemu-setup.cpp
@@ -286,13 +296,13 @@ if (vendor_path) {
 }
 ```
 
-This is the device tree being built collaboratively: the board contributes the hardware topology, the host contributes the storage topology, and the two meet inside one FDT.
+The device tree is built collaboratively. The board contributes the hardware topology, the host contributes the storage topology, and the two meet inside one FDT.
 
 ### 4.4.3 The Standalone DTB Builder
 
-There is a second, separate way the emulator produces a device tree: `android-qemu2-glue/dtb.cpp` writes a standalone `.dtb` file to disk. This path is used when the `KernelDeviceTreeBlobSupport` feature flag is set; `main.cpp` calls `createDtbFile` to produce `default.dtb` and then passes `-dtb <file>` to QEMU (`android-qemu2-glue/main.cpp:2926` and `:2937`).
+There is a second, separate way the emulator produces a device tree: `android-qemu2-glue/dtb.cpp` writes a standalone `.dtb` file to disk. This path is used when the `KernelDeviceTreeBlobSupport` feature flag is set. `main.cpp` calls `createDtbFile` to produce `default.dtb`. Then it passes `-dtb <file>` to QEMU (`android-qemu2-glue/main.cpp:2926` and `:2937`).
 
-`createDtbFile` builds the same `android,firmware` / `android,fstab` / `android,vendor` structure, but by hand against the `libdtb` structures (the `node` and `property` types from `dtc`) rather than QEMU's `qemu_fdt_*` helpers, then serializes it with `dt_to_blob`:
+`createDtbFile` builds the same `android,firmware` / `android,fstab` / `android,vendor` structure. It builds the structure by hand against the `libdtb` structures (the `node` and `property` types from `dtc`) rather than QEMU's `qemu_fdt_*` helpers. Then it serializes the structure with `dt_to_blob`:
 
 ```cpp
 // Source: android-qemu2-glue/dtb.cpp
@@ -305,7 +315,7 @@ char lit_mnt_flags_value[] = "noatime,ro,errors=panic";
 char lit_fsmgr_flags_value[] = "wait";
 ```
 
-The two device-tree paths produce equivalent `android,fstab` descriptions; the difference is only whether the tree is built live inside the board or pre-baked into a file the kernel loads. Both ultimately tell the guest's first-stage init where to find the `vendor` (and optionally `system`) ext4 partitions.
+The two device-tree paths produce equivalent `android,fstab` descriptions. The difference is only whether the tree is built live inside the board or pre-baked into a file that the kernel loads. Both ultimately tell the guest's first-stage init where to find the `vendor` (and optionally `system`) ext4 partitions.
 
 ```mermaid
 graph TD
@@ -324,7 +334,7 @@ graph TD
 
 ## 4.5 The Glue Layer
 
-`android-qemu2-glue` is the third source tree, and it has no analog in upstream QEMU. Its files are listed in `android-qemu2-glue/CMakeLists.txt` and fall into a few groups: the device bridges (`emulation/android_pipe_device.cpp`, `emulation/goldfish_sync.cpp`), the agent implementations (`qemu-*-agent-impl.{c,cpp}`), the lifecycle setup (`qemu-setup.cpp`), the device-tree writer (`dtb.cpp`), and the program entry point (`main.cpp`).
+`android-qemu2-glue` is the third source tree, and it has no analog in upstream QEMU. Its files are listed in `android-qemu2-glue/CMakeLists.txt` and fall into a few groups. The groups are the device bridges (`emulation/android_pipe_device.cpp`, `emulation/goldfish_sync.cpp`) and the agent implementations (`qemu-*-agent-impl.{c,cpp}`). The rest are the lifecycle setup (`qemu-setup.cpp`), the device-tree writer (`dtb.cpp`), and the program entry point (`main.cpp`).
 
 The glue's purpose is to resolve an impedance mismatch. `android-emu` is written against abstract interfaces and knows nothing about QEMU's `DeviceState`, `QEMUFile`, or `MemoryRegion`. QEMU devices are written against abstract callback structs and know nothing about `android-emu`'s `AndroidPipe` or `GoldfishSyncCommandQueue`. The glue supplies the concrete functions on both sides and connects them. The technique is the same everywhere: a pair of vtables, one pointing each way.
 
@@ -354,7 +364,7 @@ static const GoldfishPipeServiceOps goldfish_pipe_service_ops = {
 };
 ```
 
-The `reinterpret_cast` from `GoldfishPipeBuffer*` to `AndroidPipeBuffer*` is load-bearing, and the file defends it with `static_assert`s that the two structs have identical size and identical field offsets. This is the glue's whole character: it trusts that two independently-defined structs are layout-compatible, and it proves that trust at compile time.
+The `reinterpret_cast` from `GoldfishPipeBuffer*` to `AndroidPipeBuffer*` is load-bearing. The file defends it with `static_assert`s that the two structs have identical size and identical field offsets. This is the glue's whole character: it trusts that two independently-defined structs are layout-compatible, and it proves that trust at compile time.
 
 The binding happens in one function, `qemu_android_pipe_init`, which installs the ops into the device and initializes the pipe service's threading:
 
@@ -437,7 +447,7 @@ The canonical list of agents is a single X-macro, `ANDROID_CONSOLE_AGENTS_LIST`,
     X(QAndroidSurfaceAgent, surface)
 ```
 
-An agent is just a struct of function pointers. The battery agent's implementation in the glue, `qemu-battery-agent-impl.cpp`, is representative: each member is a thin function that takes a VM lock and calls into the goldfish_battery device's C API.
+An agent is just a struct of function pointers. The battery agent's implementation in the glue, `qemu-battery-agent-impl.cpp`, is representative. Each member is a thin function that takes a VM lock and calls into the goldfish_battery device's C API.
 
 ```cpp
 // Source: android-qemu2-glue/qemu-battery-agent-impl.cpp
@@ -463,7 +473,7 @@ The user-event agent works the same way but with input. `qemu-user-event-agent-i
 
 ### 4.6.2 Injecting the Agents
 
-The agents are not magically available; they are *injected* through a factory at startup. The contract is in `AndroidConsoleFactory` (`android/emu/agents/.../AndroidAgentFactory.h`): a factory exposes a getter per agent, and `injectConsoleAgents(factory)` copies every getter's result into the single global `AndroidConsoleAgents` struct that `getConsoleAgents()` returns.
+The agents are not magically available; they are *injected* through a factory at startup. The contract is in `AndroidConsoleFactory` (`android/emu/agents/.../AndroidAgentFactory.h`). A factory exposes a getter per agent. `injectConsoleAgents(factory)` copies every getter's result into the single global `AndroidConsoleAgents` struct that `getConsoleAgents()` returns.
 
 ```cpp
 // Source: android/emu/agents/src/android/emulation/control/AndroidAgentFactory.cpp
@@ -515,7 +525,7 @@ The glue runs through a deliberate startup sequence. The two functions that matt
 
 ### 4.7.1 Early Setup
 
-`qemu_android_emulation_early_setup` installs everything QEMU will need before it instantiates devices. This is where the device bridges from sections 4.5.1 and 4.5.2 are connected, where the host pipe and sync services are initialized, and where snapshot support is wired up.
+`qemu_android_emulation_early_setup` installs everything QEMU will need before it instantiates devices. It connects the device bridges from sections 4.5.1 and 4.5.2. It also initializes the host pipe and sync services, and it wires up snapshot support.
 
 ```cpp
 // Source: android-qemu2-glue/qemu-setup.cpp
@@ -535,11 +545,11 @@ auto vm = getConsoleAgents()->vm;
 android::emulation::goldfish_address_space_set_vm_operations(vm);
 ```
 
-The same function also installs the `VmLock` and `DmaMap` implementations, registers the audio capture and output engines, hooks QEMU's abort and crash handlers to the emulator's crash reporter, and registers the netsim Bluetooth/Wi-Fi backend. Critically, it calls `qemu_looper_setForThread` and registers it as a per-thread setup callback so every QEMU thread shares the emulator's event loop.
+The same function also installs the `VmLock` and `DmaMap` implementations. It registers the audio capture and output engines, and it hooks QEMU's abort and crash handlers to the emulator's crash reporter. It also registers the netsim Bluetooth/Wi-Fi backend. Critically, it calls `qemu_looper_setForThread` and registers it as a per-thread setup callback so every QEMU thread shares the emulator's event loop.
 
 ### 4.7.2 The Full Boot Picture
 
-The order is strict because each step depends on the previous one. Console agents must be injected before anything reads `getConsoleAgents()`; the pipe/sync services must be bound before the guest boots and opens `/dev/goldfish_pipe`; the device tree callback must be registered before the board builds the FDT.
+The order is strict because each step depends on the previous one. Console agents must be injected before anything reads `getConsoleAgents()`. The pipe/sync services must be bound before the guest boots and opens `/dev/goldfish_pipe`. The device tree callback must be registered before the board builds the FDT.
 
 ```mermaid
 graph TD
@@ -577,15 +587,15 @@ static const QAndroidVmOperations sQAndroidVmOperations = {
 };
 ```
 
-Snapshots are the reason so many of the pipe and sync service-ops lambdas in section 4.5 carry `save`/`load` variants that funnel a QEMU `QEMUFile*` through a `QemuFileStream` adapter into `android-emu`'s `Stream` abstraction. When QEMU serializes device state, the goldfish devices delegate to the host pipe and sync services so their host-side queues are saved and restored in lockstep with the guest-side device registers. The `QemuFileStream` adapter is itself a glue file (`android-qemu2-glue/base/files/QemuFileStream.cpp`).
+Snapshots are the reason so many of the pipe and sync service-ops lambdas in section 4.5 carry `save`/`load` variants. These variants funnel a QEMU `QEMUFile*` through a `QemuFileStream` adapter into `android-emu`'s `Stream` abstraction. When QEMU serializes device state, the goldfish devices delegate to the host pipe and sync services. Because of this, their host-side queues are saved and restored in lockstep with the guest-side device registers. The `QemuFileStream` adapter is itself a glue file (`android-qemu2-glue/base/files/QemuFileStream.cpp`).
 
 ---
 
 ## 4.8 The Pipe: Why the Fork Exists
 
-If you want one device that justifies the whole fork, it is `goldfish_pipe`. It is a fast, zero-copy-ish bidirectional channel between guest and host, and almost every interesting emulator feature rides on top of it: OpenGL/Vulkan command streams, ADB, sensors, the camera, and the modem.
+If you want one device that justifies the whole fork, it is `goldfish_pipe`. It is a fast, zero-copy-ish bidirectional channel between guest and host. Almost every interesting emulator feature rides on top of it: OpenGL/Vulkan command streams, ADB, sensors, the camera, and the modem.
 
-The guest interface is described in `external/qemu/android/docs/ANDROID-QEMU-PIPE.TXT`. From the guest, a process opens `/dev/qemu_pipe` (renamed `/dev/goldfish_pipe` on Linux 3.10 and later), writes a NUL-terminated service name to select a host service, and then uses ordinary `read()`/`write()`:
+The guest interface is described in `external/qemu/android/docs/ANDROID-QEMU-PIPE.TXT`. From the guest, a process opens `/dev/qemu_pipe` (renamed `/dev/goldfish_pipe` on Linux 3.10 and later). It writes a NUL-terminated service name to select a host service. Then it uses ordinary `read()`/`write()`:
 
 ```c
 // Source: android/docs/ANDROID-QEMU-PIPE.TXT
@@ -595,7 +605,7 @@ ret = write(fd, pipeName, strlen(pipeName)+1);
 // ... ready to go, use read() and write()
 ```
 
-On the QEMU side that channel is the `goldfish_pipe` device. On the host side it is the `AndroidPipe` service in `android-emu`. The connection between them is precisely the `GoldfishPipeServiceOps` vtable installed by `qemu_android_pipe_init` (section 4.5.1). When the guest writes to the pipe, the device's MMIO handler calls `service_ops->guest_send(...)`, which is the glue lambda that forwards into `android_pipe_guest_send`, which dispatches to the named host service.
+On the QEMU side that channel is the `goldfish_pipe` device. On the host side it is the `AndroidPipe` service in `android-emu`. The connection between them is precisely the `GoldfishPipeServiceOps` vtable installed by `qemu_android_pipe_init` (section 4.5.1). When the guest writes to the pipe, the device's MMIO handler calls `service_ops->guest_send(...)`. This is the glue lambda that forwards into `android_pipe_guest_send`. That function dispatches to the named host service.
 
 ```mermaid
 sequenceDiagram
@@ -622,7 +632,7 @@ sequenceDiagram
     Dev-->>App: read() returns data
 ```
 
-The pipe is also why the fork keeps the `goldfish_address_space` PCI device (the `GOLDFISH_ADDRESS_SPACE_*` constants in `goldfish_defs.h`): it provides shared host/guest memory regions so the pipe can hand large buffers (graphics command streams, texture data) across the boundary without copying them through MMIO one word at a time. `qemu_android_address_space_device_init` in the early-setup function turns it on.
+The pipe is also why the fork keeps the `goldfish_address_space` PCI device (the `GOLDFISH_ADDRESS_SPACE_*` constants in `goldfish_defs.h`). The device provides shared host/guest memory regions, so the pipe can hand large buffers (graphics command streams, texture data) across the boundary. The pipe does not copy them through MMIO one word at a time. `qemu_android_address_space_device_init` in the early-setup function turns it on.
 
 ---
 
@@ -684,12 +694,12 @@ adb shell 'ls /proc/device-tree/firmware/android/'
 ## Summary
 
 - The emulator runs a fork of QEMU 2.12 (`external/qemu/QEMU_VERSION` reads `2.12.0`), not stock QEMU. The fork adds Android-specific "goldfish" devices, the `ranchu` machine boards, and two new source trees (`android/` and `android-qemu2-glue/`) absent from upstream.
-- Goldfish devices are ordinary QEMU `SysBusDevice` types under `hw/`. On x86 they are bolted onto the standard `pc-i440fx-2.12` board inside `#if defined(CONFIG_ANDROID)` and discovered via ACPI; on ARM/MIPS they are assembled by the `ranchu` board and discovered via a flattened device tree.
-- `ranchu` (`hw/arm/ranchu.c`) lays out a static memory map and IRQ map, builds the FDT in `create_fdt`, and creates each goldfish device with `create_simple_device`, which adds the matching `compatible` device-tree node so device and tree never drift.
+- Goldfish devices are ordinary QEMU `SysBusDevice` types under `hw/`. On x86 they are bolted onto the standard `pc-i440fx-2.12` board inside `#if defined(CONFIG_ANDROID)` and discovered via ACPI. On ARM/MIPS they are assembled by the `ranchu` board and discovered via a flattened device tree.
+- `ranchu` (`hw/arm/ranchu.c`) lays out a static memory map and IRQ map, and it builds the FDT in `create_fdt`. It creates each goldfish device with `create_simple_device`, which adds the matching `compatible` device-tree node so device and tree never drift.
 - The device tree is built collaboratively: the board provides hardware topology, and the glue's `ranchu_device_tree_setup` callback adds the `android,fstab` storage topology. A separate path, `dtb.cpp`, can pre-bake a `default.dtb` file passed via `-dtb`.
-- `android-qemu2-glue` bridges QEMU and `android-emu` with a two-vtable pattern: the device exposes service ops to the host, the host exposes hardware ops to the device, and one setup function (`qemu_android_pipe_init`, `qemu_android_sync_init`) snaps them together. Compile-time `static_assert`s guard the cross-tree struct layouts.
+- `android-qemu2-glue` bridges QEMU and `android-emu` with a two-vtable pattern. The device exposes service ops to the host, the host exposes hardware ops to the device, and one setup function (`qemu_android_pipe_init`, `qemu_android_sync_init`) snaps them together. Compile-time `static_assert`s guard the cross-tree struct layouts.
 - Console agents are narrow control-plane vtables (battery, sensors, user-event, vm) defined by the `ANDROID_CONSOLE_AGENTS_LIST` X-macro. `injectQemuConsoleAgents` installs the QEMU-backed implementations into the global `getConsoleAgents()` struct so the rest of the emulator can use them without depending on QEMU.
-- `goldfish_pipe` is the device that justifies the fork: a fast guest/host channel that carries graphics, ADB, sensors, and more, connecting the guest's `/dev/goldfish_pipe` to the host `AndroidPipe` service through the glue's `GoldfishPipeServiceOps` vtable.
+- `goldfish_pipe` is the device that justifies the fork. It is a fast guest/host channel that carries graphics, ADB, sensors, and more. It connects the guest's `/dev/goldfish_pipe` to the host `AndroidPipe` service through the glue's `GoldfishPipeServiceOps` vtable.
 
 ### Key Source Files
 

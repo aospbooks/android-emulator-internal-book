@@ -1,8 +1,12 @@
 # Chapter 15: Audio
 
-The guest Android system thinks it is talking to a real sound card. It writes PCM samples into a hardware buffer, the "card" raises an interrupt when that buffer drains, and the guest refills it. None of that hardware exists. On the emulator host there is a chain that starts at an emulated MMIO or virtio device, flows through QEMU's mixing engine, and ends at a platform backend that hands bytes to PulseAudio, CoreAudio, winaudio, or — when nobody is listening — a clock-driven null sink. The same engine fans the playback stream out to capturers that feed screen recording, WebRTC streaming, and the gRPC `streamAudio` endpoint, and it accepts injected samples from `injectAudio` so a test can play a WAV file straight into the guest microphone.
+The guest Android system thinks it is talking to a real sound card. It writes PCM samples into a hardware buffer, the "card" raises an interrupt when that buffer drains, and the guest refills it. None of that hardware exists.
 
-This chapter follows that chain in both directions. We start with the two audio devices the guest can see — the legacy `goldfish_audio` MMIO card and the modern `virtio-snd` PCI card — then descend into QEMU's `AUD_*` API and the `SWVoice`/`HWVoice` mixing model, the host backend drivers and how one gets picked, and finally the android-emu control plane: the `AudioOutputEngine`/`AudioCaptureEngine` abstraction, the capture-tap and microphone-forwarder glue, and the gRPC streaming surface.
+On the emulator host, a chain starts at an emulated MMIO or virtio device and flows through QEMU's mixing engine. The chain ends at a platform backend. That backend hands bytes to PulseAudio, CoreAudio, or winaudio. When nobody is listening, it hands them to a clock-driven null sink.
+
+The same engine fans the playback stream out to capturers. These capturers feed screen recording, WebRTC streaming, and the gRPC `streamAudio` endpoint. The engine also accepts injected samples from `injectAudio`. A test can use them to play a WAV file straight into the guest microphone.
+
+This chapter follows that chain in both directions. We start with the two audio devices the guest can see: the legacy `goldfish_audio` MMIO card and the modern `virtio-snd` PCI card. Then we descend into QEMU's `AUD_*` API and the `SWVoice`/`HWVoice` mixing model. Next come the host backend drivers and how one is picked. Finally we cover the android-emu control plane: the `AudioOutputEngine`/`AudioCaptureEngine` abstraction, the capture-tap and microphone-forwarder glue, and the gRPC streaming surface.
 
 ---
 
@@ -27,7 +31,7 @@ static std::string buildSoundhwParam(const int apiLevel,
     }
 ```
 
-The result is passed to QEMU as a `-soundhw` argument (`args.add2("-soundhw", soundhw.c_str())` in the same file), and `hw->hw_audioInput` / `hw->hw_audioOutput` are folded in as `input=off` / `output=off` properties when the AVD disables a direction. The `VirtioSndCard` flag is feature number 89 in the feature-control table (`external/qemu/android/emu/feature/test/android/featurecontrol/FeatureControl_unittest.cpp`), and it is the one knob that switches the whole guest contract from the goldfish register protocol to a virtio queue protocol.
+The result is passed to QEMU as a `-soundhw` argument (`args.add2("-soundhw", soundhw.c_str())` in the same file). When the AVD disables a direction, `hw->hw_audioInput` / `hw->hw_audioOutput` are folded in as `input=off` / `output=off` properties. The `VirtioSndCard` flag is feature number 89 in the feature-control table (`external/qemu/android/emu/feature/test/android/featurecontrol/FeatureControl_unittest.cpp`). It is the one knob that switches the whole guest contract from the goldfish register protocol to a virtio queue protocol.
 
 On ARM `ranchu`/`virt` boards the goldfish card is wired directly into the machine's device tree rather than through `-soundhw`. The board reserves an MMIO window and an IRQ for it and instantiates the device with the right `compatible` strings.
 
@@ -62,7 +66,7 @@ flowchart TD
 
 The device exposes these register groups:
 
-- output buffer registers: `AUDIO_SET_WRITE_BUFFER_1/2` (plus `_HIGH` halves for 64-bit guest addresses) point the device at guest physical buffers, and `AUDIO_WRITE_BUFFER_1/2` tell it how many bytes are ready
+- output buffer registers: `AUDIO_SET_WRITE_BUFFER_1/2` point the device at guest physical buffers (plus `_HIGH` halves for 64-bit guest addresses). `AUDIO_WRITE_BUFFER_1/2` tell it how many bytes are ready
 - input buffer registers: `AUDIO_READ_SUPPORTED`, `AUDIO_SET_READ_BUFFER`, `AUDIO_START_READ`, and `AUDIO_READ_BUFFER_AVAILABLE` handle microphone capture
 - interrupt registers: `AUDIO_INT_STATUS` and `AUDIO_INT_ENABLE` carry the buffer-empty and buffer-full flags that drive the IRQ
 
@@ -98,7 +102,7 @@ s->voice = AUD_open_out (
     goldfish_audio_callback, &as);
 ```
 
-The MMIO window is mapped before the voices open, by design: `goldfish_audio_realize()` carries a comment that the MMIO must be set up regardless of whether voice initialization succeeds, otherwise `sysbus_mmio_map_common()` would assert. So even on a host with no working audio backend, the register block still exists and the guest driver still probes cleanly.
+The MMIO window is mapped before the voices open, by design. `goldfish_audio_realize()` carries a comment that the MMIO must be set up whether or not voice initialization succeeds. Otherwise `sysbus_mmio_map_common()` would assert. So even on a host with no working audio backend, the register block still exists and the guest driver still probes cleanly.
 
 ### 15.2.2 The output drain callback
 
@@ -160,11 +164,11 @@ snd->tx_vq = virtio_add_queue(vdev, ..., virtio_snd_handle_tx);
 snd->rx_vq = virtio_add_queue(vdev, ..., virtio_snd_handle_rx);
 ```
 
-The device advertises its topology through the virtio config space: a count of jacks, PCM streams, and channel maps. There are two jacks (a microphone jack and a speaker jack, defined in `jack_infos[]`) and a fixed set of PCM streams. The supported format is signed 16-bit (`VIRTIO_SND_PCM_FORMAT S16`) at any of seven sample rates from 8000 Hz to 48000 Hz, packed into a 16-bit descriptor by `VIRTIO_SND_PACK_FORMAT16`.
+The device advertises its topology through the virtio config space: a count of jacks, PCM streams, and channel maps. There are two jacks (a microphone jack and a speaker jack, defined in `jack_infos[]`) and a fixed set of PCM streams. The supported format is signed 16-bit (`VIRTIO_SND_PCM_FORMAT S16`). It works at any of seven sample rates from 8000 Hz to 48000 Hz. The format is packed into a 16-bit descriptor by `VIRTIO_SND_PACK_FORMAT16`.
 
 ### 15.3.1 Opening a host voice on demand
 
-Unlike goldfish, which opens its output voice at realize time with a fixed format, virtio-snd opens a host voice only when the guest prepares a stream, and it uses the format the guest actually requested. `virtio_snd_voice_open()` unpacks the guest's 16-bit format word into a QEMU `audsettings` and tries to open the voice, falling back to fewer channels if the host rejects the request.
+Goldfish opens its output voice at realize time with a fixed format. virtio-snd is different. It opens a host voice only when the guest prepares a stream, and it uses the format the guest actually requested. `virtio_snd_voice_open()` unpacks the guest's 16-bit format word into a QEMU `audsettings`. Then it tries to open the voice. If the host rejects the request, it falls back to fewer channels.
 
 ```c
 // Source: external/qemu/hw/audio/virtio-snd.c
@@ -183,7 +187,7 @@ if (is_output_stream(stream)) {
 
 ### 15.3.2 PCM frames, ring buffers, and silence
 
-When the host backend asks for output, `stream_out_cb_locked()` drains the stream's host-PCM ring buffer into the voice with `AUD_write()`. If the guest has fallen behind and the ring is empty, the device does not stall the backend — it synthesizes silence so the host clock keeps advancing.
+When the host backend asks for output, `stream_out_cb_locked()` drains the stream's host-PCM ring buffer into the voice with `AUD_write()`. If the guest falls behind and the ring is empty, the device does not stall the backend. It synthesizes silence so the host clock keeps advancing.
 
 ```c
 // Source: external/qemu/hw/audio/virtio-snd.c
@@ -195,9 +199,9 @@ if (min_write_sz > 0) {
 }
 ```
 
-`fill_silence()` is deliberately not zero-fill; it writes a small `+2, -2` meander so the gap is visible in a captured waveform during debugging. On the capture side `stream_in_cb_locked()` does the reverse, reading from the voice with `AUD_read()` into the ring buffer that the RX queue drains toward the guest.
+`fill_silence()` is deliberately not zero-fill; it writes a small `+2, -2` meander so the gap is visible in a captured waveform during debugging. On the capture side, `stream_in_cb_locked()` does the reverse. It reads from the voice with `AUD_read()` into the ring buffer. The RX queue drains that buffer toward the guest.
 
-There is one platform quirk worth knowing: on Linux the device opens the microphone voice eagerly at realize time as a workaround (`linux_mic_workaround`), because otherwise opening it lazily when the guest asks does not produce audio. On every other platform the input voice opens on demand. The comment cites bug b/292115117 and expects the workaround to disappear after a QEMU upgrade.
+There is one platform quirk worth knowing. On Linux, the device opens the microphone voice eagerly at realize time as a workaround (`linux_mic_workaround`). Otherwise the voice produces no audio when the device opens it lazily on the guest's request. On every other platform the input voice opens on demand. The comment cites bug b/292115117 and expects the workaround to disappear after a QEMU upgrade.
 
 virtio-snd data flow across the four virtqueues:
 
@@ -236,7 +240,7 @@ The four object types in the voice model:
 - `HWVoiceOut` / `HWVoiceIn` model the host backend's actual output or input
 - `CaptureVoiceOut` is a tap that copies a `HWVoiceOut`'s stereo stream to listeners, created with `AUD_add_capture()`
 
-Each `SWVoiceOut` is bound to one `HWVoiceOut`, but several software voices can share a hardware voice; the engine mixes them. Per `AUDIO.TXT`, the `HWVoiceOut` owns a fixed-size circular buffer of stereo samples and a `clip()` function that converts that buffer into the backend's native format. Each `SWVoiceOut` owns a `conv()` function and a `ratio` value (target-over-source frequency, scaled by `1 << 32`) so it can resample as it mixes into the shared stereo buffer.
+Each `SWVoiceOut` is bound to one `HWVoiceOut`, but several software voices can share a hardware voice; the engine mixes them. Per `AUDIO.TXT`, the `HWVoiceOut` owns a fixed-size circular buffer of stereo samples and a `clip()` function that converts that buffer into the backend's native format. Each `SWVoiceOut` owns a `conv()` function and a `ratio` value (target-over-source frequency, scaled by `1 << 32`), so it can resample as it mixes into the shared stereo buffer.
 
 ### 15.4.1 The audio timer as the system clock
 
@@ -247,7 +251,7 @@ The whole subsystem is pulsed by one periodic timer. `audio_init()` creates it o
 s->ts = timer_new_ns(QEMU_CLOCK_VIRTUAL, audio_timer, s);
 ```
 
-The default period is 100 Hz (`conf.period.hertz = 100`). On every tick, for each `HWVoiceOut`, the engine computes how many samples are "live" (the minimum across active software voices of `total_hw_samples_mixed`), calls the hardware voice's `run_out` to push those to the backend, then calls each software voice's device callback with a `free` count so the device refills the stereo buffer. `AUDIO.TXT` reduces it to pseudo-code:
+The default period is 100 Hz (`conf.period.hertz = 100`). On every tick, the engine does these steps for each `HWVoiceOut`. First it computes how many samples are "live" (the minimum across active software voices of `total_hw_samples_mixed`). Then it calls the hardware voice's `run_out` to push those samples to the backend. Then it calls each software voice's device callback with a `free` count, so the device refills the stereo buffer. `AUDIO.TXT` reduces it to pseudo-code:
 
 ```c
 // Source: external/qemu/android/docs/AUDIO.TXT
@@ -292,7 +296,7 @@ The registered backend drivers and their purposes:
 - `none`: the null sink — timer-driven, produces and consumes nothing
 - `fwd`: the microphone-forwarder pseudo-driver (§15.6)
 
-Selection is priority-ordered. `audio.c` builds a priority list whose first entry wins by default, then `audio_init()` honors an explicit `QEMU_AUDIO_DRV` request before falling back through the list and finally to `none`.
+Selection is priority-ordered. `audio.c` builds a priority list whose first entry wins by default. Then `audio_init()` honors an explicit `QEMU_AUDIO_DRV` request first. After that it falls back through the list, and finally to `none`.
 
 ```c
 // Source: external/qemu/audio/audio.c
@@ -335,7 +339,7 @@ static const char *audio_get_conf_str (const char *key, ...) {
     ...
 ```
 
-`vl.c` calls `set_audio_drv()` during startup, defaulting to `"none"` in headless or test situations and otherwise propagating `QEMU_AUDIO_DRV`. The `none` driver is not a failure mode — it is a fully supported sink. With no host backend the audio timer still runs, the guest still sees buffers drain on schedule, and the capture taps still see the mixed stream. That is exactly what a headless CI box or a WebRTC-only deployment wants: correct timing and a tappable stream without ever opening a speaker.
+`vl.c` calls `set_audio_drv()` during startup, defaulting to `"none"` in headless or test situations and otherwise propagating `QEMU_AUDIO_DRV`. The `none` driver is not a failure mode — it is a fully supported sink. With no host backend, the audio timer still runs. The guest still sees buffers drain on schedule, and the capture taps still see the mixed stream. That is exactly what a headless CI box or a WebRTC-only deployment wants: correct timing and a tappable stream without ever opening a speaker.
 
 ## 15.6 The android-emu Audio Control Plane
 
@@ -360,11 +364,11 @@ android::emulation::AudioOutputEngine::set(
         new android::qemu::QemuAudioOutputEngine());
 ```
 
-`QemuAudioOutputEngine::open()` is a thin shim: validate the channel count, register a `QEMUSoundCard`, translate the `AudioFormat` enum to QEMU's `audfmt_e` with a `convert()` switch, then `AUD_open_out()`. Its `write()` is a direct `AUD_write()`. This is the path the media player and the recording subsystem use to push a decoded audio track into the same mixing engine the guest uses.
+`QemuAudioOutputEngine::open()` is a thin shim: validate the channel count, register a `QEMUSoundCard`, translate the `AudioFormat` enum to QEMU's `audfmt_e` with a `convert()` switch, then `AUD_open_out()`. Its `write()` is a direct `AUD_write()`. The media player and the recording subsystem use this path to push a decoded audio track into the mixing engine that the guest also uses.
 
 ### 15.6.1 The output capture tap
 
-`QemuAudioCaptureEngine` is the output side: it installs an `AUD_add_capture()` tap on the mixed output stream so listeners receive a copy of everything the guest is playing. The capture op set hands each chunk to the registered `AudioCapturer`.
+`QemuAudioCaptureEngine` is the output side. It installs an `AUD_add_capture()` tap on the mixed output stream, so listeners receive a copy of everything the guest plays. The capture op set hands each chunk to the registered `AudioCapturer`.
 
 ```cpp
 // Source: external/qemu/android-qemu2-glue/audio-capturer.cpp
@@ -378,7 +382,7 @@ static void my_capture(void* opaque, void* buf, int size)
 }
 ```
 
-`start()` builds `audsettings` from the capturer's requested rate/bits/channels, fills an `audio_capture_ops` with `my_capture`, and calls `AUD_add_capture()`. Multiple capturers can be active at once — they are keyed in an `unordered_map` — so the recorder, a WebRTC stream, and a gRPC `streamAudio` client can each receive the same mixed output independently.
+`start()` builds `audsettings` from the capturer's requested rate/bits/channels, fills an `audio_capture_ops` with `my_capture`, and calls `AUD_add_capture()`. Multiple capturers can be active at once, because they are keyed in an `unordered_map`. So the recorder, a WebRTC stream, and a gRPC `streamAudio` client can each receive the same mixed output independently.
 
 The recording subsystem's `AudioProducer` is one such consumer; it wraps an `AudioCapturer` whose `onSample` feeds the video encoder (`external/qemu/android/android-ui/modules/aemu-recording/src/android/recording/audio/AudioProducer.cpp`). The WebRTC `InprocessAudioSource` is another; it opens a `QemuAudioOutputStream` at 44100 Hz stereo S16 and forwards each frame to libwebrtc's `OnData` (`external/qemu/android/android-webrtc/android-webrtc/emulator/webrtc/capture/InprocessAudioSource.cpp`).
 
@@ -399,7 +403,9 @@ int QemuAudioInputEngine::start(android::emulation::AudioCapturer* capturer)
 }
 ```
 
-The forwarder is the `fwd` pseudo-driver. A comment in `audio_forwarder.c` is blunt about the technique — it modifies the global audio state to "interject a new active driver," saving the previous input voice and configuration so they can be restored on `audio_forwarder_disable()`. A virtio-snd device registers its input voice with the forwarder via `audio_forwarder_register_card()` during realize, and unregisters it during unrealize. Only one forwarder can be active at a time, which is why `QemuAudioInputEngine` guards entry with an atomic `compare_exchange_strong` and the gRPC layer rejects a second concurrent microphone.
+The forwarder is the `fwd` pseudo-driver. A comment in `audio_forwarder.c` is blunt about the technique. It modifies the global audio state to "interject a new active driver." It saves the previous input voice and configuration, so they can be restored on `audio_forwarder_disable()`.
+
+A virtio-snd device registers its input voice with the forwarder via `audio_forwarder_register_card()` during realize, and unregisters it during unrealize. Only one forwarder can be active at a time. For this reason `QemuAudioInputEngine` guards entry with an atomic `compare_exchange_strong`, and the gRPC layer rejects a second concurrent microphone.
 
 The two capture mechanisms — output tap versus input forwarder:
 
@@ -427,11 +433,11 @@ rpc streamAudio(AudioFormat) returns (stream AudioPacket) {}
 rpc injectAudio(stream AudioPacket) returns (google.protobuf.Empty) {}
 ```
 
-`streamAudio` is server-streaming: the client sends one `AudioFormat`, and the server emits an `AudioPacket` roughly every 20–30 ms while the device produces audio. `injectAudio` is client-streaming: the client pushes `AudioPacket`s into the guest microphone. The `AudioFormat` message is small — sampling rate, mono/stereo, and a `SampleFormat` of either `AUD_FMT_U8` or `AUD_FMT_S16` — plus a `DeliveryMode` that lets injection run blocking or real-time.
+`streamAudio` is server-streaming: the client sends one `AudioFormat`, and the server emits an `AudioPacket` roughly every 20–30 ms while the device produces audio. `injectAudio` is client-streaming: the client pushes `AudioPacket`s into the guest microphone. The `AudioFormat` message is small. It contains a sampling rate, mono/stereo, and a `SampleFormat` of either `AUD_FMT_U8` or `AUD_FMT_S16`. It also contains a `DeliveryMode` that lets injection run blocking or real-time.
 
 ### 15.7.1 QemuAudioOutputStream and QemuAudioInputStream
 
-The handlers bridge gRPC to the capture engines through two adapter classes in `AudioStream.cpp`. `QemuAudioOutputStream` owns an `AudioStreamCapturer` that registers as an output capturer; each `onSample()` callback pushes bytes into a blocking ring buffer, and `read()` pulls a frame out for the next packet.
+The handlers bridge gRPC to the capture engines through two adapter classes in `AudioStream.cpp`. `QemuAudioOutputStream` owns an `AudioStreamCapturer` that registers as an output capturer. Each `onSample()` callback pushes bytes into a blocking ring buffer. `read()` pulls a frame out for the next packet.
 
 ```cpp
 // Source: external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/audio/AudioStream.cpp
@@ -440,11 +446,11 @@ int QemuAudioOutputStream::onSample(void* buf, int n) {
 }
 ```
 
-`AudioStreamCapturer` chooses output or input mode in its constructor by calling `AudioCaptureEngine::get(mAudioMode)->start(this)`. In output mode it taps the mixed stream; in input mode it drives the microphone forwarder. `QemuAudioInputStream::onSample()` is the inverse — the forwarder calls it to *pull* samples (`sgetn`) when the guest wants microphone data, and the gRPC handler fills the buffer with `write()`.
+`AudioStreamCapturer` chooses output or input mode in its constructor by calling `AudioCaptureEngine::get(mAudioMode)->start(this)`. In output mode it taps the mixed stream; in input mode it drives the microphone forwarder. `QemuAudioInputStream::onSample()` is the inverse. The forwarder calls it to *pull* samples (`sgetn`) when the guest wants microphone data. The gRPC handler fills the buffer with `write()`.
 
 ### 15.7.2 The injectAudio handler
 
-`injectAudio` in `EmulatorService.cpp` shows the full life cycle: enforce a single active microphone, read the first packet to learn the format, construct a `QemuAudioInputStream`, then loop reading packets and writing them into the input ring until the client disconnects.
+`injectAudio` in `EmulatorService.cpp` shows the full life cycle. It enforces a single active microphone. It reads the first packet to learn the format. It constructs a `QemuAudioInputStream`. Then it loops: it reads packets and writes them into the input ring until the client disconnects.
 
 ```cpp
 // Source: external/qemu/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
@@ -460,7 +466,9 @@ if (!aos.good()) {
 }
 ```
 
-When the client closes the stream the handler does not drop the tail of the buffer; it writes silence for up to `audioQueueTime` (300 ms) to flush the queued samples into the guest before tearing down the input path. The sampling rate is capped at 48 kHz, matching Android's practical ceiling. The mirror handler, `streamAudio`, uses a 30 ms frame window (at 44100 Hz this yields 1320 samples per channel) and a 30 ms read timeout, defaulting an unset rate to 44100 Hz before constructing the output stream. The constant `kSrcNumSamples = 512` appears in the handler as a documentary note about QEMU's internal audio block size but is not used to compute the gRPC frame.
+When the client closes the stream, the handler does not drop the tail of the buffer. It writes silence for up to `audioQueueTime` (300 ms). This flushes the queued samples into the guest before the handler tears down the input path.
+
+The sampling rate is capped at 48 kHz, matching Android's practical ceiling. The mirror handler, `streamAudio`, uses a 30 ms frame window (at 44100 Hz this yields 1320 samples per channel) and a 30 ms read timeout. It defaults an unset rate to 44100 Hz before it constructs the output stream. The constant `kSrcNumSamples = 512` appears in the handler as a documentary note about QEMU's internal audio block size. The handler does not use it to compute the gRPC frame.
 
 End-to-end gRPC audio out and in:
 
@@ -489,9 +497,9 @@ sequenceDiagram
 
 ## 15.8 Snapshots and State Versioning
 
-Both devices participate in snapshots, but with very different surfaces. The goldfish device carries an explicit save version constant, `AUDIO_STATE_SAVE_VERSION 3` in `goldfish_audio.c`, with a comment to bump it whenever the `goldfish_audio_state` struct changes. The buffer addresses, lengths, interrupt status, and the `current_buffer` ping-pong index are all serializable scalars, so the device restores cleanly: on resume the guest's next register access simply continues the protocol.
+Both devices participate in snapshots, but with very different surfaces. The goldfish device carries an explicit save version constant, `AUDIO_STATE_SAVE_VERSION 3` in `goldfish_audio.c`, with a comment to bump it whenever the `goldfish_audio_state` struct changes. The buffer addresses, lengths, interrupt status, and the `current_buffer` ping-pong index are all serializable scalars, so the device restores cleanly. On resume, the guest's next register access simply continues the protocol.
 
-virtio-snd defines `VIRTIO_SND_SNAPSHOT_VERSION 1` and registers a `vmstate` description named `"virtio-snd"`. Because the host voices are reopened lazily through the `prepare`/`start` control sequence, a restored stream that was mid-playback re-establishes its voice when the guest re-issues control commands. The audio subsystem itself registers `vmstate_audio` in `audio_init()` and installs a VM-change-state handler so that pausing the VM also quiesces the audio timer — without it, the warning in `audio_init()` notes that "Audio can continue looping even after stopping the VM."
+virtio-snd defines `VIRTIO_SND_SNAPSHOT_VERSION 1` and registers a `vmstate` description named `"virtio-snd"`. The host voices are reopened lazily through the `prepare`/`start` control sequence. So a restored stream that was mid-playback re-establishes its voice when the guest re-issues control commands. The audio subsystem itself registers `vmstate_audio` in `audio_init()`. It also installs a VM-change-state handler, so the audio timer quiesces when the VM pauses. Without the handler, the warning in `audio_init()` notes that "Audio can continue looping even after stopping the VM."
 
 ## 15.9 Try It
 
@@ -511,26 +519,26 @@ QEMU_AUDIO_DRV=none emulator -avd <name> -verbose 2>&1 | grep -i "audio"
 QEMU_AUDIO_DRV=wav  emulator -avd <name>   # writes playback to a wav file
 ```
 
-Inject a WAV file into the guest microphone over gRPC with the bundled Python sample, which reads the file and calls `injectAudio`:
+Use the bundled Python sample to inject a WAV file into the guest microphone over gRPC. The sample reads the file and calls `injectAudio`:
 
 ```bash
 # The emulator prints its gRPC port to stdout; pass it to the sample client.
 python3 external/qemu/android/android-grpc/python/samples/src/audio/inject_audio.py --help
 ```
 
-Confirm the single-microphone rule. Open two `injectAudio` streams at once and observe that the second returns `FAILED_PRECONDITION` with "There can be only one microphone active" — the guard in `EmulatorService::injectAudio`.
+Confirm the single-microphone rule. Open two `injectAudio` streams at once. Observe that the second returns `FAILED_PRECONDITION` with "There can be only one microphone active". This is the guard in `EmulatorService::injectAudio`.
 
 Read the model itself. `external/qemu/android/docs/AUDIO.TXT` is the canonical description of the `SWVoice`/`HWVoice` mixing loop and is short enough to read end to end.
 
 ## Summary
 
-- The guest sees one of two sound cards, chosen at launch by `buildSoundhwParam()` in `android-qemu2-glue/main.cpp`: the legacy `goldfish_audio` MMIO device or the modern `virtio-snd-pci` device, gated by the `VirtioSndCard` feature flag.
-- `goldfish_audio` is a single MMIO register block with two ping-pong output buffers and buffer-empty/full interrupts; it opens its host voice at a fixed 44.1 kHz stereo S16 and an 8 kHz mono microphone.
-- `virtio-snd` uses four virtqueues (control, event, TX, RX), opens host voices on demand at the guest-requested format, and inserts a `+2,-2` silence meander when the guest under-runs rather than stalling the host clock.
-- Both devices talk to QEMU's `AUD_*` API, which models emulated `SWVoice` objects mixing into shared `HWVoice` stereo buffers, all pulsed by a 100 Hz `audio_timer` on the virtual clock.
-- Host backends (`alsa`, `oss`, `pa`, `coreaudio`, `dsound`, `winaudio`, `sdl`, `spice`, `wav`, `none`, `fwd`) are priority-ordered; `set_audio_drv()` lets the emulator override `QEMU_AUDIO_DRV` in-process, and `none` is a fully supported timer-driven sink.
-- The android-emu control plane exposes `AudioOutputEngine` for playback, an `AudioCapturer`/`AudioCaptureEngine` output tap via `AUD_add_capture`, and a microphone forwarder (the `fwd` driver) that swaps the active input voice for injection.
-- Two gRPC RPCs surface this to clients: `streamAudio` server-streams mixed output frames, and `injectAudio` client-streams PCM into the single guest microphone, flushing with silence on close.
+- The guest sees one of two sound cards, chosen at launch by `buildSoundhwParam()` in `android-qemu2-glue/main.cpp`: the legacy `goldfish_audio` MMIO device or the modern `virtio-snd-pci` device. The `VirtioSndCard` feature flag gates the choice.
+- `goldfish_audio` is a single MMIO register block with two ping-pong output buffers and buffer-empty/full interrupts. It opens its host voice at a fixed 44.1 kHz stereo S16 and an 8 kHz mono microphone.
+- `virtio-snd` uses four virtqueues (control, event, TX, RX). It opens host voices on demand at the guest-requested format. When the guest under-runs, it inserts a `+2,-2` silence meander and does not stall the host clock.
+- Both devices talk to QEMU's `AUD_*` API. The API models emulated `SWVoice` objects that mix into shared `HWVoice` stereo buffers. A 100 Hz `audio_timer` on the virtual clock pulses all of it.
+- Host backends (`alsa`, `oss`, `pa`, `coreaudio`, `dsound`, `winaudio`, `sdl`, `spice`, `wav`, `none`, `fwd`) are priority-ordered. `set_audio_drv()` lets the emulator override `QEMU_AUDIO_DRV` in-process. `none` is a fully supported timer-driven sink.
+- The android-emu control plane exposes `AudioOutputEngine` for playback. It also exposes an `AudioCapturer`/`AudioCaptureEngine` output tap via `AUD_add_capture`. A microphone forwarder (the `fwd` driver) swaps the active input voice for injection.
+- Two gRPC RPCs surface this to clients. `streamAudio` server-streams mixed output frames. `injectAudio` client-streams PCM into the single guest microphone and flushes with silence on close.
 
 ### Key Source Files
 
