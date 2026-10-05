@@ -178,11 +178,11 @@ static constexpr uint32_t s_maxNumMultiDisplay = 11;
 static constexpr uint32_t s_invalidIdMultiDisplay = 0xFFFFFFAB;
 ```
 
-Display 0 is the primary Android display. Ids 1–3 are user-configurable secondary displays created through the UI, command line, or `config.ini`. Ids 4–5 are nominally reserved per the header comment. No current command-line, config.ini, or gRPC interface can reach them.
+Display 0 is the primary Android display. Ids 1–3 are user-configurable secondary displays created through the UI, command line, or `config.ini`. Ids 4–5 are nominally reserved per the header comment. However, they are not reachable through any current command-line, config.ini, or gRPC interface.
 
 Ids 6–10 are reserved for displays the *guest* creates dynamically (for example through HWComposer/`rcCommand`). The multidisplay pipe deliberately does not report these displays back to the guest, because the guest already knows about them. `MultiDisplayPipe::onMessage` breaks out of the QUERY loop once it sees an id at or past `s_displayIdInternalBegin`.
 
-`MultiDisplay` is also an `EventNotificationSupport<DisplayChangeEvent>`. Every mutation (`createDisplay`, `setDisplayPose`, `destroyDisplay`, `notifyDisplayChanges`) fires a `DisplayChangeEvent` with one of `DisplayAdded`, `DisplayRemoved`, `DisplayChanged`, or `DisplayTransactionCompleted`, so that the UI and gRPC subscribers can react.
+`MultiDisplay` is also an `EventNotificationSupport<DisplayChangeEvent>`. Every mutation (`createDisplay`, `setDisplayPose`, `destroyDisplay`, `notifyDisplayChanges`) fires a `DisplayChangeEvent` with one of `DisplayAdded`, `DisplayRemoved`, `DisplayChanged`, or `DisplayTransactionCompleted`. This lets the UI and gRPC subscribers react.
 
 ```mermaid
 flowchart LR

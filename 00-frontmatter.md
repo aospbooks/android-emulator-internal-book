@@ -41,11 +41,11 @@ excerpts may differ in past or future revisions of the source tree. The reader
 is encouraged to verify references against their own checked-out source.
 
 **Disclaimer**: The information in this book is provided on an "as is" basis,
-without warranty. Every effort has been made to make sure the book is
-accurate, and it was verified directly against the source code. Neither the author
-nor the publisher has any liability to any person or entity for any loss or
-damage. This includes loss or damage that the information in this book causes,
-or is alleged to cause, directly or indirectly.
+without warranty. While every effort has been made to ensure accuracy through
+direct source code verification, neither the author nor the publisher shall have
+any liability to any person or entity with respect to any loss or damage caused
+or alleged to be caused directly or indirectly by the information contained in
+this book.
 
 **Source tree baseline**: the Android Emulator `main`-branch superproject
 (forked QEMU under `external/qemu`, `hardware/google/aemu`, and

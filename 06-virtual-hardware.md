@@ -84,7 +84,7 @@ A parallel `irqmap[]` at `external/qemu/hw/arm/ranchu.c:126` assigns each device
 
 ### 6.2.2 The x86 goldfish defs
 
-On x86 the goldfish addresses cannot live in the dynamic ranchu table, because the PC machine model and the ACPI tables both need the same numbers. They are instead defined once in a header shared between C and ACPI ASL, `external/qemu/include/hw/acpi/goldfish_defs.h`. The comment explains the convention: I/O memory uses `0xff001000` and above, interrupts use lines 16 through 24 (`external/qemu/include/hw/acpi/goldfish_defs.h:18`).
+On x86 the goldfish addresses cannot live in the dynamic ranchu table. This is because the PC machine model and the ACPI tables both need the same numbers. They are instead defined once in a header shared between C and ACPI ASL, `external/qemu/include/hw/acpi/goldfish_defs.h`. The comment explains the convention: I/O memory uses `0xff001000` and above, interrupts use lines 16 through 24 (`external/qemu/include/hw/acpi/goldfish_defs.h:18`).
 
 ```c
 // Source: external/qemu/include/hw/acpi/goldfish_defs.h
@@ -100,7 +100,7 @@ On x86 the goldfish addresses cannot live in the dynamic ranchu table, because t
 #define GOLDFISH_RTC_IOMEM_BASE       0xff016000
 ```
 
-The same header also describes the `goldfish_address_space` PCI device, a memory-sharing device used by the graphics path. It has vendor ID `0x607D` and device ID `0xF153`, on PCI slot 11 (`external/qemu/include/hw/acpi/goldfish_defs.h:65`). Notice that x86 has a `goldfish_rtc` and a `goldfish_rotary` that the ranchu table does not need, because ARM gets its real-time clock and wall-clock time from the ARM architected timer and a virtio path instead.
+The same header also describes the `goldfish_address_space` PCI device, a memory-sharing device used by the graphics path. It has vendor ID `0x607D` and device ID `0xF153`, on PCI slot 11 (`external/qemu/include/hw/acpi/goldfish_defs.h:65`). Notice that x86 has a `goldfish_rtc` and a `goldfish_rotary` that the ranchu table does not need. This is because ARM gets its real-time clock and wall-clock time from the ARM architected timer and a virtio path instead.
 
 ### 6.2.3 Building the device tree
 

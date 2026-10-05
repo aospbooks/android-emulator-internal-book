@@ -359,7 +359,7 @@ if (androidSnapshot_quickbootLoad(loadvm)) {
 - Shared mapping (`SNAPSHOT_RAM_FILE_SHARED`): the guest writes through to `ram.img`, so on exit there is little to copy. Save is nearly free.
 - Private mapping (`SNAPSHOT_RAM_FILE_PRIVATE`): the file is the initial image, but guest writes are copy-on-write in the host's page cache. A real save is therefore still needed.
 
-`androidSnapshot_getRamFileInfo` reports which of `SNAPSHOT_RAM_FILE_NONE`, `_PRIVATE`, or `_SHARED` is active. `Quickboot::save` enforces a subtlety. If there is a RAM file but it is not shared, saving is refused outright, because a private file-backed session can't be persisted by flushing alone:
+`androidSnapshot_getRamFileInfo` reports which of `SNAPSHOT_RAM_FILE_NONE`, `_PRIVATE`, or `_SHARED` is active. `Quickboot::save` enforces a subtlety. If there is a RAM file but it is not shared, saving is refused outright. This is because a private file-backed session can't be persisted by flushing alone:
 
 ```cpp
 // Source: external/qemu/android/android-emu/android/snapshot/Quickboot.cpp
@@ -695,7 +695,9 @@ bool Snapshotter::stopVulkanAppsIfApplicable() {
     uint32_t count = 0;
 ```
 
-The placement matters more than it looks. The feature check existed before, but it lived further down. It was tangled with the `-no-snapshot-save` and XR/GuestAngle conditions that force `needToSaveSnapshot` to false. A false there meant the function returned `false`, which the legacy UI reported as a failure to stop the apps. Hoisting the check turns "we could not kill the apps, so we cannot snapshot" into "we do not need to kill the apps." Now, when the emulator is closed with a Vulkan app in the foreground, the GPU state of that app is saved. The app is not terminated.
+The placement matters more than it looks. The feature check existed before, but it lived further down. It was tangled with the `-no-snapshot-save` and XR/GuestAngle conditions that force `needToSaveSnapshot` to false. A false there meant the function returned `false`, which the legacy UI reported as a failure to stop the apps.
+
+Hoisting the check turns "we could not kill the apps, so we cannot snapshot" into "we do not need to kill the apps." Now, when the emulator is closed with a Vulkan app in the foreground, the GPU state of that app is saved. The app is not terminated.
 
 ### 9.10.4 Where gfxstream state enters the snapshot stream
 
@@ -835,7 +837,7 @@ static constexpr uint32_t kNumMaxColorBuffers = 16000;
 
 Load-time validation is per object and fails the whole load. Mapped memory must match both handle and size (`vk_decoder_global_state.cpp:834-847`). Every saved fence must resolve to a live `VkFence` (`:1067-1073`). A per-mip payload whose byte count differs from the expected staging size is fatal (`vk_decoder_snapshot_utils.cpp:364-368`).
 
-Descriptor sets get a more interesting treatment. Their writes hold weak pointers to the underlying image, image view, or buffer. On save, any write whose targets have expired is dropped rather than serialized, because replaying a descriptor write against a destroyed resource would either fault or silently bind whatever now occupies that handle (`vk_decoder_global_state.cpp:618-676`).
+Descriptor sets get a more interesting treatment. Their writes hold weak pointers to the underlying image, image view, or buffer. On save, any write whose targets have expired is dropped rather than serialized. This is because replaying a descriptor write against a destroyed resource would either fault or silently bind whatever now occupies that handle (`vk_decoder_global_state.cpp:618-676`).
 
 The stability controls proper come in three shapes. First, `snapshotsEnabled()` changes runtime behavior so that state remains recoverable. Buffers gain `TRANSFER_SRC` usage so their contents can be read back. Device memory is force-mapped so it can be serialized. Shader modules are never released eagerly, because a later replay still needs them (`vk_decoder_global_state.cpp:7990-7994`). These costs are paid only when the feature is on.
 

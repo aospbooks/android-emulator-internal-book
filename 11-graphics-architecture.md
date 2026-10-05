@@ -314,7 +314,7 @@ Each `decode` returns the number of bytes it consumed. If that is positive, the 
 
 When no decoder makes progress the inner loop exits and the thread reads more bytes from the stream. The decoder dispatches each opcode to the matching host implementation. For GLES that means a call into the host translator or directly into the host GL driver. For renderControl it means a call into a function such as `rcCreateColorBuffer` (covered below).
 
-A revealing detail in the loop is an explicit NVIDIA driver workaround. Before the thread runs the GLES decoders, it takes `FrameBuffer::getFB()->lockContextStructureRead()`, because on some Linux NVIDIA drivers, a call to `glTexSubImage2D` concurrently with glXMakeCurrent (making a context current) segfaults. The comment in `render_thread.cpp` documents this verbatim — a reminder that the host path runs against real, quirky drivers.
+A revealing detail in the loop is an explicit NVIDIA driver workaround. Before the thread runs the GLES decoders, it takes `FrameBuffer::getFB()->lockContextStructureRead()`. This is because on some Linux NVIDIA drivers, a call to `glTexSubImage2D` concurrently with glXMakeCurrent (making a context current) segfaults. The comment in `render_thread.cpp` documents this verbatim — a reminder that the host path runs against real, quirky drivers.
 
 ```mermaid
 flowchart TB
@@ -436,7 +436,7 @@ std::unique_ptr<vk::VkEmulation> m_emulationVk;
 std::unique_ptr<gl::EmulationGl> m_emulationGl;
 ```
 
-A `ColorBuffer` (declared in `hardware/google/gfxstream/host/color_buffer.h`) is `create`d with pointers to both `gl::EmulationGl*` and `vk::VkEmulation*`. It can be backed by GL, by Vulkan, or interoperate between them. That is why the class exposes paired methods such as `flushFromGl` / `flushFromVk` and `invalidateForGl` / `invalidateForVk`. It also has `borrowForComposition` and `borrowForDisplay`, which hand out a `BorrowedImageInfo` tagged with `UsedApi::kGl` or `UsedApi::kVk`. When a guest renders into a color buffer with Vulkan but the host composites with GL (or vice versa), these flush/invalidate calls synchronize the shared image between the two host APIs.
+A `ColorBuffer` (declared in `hardware/google/gfxstream/host/color_buffer.h`) is `create`d with pointers to both `gl::EmulationGl*` and `vk::VkEmulation*`. It can be backed by GL, by Vulkan, or interoperate between them. That is why the class exposes paired methods such as `flushFromGl` / `flushFromVk` and `invalidateForGl` / `invalidateForVk`. It also has `borrowForComposition` and `borrowForDisplay`, which hand out a `BorrowedImageInfo` tagged with `UsedApi::kGl` or `UsedApi::kVk`. A guest can render into a color buffer with Vulkan while the host composites with GL (or vice versa). These flush/invalidate calls then synchronize the shared image between the two host APIs.
 
 ```mermaid
 stateDiagram-v2

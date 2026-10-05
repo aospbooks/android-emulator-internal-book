@@ -67,7 +67,7 @@ Many `<project>` entries carry attributes that tune what gets synced. `clone-dep
          clone-depth="1" groups="notdefault,platform-darwin"/>
 ```
 
-A Linux developer never fetches the Darwin or Windows toolchains, because those projects are in `notdefault` groups and are only pulled when their `platform-*` group is requested.
+A Linux developer never fetches the Darwin or Windows toolchains. This is because those projects are in `notdefault` groups and are only pulled when their `platform-*` group is requested.
 
 ### Top-level project directories
 

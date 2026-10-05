@@ -240,7 +240,7 @@ The four object types in the voice model:
 - `HWVoiceOut` / `HWVoiceIn` model the host backend's actual output or input
 - `CaptureVoiceOut` is a tap that copies a `HWVoiceOut`'s stereo stream to listeners, created with `AUD_add_capture()`
 
-Each `SWVoiceOut` is bound to one `HWVoiceOut`, but several software voices can share a hardware voice; the engine mixes them. Per `AUDIO.TXT`, the `HWVoiceOut` owns a fixed-size circular buffer of stereo samples and a `clip()` function that converts that buffer into the backend's native format. Each `SWVoiceOut` owns a `conv()` function and a `ratio` value (target-over-source frequency, scaled by `1 << 32`), so it can resample as it mixes into the shared stereo buffer.
+Each `SWVoiceOut` is bound to one `HWVoiceOut`, but several software voices can share a hardware voice; the engine mixes them. Per `AUDIO.TXT`, the `HWVoiceOut` owns a fixed-size circular buffer of stereo samples and a `clip()` function that converts that buffer into the backend's native format. Each `SWVoiceOut` owns a `conv()` function and a `ratio` value (target-over-source frequency, scaled by `1 << 32`). As a result, it can resample as it mixes into the shared stereo buffer.
 
 ### 15.4.1 The audio timer as the system clock
 

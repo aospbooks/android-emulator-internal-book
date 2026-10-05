@@ -339,7 +339,7 @@ The returned `rootcanal_id` is the model's device identifier, and it is the hand
 
 ### 19.6.2 The Snapshot Quirk
 
-The facade unconditionally enables a Rootcanal "quirk" on the global `controller_proto_` during `Start()`, so every controller inherits it. When a custom controller proto is also supplied via `Add()`, the quirk is explicitly set again on the custom proto, so that it is not overridden:
+The facade unconditionally enables a Rootcanal "quirk" on the global `controller_proto_` during `Start()`, so every controller inherits it. When a custom controller proto is also supplied via `Add()`, the quirk is explicitly set again on the custom proto. This makes sure that it is not overridden:
 
 ```cpp
 // Source: tools/netsim/src/hci/bluetooth_facade.cc

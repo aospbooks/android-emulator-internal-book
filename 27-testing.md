@@ -311,7 +311,7 @@ discover_tests(OpenglRender_unittests)
 
 That file registers five test executables via `discover_tests`. Three of them are the GLES suites. `gfxstream_backend_unittests` covers backend and feature-flag tests. `OpenglRender_unittests` covers basic GLES rendering. `OpenglRender_snapshot_unittests` is a large suite that saves and restores GL state across snapshots (`tests/GLSnapshot*_unittest.cpp`).
 
-The other two cover the Vulkan path: `Vulkan_unittests` (which ships `vulkan/testdata/*.png` golden images, copied to `testdata` at build time) and `Vulkan_integrationtests`. The snapshot tests are the most valuable here, because GL state restoration is exactly the kind of thing a unit test cannot reach but an integration-style render-and-compare test can.
+The other two cover the Vulkan path: `Vulkan_unittests` (which ships `vulkan/testdata/*.png` golden images, copied to `testdata` at build time) and `Vulkan_integrationtests`. The snapshot tests are the most valuable here. This is because GL state restoration is exactly the kind of thing a unit test cannot reach but an integration-style render-and-compare test can.
 
 ### 27.6.1 The graphics test environment
 

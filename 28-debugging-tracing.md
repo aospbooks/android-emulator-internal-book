@@ -6,7 +6,7 @@ The emulator ships an entire diagnostics layer for exactly this. It is a layered
 
 The fourth is a Perfetto in-process tracing backend that the graphics pipeline writes into. The last is a set of environment switches that turn on Vulkan validation and gfxstream verbosity.
 
-This chapter walks the diagnostic surfaces from the cheapest to the most invasive. The cheapest is a log line you flip on with a flag. The most invasive is a fatal crash that snapshots the whole process. Each surface is grounded in the source that implements it, so that when you read "set `GFXSTREAM_LOG_LEVEL=verbose`", you can also see the `getenv` call that consumes it.
+This chapter walks the diagnostic surfaces from the cheapest to the most invasive. The cheapest is a log line you flip on with a flag. The most invasive is a fatal crash that snapshots the whole process. Each surface is grounded in the source that implements it. This way, when you read "set `GFXSTREAM_LOG_LEVEL=verbose`", you can also see the `getenv` call that consumes it.
 
 ---
 
@@ -129,7 +129,7 @@ extern "C" void verbose_enable(uint64_t tag) {
 }
 ```
 
-Because the mask is a single `uint64_t`, there can be at most 64 tags, and `VERBOSE_MAX` is the count guard. The `VERBOSE_PRINT(tag, ...)` macro combines the tag check with `dprint`, so a tagged log line is emitted only when both the severity floor and the specific bit are open.
+Because the mask is a single `uint64_t`, there can be at most 64 tags, and `VERBOSE_MAX` is the count guard. The `VERBOSE_PRINT(tag, ...)` macro combines the tag check with `dprint`. As a result, a tagged log line is emitted only when both the severity floor and the specific bit are open.
 
 ### 28.2.1 Parsing the command line into the mask
 
@@ -791,7 +791,7 @@ if "arm64" in arch or "aarch64" in arch:
 lldb_cmd = ["lldb", "-n", qemu_engine, "--wait-for"] if debugger == "lldb" else None
 ```
 
-`--wait-for` is what makes this work without a race. LLDB waits for a *future* process with that name. So the tool can start the launcher first and let the debugger catch the engine at the moment the launcher spawns it. The launch side puts the emulator in its own process group, so that teardown after the debugger exits kills the whole tree and does not orphan the engine:
+`--wait-for` is what makes this work without a race. LLDB waits for a *future* process with that name. So the tool can start the launcher first and let the debugger catch the engine at the moment the launcher spawns it. The launch side puts the emulator in its own process group. This is so that teardown after the debugger exits kills the whole tree and does not orphan the engine:
 
 ```python
 # Source: hardware/google/aemu/tools/emu-dev-cli/src/commands/crash/reproduce.py
