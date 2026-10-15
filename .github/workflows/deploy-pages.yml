@@ -38,11 +38,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install MkDocs and local plugins
-        run: |
-          pip install properdocs mkdocs-material pymdown-extensions
-          pip install ./mkdocs-mermaid-renderer
-          pip install ./mkdocs-pdf-generate ./mkdocs-epub-generate
+      - name: Install ProperDocs
+        run: pip install properdocs mkdocs-material pymdown-extensions
 
       - name: Create docs symlinks
         run: |

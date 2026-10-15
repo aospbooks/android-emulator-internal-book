@@ -112,13 +112,10 @@ the *.md files when you need every mention of a class, file, or option.
 ./serve.sh           # start (http://localhost:8001)
 ./serve.sh off       # stop
 ./serve.sh status    # check if running
-./serve.sh pdf       # build PDF → site/android-emulator-internals.pdf
-./serve.sh epub      # build EPUB → site/android-emulator-internals.epub
 ./serve.sh png NN-slug.md   # render a chapter's Mermaid blocks to PNG for visual review
 ```
 
-The `pdf`/`epub` commands stop any running server, then build all chapters into a
-single document with rendered Mermaid diagrams (uses Playwright/Chromium).
+The book is published only as this website; there is no PDF or EPUB edition.
 
 ### Without Docker
 
@@ -151,11 +148,9 @@ Tests `properdocs build` on push to `main` and PRs (~2 min); deploys to GitHub P
 index.md                   Website homepage
 properdocs.yml             ProperDocs config (Material theme + Mermaid)
 docs/                      Symlinks for ProperDocs (gitignored)
-mkdocs-mermaid-renderer/   Shared Mermaid SVG renderer (Playwright + cache)
-mkdocs-pdf-generate/       MkDocs plugin: PDF export
-mkdocs-epub-generate/      MkDocs plugin: EPUB export
-Dockerfile                 python:3.12-slim + Playwright + ProperDocs plugins
-docker-compose.yml         serve / build-site / build-pdf / build-epub
+mkdocs-mermaid-renderer/   Mermaid SVG renderer used by ./serve.sh png (Playwright + cache)
+Dockerfile                 python:3.12-slim + ProperDocs + Playwright
+docker-compose.yml         serve / build-site
 tools/render_mermaid_png.py  Mermaid → PNG renderer for visual review
 llms.txt                   llmstxt.org index of every chapter, for AI agents
 CLAUDE.md                  Project rules for AI agents

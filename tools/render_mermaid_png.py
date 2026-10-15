@@ -5,17 +5,15 @@ tools and the multimodal Read tool, which lets a reviewer eyeball each diagram
 for layout problems (text overflow, overlapping nodes, unreadable arrows) and
 factual accuracy (does the diagram match the prose around it).
 
-The pdf-generate / epub-generate plugins produce ``.mermaid-cache/<sha16>.svg``
-for every Mermaid block. This script reuses those SVGs — it does not re-run
-Mermaid for already-cached diagrams — and only loads them in headless Chromium
-long enough to take a screenshot.
+Rendered SVGs are cached as ``.mermaid-cache/<sha16>.svg``, one per Mermaid
+block. This script reuses those SVGs — it does not re-run Mermaid for
+already-cached diagrams — and only loads them in headless Chromium long enough
+to take a screenshot.
 
 When a mermaid block has been edited, the new content has a new hash and there
 is no cached SVG yet. This script renders any missing SVGs first via the
-shared ``mkdocs_mermaid_renderer`` (the same Playwright + Mermaid pipeline used
-by the pdf/epub plugins). That way ``.mermaid-cache/`` always reflects the
-current markdown, and a subsequent ``serve.sh pdf`` or ``serve.sh epub`` build
-gets cache hits for everything.
+``mkdocs_mermaid_renderer`` package (Playwright + Mermaid). That way
+``.mermaid-cache/`` always reflects the current markdown.
 
 Usage (run inside the book-serve Docker image, which already has Playwright):
 
@@ -166,9 +164,8 @@ def render_chapter(
 def _refresh_svg_cache(targets: list[Path], cache_dir: Path) -> int:
     """Render any mermaid block whose SVG isn't in cache.
 
-    Uses the same `mkdocs_mermaid_renderer` the pdf/epub plugins use, so the
-    cache it leaves behind serves both PNG conversion here and a subsequent
-    ``serve.sh pdf|epub`` build with no extra work.
+    Uses `mkdocs_mermaid_renderer`, so the cache it leaves behind serves the
+    PNG conversion here and any later run with no extra work.
 
     Returns the number of SVGs newly rendered. Idempotent — already-cached
     blocks are skipped.
@@ -227,8 +224,7 @@ def main() -> int:
                     f.unlink()
 
     # Make sure every mermaid block has an SVG in the shared cache before we
-    # screenshot. This also primes ``.mermaid-cache/`` for the next pdf/epub
-    # build, so editing a diagram never leaves stale SVGs lying around.
+    # screenshot, so editing a diagram never leaves stale SVGs lying around.
     _refresh_svg_cache(targets, cache_dir)
 
     from playwright.sync_api import sync_playwright

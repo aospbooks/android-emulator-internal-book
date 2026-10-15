@@ -64,19 +64,6 @@ markdown_extensions:
 
 plugins:
   - search
-  - pdf-generate:
-      enabled: !ENV [MKDOCS_PDF, false]
-      concurrency: 8
-      output: android-emulator-internals.pdf
-      timeout: 30000
-      stylesheets:
-        - docs/stylesheets/pdf.css
-  - epub-generate:
-      enabled: !ENV [MKDOCS_EPUB, false]
-      output: android-emulator-internals.epub
-      timeout: 30000
-      stylesheets:
-        - docs/stylesheets/epub.css
 
 extra_javascript:
   - javascripts/mermaid-zoom.js?v=6

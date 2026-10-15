@@ -9,7 +9,7 @@ __pycache__/
 build/
 dist/
 
-# Mermaid SVG cache (pdf-generate plugin)
+# Mermaid SVG cache (tools/render_mermaid_png.py)
 .mermaid-cache/
 
 # Mermaid PNG renders (./serve.sh png — visual review only)

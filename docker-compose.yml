@@ -13,18 +13,3 @@ services:
     volumes:
       - .:/book
 
-  build-pdf:
-    build: .
-    command: properdocs build
-    environment:
-      - MKDOCS_PDF=true
-    volumes:
-      - .:/book
-
-  build-epub:
-    build: .
-    command: properdocs build
-    environment:
-      - MKDOCS_EPUB=true
-    volumes:
-      - .:/book

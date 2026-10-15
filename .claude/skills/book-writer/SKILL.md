@@ -132,7 +132,7 @@ def run(self) -> None:
     ...
 ```
 
-**Use manual section numbers** matching the chapter (`## 5.1` for chapter 5). ProperDocs doesn't auto-number, and if you ever generate PDF, Pandoc's auto-numbering doubles manual numbers.
+**Use manual section numbers** matching the chapter (`## 5.1` for chapter 5). ProperDocs doesn't auto-number.
 
 **Title format:** `# Chapter N: Title` with colon separator. Not `--`, not `—` (em-dash) — those slip in from autocomplete and routine editing and have to be fixed in audit passes.
 
@@ -165,7 +165,7 @@ After writing or editing any mermaid block, render it to PNG and look at the res
 
 PNGs land in `.mermaid-png/<slug>/NN-<sha16>.png` (one file per block, indexed in chapter order). The wrapper runs `tools/render_mermaid_png.py` inside the `book-serve` Docker image, reusing the same Playwright + Chromium that the SVG cache already uses. PNGs are content-addressed by the same hash as the SVG cache, so reruns skip unchanged diagrams.
 
-The script also refreshes `.mermaid-cache/<sha16>.svg` for any block whose hash isn't there yet — that's the same cache the pdf/epub plugins read, so editing a diagram and running `./serve.sh png` leaves the next `serve.sh pdf` or `serve.sh epub` build with full cache hits and no Mermaid re-render. One command keeps both caches in sync.
+The script also refreshes `.mermaid-cache/<sha16>.svg` for any block whose hash isn't there yet, so the SVG cache always matches the current Markdown and later runs re-render only the diagrams you changed.
 
 What to check on each PNG:
 

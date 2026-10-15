@@ -5,8 +5,6 @@
 #   ./serve.sh on     Same as above
 #   ./serve.sh off    Stop the website
 #   ./serve.sh status Check if running
-#   ./serve.sh pdf    Build the PDF (outputs site/android-emulator-internals.pdf)
-#   ./serve.sh epub   Build the EPUB (outputs site/android-emulator-internals.epub)
 #   ./serve.sh png NN-slug.md [...]
 #                     Render mermaid blocks in the given chapter(s) to PNG
 #                     under .mermaid-png/<slug>/NN-<hash>.png. Use these for
@@ -41,20 +39,6 @@ case "${1:-on}" in
   status)
     docker compose ps serve
     ;;
-  pdf)
-    docker compose down 2>/dev/null
-    echo "Building PDF (pre-rendered mermaid diagrams, cached)..."
-    docker compose build build-pdf
-    docker compose run --rm build-pdf
-    echo "PDF generated: site/android-emulator-internals.pdf"
-    ;;
-  epub)
-    docker compose down 2>/dev/null
-    echo "Building EPUB (pre-rendered mermaid diagrams, cached)..."
-    docker compose build build-epub
-    docker compose run --rm build-epub
-    echo "EPUB generated: site/android-emulator-internals.epub"
-    ;;
   png)
     shift
     if [ $# -eq 0 ]; then
@@ -67,7 +51,7 @@ case "${1:-on}" in
     echo "PNGs written under .mermaid-png/"
     ;;
   *)
-    echo "Usage: $0 [on|off|status|pdf|epub|png NN-slug.md]"
+    echo "Usage: $0 [on|off|status|png NN-slug.md]"
     exit 1
     ;;
 esac
