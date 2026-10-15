@@ -10,6 +10,8 @@ emulator tree.
 
 **Read online:** <https://aospbooks.github.io/android-emulator-internal-book/>
 
+**Using AI?** No plugin or skill pack is needed. Give your coding agent the short prompt in [Using the Book with AI Agents](#using-the-book-with-ai-agents); it reads [`llms.txt`](https://aospbooks.github.io/android-emulator-internal-book/llms.txt) and fetches only the chapters it needs.
+
 > If you spot errors, missing details, or have suggestions, please [open an issue](https://github.com/aospbooks/android-emulator-internal-book/issues) or submit a pull request — feedback from emulator developers and enthusiasts is very welcome.
 
 <!-- --8<-- [start:coverage] -->
@@ -56,6 +58,46 @@ crosvm-based Cuttlefish virtual device:
 
 <!-- --8<-- [end:coverage] -->
 
+## Using the Book with AI Agents
+
+The book needs no plugin, skill, or extension. Any coding agent that can fetch a
+URL or read files (Claude Code, Codex, Gemini CLI, GitHub Copilot, Cursor, and
+others) can use it directly. The entry point is
+[`llms.txt`](https://aospbooks.github.io/android-emulator-internal-book/llms.txt),
+an [llmstxt.org](https://llmstxt.org/)-style index that lists every chapter and
+appendix with a one-line summary and its URL, grouped by Part. The agent reads
+the index first and then fetches only the chapters that match your question.
+
+**From the website.** Paste this into your prompt, or into the agent's project
+instructions (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`,
+`.github/copilot-instructions.md`) to make it permanent:
+
+```text
+Use the Android Emulator Internals book as reference material.
+1. Fetch https://aospbooks.github.io/android-emulator-internal-book/llms.txt.
+   It lists every chapter with a one-line summary and its URL.
+2. Fetch only the chapters that cover the subsystem in question. Do not crawl
+   the whole site.
+3. Cite chapter and section numbers (for example "section 11.4") in answers.
+4. The book cites emulator source as paths relative to the emulator repo
+   superproject (external/qemu/..., hardware/google/gfxstream/...). Check a path
+   against the source tree before you rely on it.
+```
+
+**From a local clone.** This works offline and lets the agent search every
+chapter at once:
+
+```bash
+git clone https://github.com/aospbooks/android-emulator-internal-book.git
+```
+
+```text
+The Android Emulator Internals book is cloned at <path>. Read <path>/llms.txt
+to find the right chapter, then read that chapter's Markdown file
+(<path>/NN-slug.md, for example 11-graphics-architecture.md) directly. Search
+the *.md files when you need every mention of a class, file, or option.
+```
+
 ## How to Give Feedback
 
 - **Found an error?** Open an issue describing the chapter, section, and what's wrong.
@@ -86,7 +128,7 @@ pip install mkdocs-material pymdown-extensions
 
 # Create symlinks (one-time)
 mkdir -p docs
-for f in [0-9]*.md [A-Z]-*.md index.md; do ln -sf "../$f" "docs/$f"; done
+for f in [0-9]*.md [A-Z]-*.md index.md llms.txt; do ln -sf "../$f" "docs/$f"; done
 
 # Start
 properdocs serve                   # http://127.0.0.1:8000
@@ -115,6 +157,7 @@ mkdocs-epub-generate/      MkDocs plugin: EPUB export
 Dockerfile                 python:3.12-slim + Playwright + ProperDocs plugins
 docker-compose.yml         serve / build-site / build-pdf / build-epub
 tools/render_mermaid_png.py  Mermaid → PNG renderer for visual review
+llms.txt                   llmstxt.org index of every chapter, for AI agents
 CLAUDE.md                  Project rules for AI agents
 .claude/skills/            book-writer
 .github/workflows/         CI: properdocs build test + Pages deploy

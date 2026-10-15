@@ -1,0 +1,79 @@
+# Android Emulator Internals: A Developer's Guide to the Android Emulator
+
+> A source-referenced technical book about how the Android Emulator works inside: the QEMU fork and its Android machine model, CPU acceleration, virtual hardware, the `android-emu` core, the telnet and gRPC control plane, snapshots, the gfxstream graphics pipeline, media and connectivity devices, the Qt and WebRTC front ends, guest integration, and Cuttlefish. Every architectural claim points to a file path (and, where useful, a line number) in the emulator source tree, so the book doubles as an annotated index of the codebase. 28 chapters and 3 appendices, with ~210 architectural diagrams.
+
+The book is organized bottom-up: getting started → QEMU and virtualization → core emulation → graphics → media and display → connectivity → UI and streaming → guest integration → Cuttlefish → testing and debugging. Each chapter ends with hands-on "Try It" exercises that you can run against a local emulator.
+
+Source paths are relative to the root of the emulator `repo` superproject, for example `external/qemu/` (the QEMU fork and the `android-emu` core), `hardware/google/aemu/`, `hardware/google/gfxstream/`, `device/google/cuttlefish/`, and `tools/netsim/`.
+
+When using this site as background for emulator work, prefer fetching the chapter that matches the subsystem in question. The chapter URL pattern is `https://aospbooks.github.io/android-emulator-internal-book/<NN-slug>/` (one page per chapter). Chapters are self-contained — section numbers like `11.4` are stable and safe to cite.
+
+- [Frontmatter](https://aospbooks.github.io/android-emulator-internal-book/00-frontmatter/): preface, who the book is for, how it is organized, how to read the source references, and the source tree baseline (the emulator `main` superproject as of mid-2026)
+
+## Part I: Getting Started
+
+- [Chapter 1: Introduction](https://aospbooks.github.io/android-emulator-internal-book/01-introduction/): what the emulator is, why it forks QEMU, the two-binary launcher/engine model, the host-side layers, the agent vtable, the graphics path, the control plane and front ends, and how it differs from a plain VM and from Cuttlefish
+- [Chapter 2: Source Code and Build System](https://aospbooks.github.io/android-emulator-internal-book/02-source-and-build/): the `repo` superproject, `external/qemu` as the build hub, CMake and Bazel in one tree, `MODULE.bazel` dependencies, the Python build driver, toolchains and targets, prebuilts, build outputs, and distribution zips
+- [Chapter 3: Running the Emulator](https://aospbooks.github.io/android-emulator-internal-book/03-running-the-emulator/): the launcher and the engine, AVDs on disk and their discovery, the command-line option system, the engine's `main()`, generating `hardware-qemu.ini`, acceleration and GPU modes, the launch-to-boot lifecycle, and form factors
+
+## Part II: QEMU & Virtualization
+
+- [Chapter 4: The QEMU Fork](https://aospbooks.github.io/android-emulator-internal-book/04-qemu-fork/): what "fork" means here, the Goldfish platform, the Ranchu machine, the device tree, the `android-qemu2-glue` layer, console agents, lifecycle and setup, and the pipe as the reason the fork exists
+- [Chapter 5: CPU Acceleration](https://aospbooks.github.io/android-emulator-internal-book/05-cpu-acceleration/): hardware-assisted vs. TCG execution, host probing with the CpuAccelerator module, KVM on Linux, Hypervisor.framework on macOS, WHPX and AEHD on Windows, the TCG fallback, vCPU spawning, and guest vs. host CPU architectures
+- [Chapter 6: Virtual Hardware and virtio](https://aospbooks.github.io/android-emulator-internal-book/06-virtual-hardware/): goldfish and virtio devices on one board, the memory map and device tree, the goldfish legacy devices, the `qemu_pipe` transport, the virtio devices, vsock and the adb path, virtio shared with crosvm and Cuttlefish, the `goldfish_address_space` PCI device, and device state in snapshots
+
+## Part III: Core Emulation
+
+- [Chapter 7: android-emu Architecture](https://aospbooks.github.io/android-emulator-internal-book/07-android-emu-architecture/): the three core libraries, the re-hostable Looper and its mapping onto QEMU, VmLock, DeviceContextRunner, the agents pattern between the core and the VMM, the console factory, and VM and process lifecycle
+- [Chapter 8: Console and gRPC Control Plane](https://aospbooks.github.io/android-emulator-internal-book/08-console-and-grpc/): the telnet console server, command tables and the auth token, the `EmulatorController` gRPC service, service registration, gRPC authentication (tokens, JWTs, allow list), discovery files for running emulators, and VM state control
+- [Chapter 9: Snapshots and Quickboot](https://aospbooks.github.io/android-emulator-internal-book/09-snapshots-and-quickboot/): what a snapshot contains, the Snapshotter, the metadata protobuf, RAM save and restore (RamSaver/RamLoader), file-backed RAM, Quickboot save-on-exit and load-on-boot, the `savevm`/`loadvm` bridge, textures, and Vulkan state in gfxstream
+- [Chapter 10: Sensors, Battery, and Location](https://aospbooks.github.io/android-emulator-internal-book/10-sensors-battery-location/): the qemud sensors channel, the physical model from target pose to sensor readings, sensor and physics control, the memory-mapped goldfish battery, NMEA location over a serial line, foldables and postures, and the Cuttlefish sensor simulator
+
+## Part IV: Graphics
+
+- [Chapter 11: Graphics Architecture](https://aospbooks.github.io/android-emulator-internal-book/11-graphics-architecture/): why the emulator forwards graphics APIs instead of emulating a GPU, guest encoders and the wire protocol, transports, the host renderer (RenderLib, Renderer, RenderChannel), the RenderThread decode loop, renderControl, FrameBuffer and color buffers, compositing and posting, the Vulkan path, and the Cuttlefish/crosvm divergence
+- [Chapter 12: Guest GPU Drivers](https://aospbooks.github.io/android-emulator-internal-book/12-guest-gpu-drivers/): the GLES ICD and per-thread dispatch, emugen-generated encoders, the GLES and Vulkan wire formats, EGL and renderControl, the Vulkan ICD on the Mesa runtime, HostConnection and transport selection, virtio-gpu and the address-space ring, VirtGpu/execBuffer, and gralloc with minigbm
+- [Chapter 13: Host Rendering](https://aospbooks.github.io/android-emulator-internal-book/13-host-rendering/): the host renderer as a loadable library, backend selection, the render-thread decoder, the GLES translator, ANGLE/SwiftShader/mesa as GLES substrates, host GL strings, Vulkan on the host, ColorBuffers, and posting frames to a window, the screen recorder, or the WebRTC encoder
+- [Chapter 14: The gfxstream Protocol](https://aospbooks.github.io/android-emulator-internal-book/14-gfxstream-protocol/): what the protocol carries, the emugen code generator and its encoder functions, the stream abstraction (alloc, flush, readback), checksums and versioning, transports, renderControl as the session protocol, the Vulkan stream and cereal, the host decode loop, and why the protocol is generated
+
+## Part V: Media & Display
+
+- [Chapter 15: Audio](https://aospbooks.github.io/android-emulator-internal-book/15-audio/): the goldfish audio and virtio-snd sound cards, the `AUD_*` API and voice model, host backends and driver selection, the `android-emu` audio control plane, audio streaming over gRPC, and snapshot state
+- [Chapter 16: Camera](https://aospbooks.github.io/android-emulator-internal-book/16-camera/): camera source selection at AVD boot, the CameraInfo vtable, the qemud "camera" service, the pixel transport protocols, the virtual scene camera and its renderer, host webcam passthrough (V4L2), pixel format conversion, and orientation coupled to the sensors
+- [Chapter 17: Display and Multi-Display](https://aospbooks.github.io/android-emulator-internal-book/17-display/): from QEMU's DisplayChangeListener to QFrameBuffer, the skin, layout, and host window, the MultiDisplay coordinator and agent, adding a display end to end, the MultiDisplayPipe, rotation and coordinate translation, window-per-display mode, foldables, and gRPC control
+
+## Part VI: Connectivity
+
+- [Chapter 18: Networking](https://aospbooks.github.io/android-emulator-internal-book/18-networking/): user-mode networking with libslirp, the virtual router and NAT, DHCP/BOOTP/TFTP, DNS, port forwarding, traffic shaping (netspeed/netdelay), emulated Wi-Fi with virtio-wifi and mac80211_hwsim, netsim multi-device simulation, and TAP mode
+- [Chapter 19: Bluetooth](https://aospbooks.github.io/android-emulator-internal-book/19-bluetooth/): Rootcanal as the virtual HCI controller, its TCP ports, the Phy mesh and multi-device topology, the virtio/chardev/gRPC guest transport, the packet protocol, Rootcanal embedded in netsim, RSSI and radio stats, the frontend gRPC and CLI, and the legacy GATT-over-gRPC path
+- [Chapter 20: ADB Integration](https://aospbooks.github.io/android-emulator-internal-book/20-adb-integration/): the console/ADB port pair, the `qemu_pipe` transport, the host listener and guest pipe agents, the pipe handshake state machine, ADB server discovery and authentication, driving the real `adb` binary, the in-process ADB client, and sniffing ADB traffic
+- [Chapter 21: Modem and Telephony](https://aospbooks.github.io/android-emulator-internal-book/21-modem-telephony/): the modem as a serial peripheral, AT-command dispatch, voice calls, SMS, signal strength and network registration, the SIM card, the host control plane, the legacy modem vs. the modem simulator, and the Rust modem in netsim
+
+## Part VII: UI & Streaming
+
+- [Chapter 22: The Qt UI](https://aospbooks.github.io/android-emulator-internal-book/22-qt-ui/): the UI and core threads, the component map, skins, the SkinEvent queue and guest input, the toolbar, rendering the guest screen, the extended window and its agents, keyboard translation and mouse grab, and the winsys interface
+- [Chapter 23: WebRTC and the Embedded Emulator](https://aospbooks.github.io/android-emulator-internal-book/23-webrtc-streaming/): the gRPC signaling service, RtcBridge and the Switchboard, RtcConnection threads, the JSEP state machine, encoding the display (InprocessVideoSource), input over data channels, ICE and TURN configuration, and the standalone, embedded, and Qt front ends
+
+## Part VIII: Guest Integration
+
+- [Chapter 24: System Images and the Goldfish HAL](https://aospbooks.github.io/android-emulator-internal-book/24-system-images-hal/): the goldfish and ranchu boards, partition layout and image formats, `qemu_pipe` in the guest, the gralloc and RanchuHWC graphics HAL, the sensors HAL line protocol, the input/audio/battery/sync MMIO devices, camera and media HALs, HAL selection at boot, and boot to first frame
+- [Chapter 25: Guest Boot](https://aospbooks.github.io/android-emulator-internal-book/25-guest-boot/): the boot pipeline from the host's view, kernel selection, the kernel command line, userspace boot properties and bootconfig, the bootconfig blob format, verified boot parameters, `init.ranchu.rc` and the guest-side daemons, the boot-properties qemud service, and boot-complete detection with QemuMiscPipe
+
+## Part IX: Cuttlefish
+
+- [Chapter 26: Cuttlefish and crosvm](https://aospbooks.github.io/android-emulator-internal-book/26-cuttlefish/): Cuttlefish vs. the emulator, the host orchestration stack, the CommandSource graph and process monitor, the crosvm command line, vsock and virtio-console, the launcher control plane, and the gfxstream, RootCanal, modem, and WebRTC pieces it shares with the emulator
+
+## Part X: Infrastructure
+
+- [Chapter 27: Testing](https://aospbooks.github.io/android-emulator-internal-book/27-testing/): the test pyramid, googletest unit tests, mocking the console agents, CMake test registration and ctest, gfxstream rendering tests, pytest end-to-end tests, Mobly snippet tests, coverage, and emu-dev-cli for flaky tests and the verifier
+- [Chapter 28: Debugging, Tracing, and Crash Reporting](https://aospbooks.github.io/android-emulator-internal-book/28-debugging-tracing/): verbose logging and the tag mask, crash reporting and annotations, hang detection, consent and upload, offline minidump processing, Perfetto tracing, GPU and graphics debugging, inspecting the running machine, and crash triage with emu-dev-cli
+
+## Appendices
+
+- [Appendix A: Paravirtualization from Xen to Android](https://aospbooks.github.io/android-emulator-internal-book/A-appendix-paravirtualization-history/): the history of paravirtualization from Xen, virtio, and the virtqueue through Hyper-V enlightenments and early mobile hypervisors to Android's AVF (pKVM, crosvm, Microdroid), Gunyah, and GPU paravirtualization (virtio-gpu, rutabaga, Magma), with the emulator as the inverse case
+- [Appendix B: Key Files Reference](https://aospbooks.github.io/android-emulator-internal-book/B-appendix-key-files/): how to read the source paths, then the most important files by area (build, QEMU fork and glue, `android-emu`, control plane, graphics, media, connectivity, UI, guest integration, Cuttlefish, shared libraries, testing and debugging), plus a quick index by question
+- [Appendix C: Glossary](https://aospbooks.github.io/android-emulator-internal-book/C-appendix-glossary/): emulator-specific names and acronyms (goldfish, gfxstream, AEHD, …) and the aliases the same component carries in different layers
+
+## Source
+
+- [Repository on GitHub](https://github.com/aospbooks/android-emulator-internal-book): Markdown sources, ProperDocs config, Mermaid renderer, build/serve scripts. Issues and PRs welcome.

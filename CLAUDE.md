@@ -1,6 +1,6 @@
 # Android Emulator Internals Book
 
-28 chapters + 2 appendices, source-referenced against the Android Emulator tree,
+28 chapters + 3 appendices, source-referenced against the Android Emulator tree,
 served as a ProperDocs (MkDocs fork) Material website with Mermaid diagrams.
 
 ## Quick Start
@@ -36,6 +36,7 @@ docker compose up -d serve         # http://localhost:8001
 8. **Do not add epigraph blockquotes at the top of chapters.** The chapter goes straight into its introductory paragraph after the title.
 9. **Verify mermaid format parses after every edit.** Run `./serve.sh png NN-slug.md` on every chapter whose Mermaid blocks you touched and confirm the output reports `errors=0`. The CI `properdocs build` does NOT validate Mermaid (the live site renders it client-side), so a parse error reaches readers as a "Syntax error" banner with no build-time signal. Treat `errors=0` as a hard precondition.
 10. **Visually verify mermaid diagrams after writing or editing them.** Parse-clean is not enough — diagrams can render with text overflowing rectangles, overlapping nodes, or be factually wrong about the architecture. After rule 9 passes, inspect each PNG under `.mermaid-png/<slug>/`. Check: (a) every label fits inside its shape; (b) no nodes or edge labels overlap; (c) the boxes, arrows, and grouping match the architecture the prose describes.
+11. **Keep `llms.txt` in sync with chapter content.** `llms.txt` (root of repo, symlinked into `docs/` and published at `https://aospbooks.github.io/android-emulator-internal-book/llms.txt`) is the [llmstxt.org](https://llmstxt.org/)-style index that AI agents read to learn what is in this book and which chapter covers a subsystem. Update it when chapters are **added, removed, renamed, or significantly retitled**, and when a chapter's scope changes enough that its one-line description no longer fits. Each entry has the form `- [Chapter N: Title](https://aospbooks.github.io/android-emulator-internal-book/<slug>/): one-line description`, grouped under the same Part headings as the `properdocs.yml` nav. Do *not* update it for routine edits inside a chapter. When editing, confirm every URL still resolves to a real `<slug>.md` in the repo root.
 
 ## CI
 

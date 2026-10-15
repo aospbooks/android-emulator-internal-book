@@ -24,21 +24,27 @@ The book is served via ProperDocs with the Material theme. When chapter content 
    ```bash
    ln -sf "../NN-slug.md" "docs/NN-slug.md"
    ```
-4. If the chapter number changes existing chapters, renumber the affected `properdocs.yml` entries too
+4. Add a chapter entry to `llms.txt` in the correct Part section, in chapter order:
+   ```markdown
+   - [Chapter N: Title](https://aospbooks.github.io/android-emulator-internal-book/NN-slug/): one-line description of what the chapter covers
+   ```
+5. If the chapter number changes existing chapters, renumber the affected `properdocs.yml` entries and `llms.txt` URLs too
 
 ### When you remove a chapter
 
 1. Delete the `.md` file
 2. Remove its entry from `properdocs.yml` nav
 3. Remove the symlink from `docs/`
-4. Renumber subsequent chapters if needed (in filenames, `properdocs.yml`, and section headings inside the files)
+4. Remove the matching `llms.txt` entry
+5. Renumber subsequent chapters if needed (in filenames, `properdocs.yml`, `llms.txt`, and section headings inside the files)
 
 ### When you rename or reorder chapters
 
 1. Rename the `.md` file
 2. Update the `properdocs.yml` nav entry (both the label and the filename)
 3. Update the `docs/` symlink
-4. Update all `## N.x` section headings inside the file to match the new chapter number
+4. Update the `llms.txt` entry (label, URL slug, and the one-line description if scope changed)
+5. Update all `## N.x` section headings inside the file to match the new chapter number
 
 ### properdocs.yml nav structure
 
